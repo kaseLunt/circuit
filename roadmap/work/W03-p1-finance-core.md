@@ -107,18 +107,23 @@ Every `TransactionStep` amount is exactly one of:
 
 The fork suite seeds pre-existing balances (eETH, weETH, WETH) on the strategy wallet and
 induces a rebase between steps via this exact, fully-specified mutation contract:
-1. locate the `totalPooledEther` storage word empirically — scan the LiquidityPool proxy's
-   first 256 slots at the fork block for the unique word equal to `getTotalPooledEther()`;
-   assert exactly one match (test fails on zero or multiple);
-2. compute `newValue = floor(oldValue * 10100 / 10000)` (+1.0000%, bit-preserving for the
-   word's other bits if the field shares a slot — assert the field occupies the full word,
-   else fail);
-3. `anvil_setStorageAt(slot, newValue)`; assert `getTotalPooledEther()` returns exactly
-   `newValue`, assert slots `slot-1` and `slot+1` are byte-identical to their pre-mutation
-   values, and assert `eETH.totalShares()` is unchanged;
+1. locate the packed accounting word empirically — `getTotalPooledEther()` is the sum of
+   two packed `uint128` fields (`totalValueOutOfLp` + `totalValueInLp`, per the matrix §7
+   source); scan the LiquidityPool proxy's first 256 slots at the fork block for the unique
+   word where `uint128(word) + uint128(word >> 128) == getTotalPooledEther()` (excluding
+   trivial zero words); assert exactly one match — on zero or multiple matches the test
+   FAILS with the scan dump recorded (fallback path, only if that failure occurs: perform
+   the rebase by impersonating the LP's authorized rebase caller instead, asserting the
+   same post-conditions);
+2. compute `delta = floor(getTotalPooledEther() / 100)` (+1.0000%); add `delta` to the
+   low-half field, preserving the high half bit-exactly:
+   `newWord = word + delta`, asserting the low half does not overflow into the high half;
+3. `anvil_setStorageAt(slot, newWord)`; assert `getTotalPooledEther()` returns exactly
+   `oldTotal + delta`, assert slots `slot-1` and `slot+1` are byte-identical to their
+   pre-mutation values, and assert `eETH.totalShares()` is unchanged;
 4. re-read `LP.amountForShare(1e18)` and assert it equals
-   `floor(1e18 * newValue / totalShares)`; all subsequent expected-value math uses the
-   re-read rate. The recorded slot id and pre/post words go into the test output.
+   `floor(1e18 * (oldTotal + delta) / totalShares)`; all subsequent expected-value math uses
+   the re-read rate. The recorded slot id and pre/post words go into the test output.
 Invariants:
 
 - Pre-existing **eETH shares** (`eETH.shares(wallet)` attributable to the seed): exact integer
