@@ -768,8 +768,18 @@ def main() -> int:
                     receipts = string_list(data, "evidence_receipts", path)
                     if not receipts:
                         errors.append(f"{path}: achieved work must name evidence_receipts")
+                    # Currency (current == tested fingerprints) is an active-phase
+                    # attainment guarantee (D-006): it catches stale green claims while
+                    # a phase is being worked. Once the phase is Done (active_phase has
+                    # moved on), an achieved item is historical — its receipt stays valid
+                    # as of its immutable tested_commit, and later phases legitimately
+                    # evolve shared inputs (package.json, configs) without unachieving it.
+                    # Recorded-vs-tested integrity is always checked regardless.
+                    in_active_phase = (not active_phase) or (phase == active_phase)
                     for receipt in receipts:
-                        validate_evidence_receipt(snapshot, receipt, object_id, now)
+                        validate_evidence_receipt(
+                            snapshot, receipt, object_id, now, check_currency=in_active_phase
+                        )
                     for invalidation_scope in invalidated:
                         if not any(
                             candidate != path
@@ -783,7 +793,11 @@ def main() -> int:
                     stored = scalar(data, "evidence_fingerprint", path)
                     if not stored:
                         errors.append(f"{path}: achieved without evidence_fingerprint; verify then run doctor.py --stamp {object_id}")
-                    elif invalidated_raw:
+                    elif invalidated_raw and in_active_phase:
+                        # Freshness (stamped fingerprint vs current inputs) is an
+                        # active-phase guarantee (D-006), mirroring the receipt-currency
+                        # scope: a completed phase's attainment is historical and is not
+                        # invalidated by later phases evolving shared inputs.
                         current = evidence_fingerprint(snapshot, data, path)
                         if current != stored:
                             errors.append(f"{path}: evidence INVALIDATED ({stored} != {current})")
