@@ -1,0 +1,7 @@
+@import "tailwindcss";
+
+/* Placeholder until the token-system port (TRANSPLANT.md: globals.css) lands. */
+body {
+  background: #0b0f11;
+  color: #dde6e3;
+}
