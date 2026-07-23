@@ -2,14 +2,20 @@
 
 Decision-record source of truth for contract addresses, risk parameters, and protocol
 mechanics. **Every on-chain value cites a read label in `docs/protocol-matrix-reads.json`,
-regenerated reproducibly by `node scripts/protocol-reads.mjs` — one pinned block, zero
-unexpected failures.** Claims that are not on-chain reads cite a URL. Nothing is hand-typed
+regenerated reproducibly by `node scripts/protocol-reads.mjs` — the script is hard-pinned to
+the fixture block (hash-verified; `--repin` is an explicit separate mode), and reruns are
+byte-identical (the RPC endpoint is serialized as a redacted provider label only).
+77 reads: 76 successes + 1 documented expected revert (`getRevision`, internal getter), zero
+unexpected failures. An archive-capable RPC (`RPC_URL`) is required —
+the block has aged out of public nodes' recent-state windows.** Claims that are not on-chain reads cite a URL. Nothing is hand-typed
 from memory. Scope: the Aave v3 Ethereum **Core** market (not the separate EtherFi/Lido/
 Horizon Aave markets), plus EtherFi and Lido staking tokens.
 
 - **Pinned block:** `25,592,678` · hash `0x7f1f53176578a6df42c94948c10623f002cca61398208c888edce99eaedbf0de` · 2026-07-23T03:14:11Z
-- **RPC:** `https://ethereum-rpc.publicnode.com`
-- **Regenerate:** `node scripts/protocol-reads.mjs` (exits non-zero on any unexpected read failure)
+- **RPC:** archive-capable endpoint via `RPC_URL` (original generation: publicnode while the
+  block was in its recent window; regeneration verified via Alchemy archive)
+- **Regenerate:** `RPC_URL=<archive> node scripts/protocol-reads.mjs` (hash-guards the pinned
+  block; exits non-zero on any unexpected read failure)
 - All risk parameters and caps are point-in-time at the pinned block and change via governance.
 
 ---
@@ -34,6 +40,7 @@ from the anchor in the committed run**:
 | Item | Value | Evidence |
 |---|---|---|
 | Deployed revision | **Aave v3.7** | Implementation mapping, not changelog inference: on-chain EIP-1967 impl `0x728a138A…` (read `Pool implementation (EIP-1967)`) equals the current address-book `POOL_IMPL` (https://github.com/bgd-labs/aave-address-book/blob/main/src/AaveV3Ethereum.sol), and the Aave changelog records **v3.7 Part 2 completing rollout to Ethereum (Core, Lido) on 2026-05-29** (https://aave.com/docs/resources/changelog: v3.6 → 2026-01-09; v3.7 Part 1 → 2026-04-20; v3.7 Part 2 → 2026-05-29). The prior matrix's "v3.6" claim was wrong and is superseded. |
+| Pool impl runtime code hash | `0x530cdbba5eb9487cd5d041bb74b7a1936ad3230bf9e361893ecd025373c7fbe5` | Read `Pool implementation (EIP-1967) — runtime code keccak256`; impl-address mapping pinned to address-book commit `ad35d3403b02ff0b4ce27acc23b92781b44f78f4` (https://github.com/bgd-labs/aave-address-book/blob/ad35d3403b02ff0b4ce27acc23b92781b44f78f4/src/AaveV3Ethereum.sol) |
 | Numeric `getRevision()` | Not externally readable | Read `Pool.getRevision (internal in v3.x — expected revert)` — recorded expected revert |
 | Error model | Custom errors (v3.4+ migrated from `Error(string)` numeric codes) | aave-v3-origin `Errors.sol` (https://github.com/aave-dao/aave-v3-origin/blob/main/src/contracts/protocol/libraries/helpers/Errors.sol); `core/errors.ts` must decode the deployed revision's custom errors first, legacy numeric table as fallback |
 
@@ -45,11 +52,15 @@ from the anchor in the committed run**:
 | LTV / LT / bonus | **93.00% / 95.00% / 1.00%** (9300 / 9500 / 10100) | `eMode1.collateralConfig` |
 | Collateral bitmap | `2952790659` → reserve indices {0,1,7,9,28,29,31}: weETH (idx 28) **is collateral** | `eMode1.collateralBitmap` + `Pool.getReservesList` |
 | Borrowable bitmap | `1` → {WETH (idx 0)} only | `eMode1.borrowableBitmap` |
+| **Isolated category (v3.7)** | **false** | `eMode1.isIsolated (v3.7)` |
+| **LTV-zero bitmap (v3.7)** | **0** (no members) | `eMode1.ltvZeroBitmap (v3.7)` |
 
-**OPEN:** v3.7 may add exclusive/isolated e-mode category semantics beyond the bitmaps read
-here; no additional category-flag getter was enumerated in this run. The P1 fork suite
-empirically validates `setUserEMode` + borrow behavior for category 1, and this item is on the
-P1 read_first list to resolve against v3.7 sources.
+v3.7's category getters are now read directly: category 1 is **not isolated** and has an
+**empty LTV-zero bitmap**. Note: v3.7 **removed legacy reserve-level siloed-borrowing and
+isolation-mode features** (verified absence in the current `IPool` interface,
+https://github.com/aave-dao/aave-v3-origin/blob/main/src/contracts/interfaces/IPool.sol); the
+DataProvider's legacy `getSiloedBorrowing`/`getDebtCeiling` getters answering false/0 are
+compatibility stubs, recorded as such.
 
 ## 4. Reserve parameters (at pinned block; bps: 10000 = 100%)
 
@@ -60,7 +71,9 @@ P1 read_first list to resolve against v3.7 sources.
 | LTV / LT / bonus / reserve factor | 80.50% / 83.00% / 5.00% / 15.00% | `WETH.getReserveConfigurationData` |
 | Flags | collateral ✓ · borrowing ✓ · active ✓ · frozen ✗ · paused ✗ | same + `WETH.getPaused` |
 | Siloed / debt ceiling (isolation) | false / 0 | `WETH.getSiloedBorrowing`, `WETH.getDebtCeiling (isolation)` |
-| Supply cap / supplied / **headroom** | 2,700,000 / 2,074,589.27 / **≈625,410.7 (~23.2% free)** | `WETH.getReserveCaps`, `WETH.aToken.totalSupply` |
+| Supply cap / supplied / **headroom (nominal)** | 2,700,000 / 2,074,589.27 / **≈625,410.7 (~23.2% free)** | `WETH.getReserveCaps`, `WETH.aToken.totalSupply` |
+| aToken scaledTotalSupply | `1941754363263954672923837` | `WETH.aToken.scaledTotalSupply` |
+| vToken scaledTotalSupply | recorded | `WETH.variableDebtToken.scaledTotalSupply` |
 | Borrow cap / borrowed / **headroom** | 2,400,000 / 1,686,976.41 / **≈713,023.6 (~29.7% free)** | `WETH.getReserveCaps`, `WETH.variableDebtToken.totalSupply` |
 | **Available liquidity (virtual accounting)** | ≈334,699.17 WETH | `WETH.getVirtualUnderlyingBalance` (cross-check `WETH.underlying.balanceOf(aToken)` ≈334,699.33 — delta = untracked donations) |
 | Rate strategy params | optimal 92.00%, base 0, slope1 2.35%, slope2 6.00% | `WETH.strategy.getInterestRateDataBps` |
@@ -73,17 +86,30 @@ P1 read_first list to resolve against v3.7 sources.
 | LTV / LT / bonus / reserve factor | 77.50% / 80.00% / 7.00% / 45.00% | `weETH.getReserveConfigurationData` |
 | Flags | collateral ✓ · **borrowing ✗** · active ✓ · frozen ✗ · paused ✗ | same + `weETH.getPaused` |
 | Siloed / debt ceiling | false / 0 | `weETH.getSiloedBorrowing`, `weETH.getDebtCeiling (isolation)` |
-| Supply cap / supplied / **headroom** | 1,100,000 / 1,056,935.82 / **≈43,064.2 (~3.9% free — nearly full)** | `weETH.getReserveCaps`, `weETH.aToken.totalSupply` |
+| Supply cap / supplied / **headroom (nominal)** | 1,100,000 / 1,056,935.82 / **≈43,064.2 (~3.9% free — nearly full)** | `weETH.getReserveCaps`, `weETH.aToken.totalSupply` |
+| aToken scaledTotalSupply | `1055881514564962443046398` | `weETH.aToken.scaledTotalSupply` |
+| vToken scaledTotalSupply | recorded | `weETH.variableDebtToken.scaledTotalSupply` |
 | Borrow cap | 1 (borrowing effectively disabled; legacy debt ≈50.8) | `weETH.getReserveCaps`, `weETH.variableDebtToken.totalSupply` |
 | Available liquidity (virtual) | ≈1,056,884.98 (== `balanceOf(aToken)` exactly) | `weETH.getVirtualUnderlyingBalance` |
 | Rate strategy params | optimal 30.00%, base 1.00%, slope1 7.00%, slope2 300.00% | `weETH.strategy.getInterestRateDataBps` |
+
+**Exact cap formulas (v3.7 `ValidationLogic`,
+https://github.com/aave-dao/aave-v3-origin/blob/main/src/contracts/protocol/libraries/logic/ValidationLogic.sol):**
+supply cap passes iff `(aToken.scaledTotalSupply() + scaledAmount + accruedToTreasury)` scaled
+up by `nextLiquidityIndex` (aToken-balance rounding) `<= supplyCap x 10^decimals`; borrow cap
+iff `(currScaledVariableDebt + amountScaled)` scaled by `nextVariableBorrowIndex`
+`<= borrowCap x assetUnit`. Nominal headroom above is display-level; plan validation uses
+these formulas with the recorded scaled values. **Price-oracle-sentinel: no sentinel check
+exists in v3.7 `validateBorrow` (verified absence)** — sentinel state is not a constraint for
+this market.
 
 > **Plan-validation consequences (SPEC §5.7):** weETH supply-cap headroom is the binding
 > mainnet constraint; WETH borrow validation must additionally respect **available liquidity**
 > (virtual balance), not just cap headroom. Both reserves are non-siloed, non-isolated at the
 > pinned block. The recorded constraint set for the pinned revision: active/frozen/paused,
 > borrowing-enabled, supply+borrow caps with headroom, available (virtual) liquidity, e-mode
-> membership bitmaps, siloed/isolation state, user collateral-enable state.
+> membership bitmaps (incl. isolated-category flag and LTV-zero bitmap), user collateral-enable
+> state. Legacy siloed/isolation checks are **not** in the set — removed in v3.7.
 
 ## 5. Oracle (at pinned block)
 
@@ -148,9 +174,7 @@ phase does.
 
 ## 9. OPEN items (tracked, not guessed)
 
-1. v3.7 exclusive/isolated e-mode semantics beyond the read bitmaps (§3) — resolve in P1
-   against v3.7 sources before `setUserEMode` logic lands.
-2. EtherFi deployed-impl ↔ repo-master byte equivalence (§7) — empirically pinned by the P1
+1. EtherFi deployed-impl ↔ repo-master byte equivalence (§7) — empirically pinned by the P1
    fork suite.
-3. Numeric `Pool.getRevision()` — not externally readable (recorded expected revert); revision
+2. Numeric `Pool.getRevision()` — not externally readable (recorded expected revert); revision
    claim rests on the implementation mapping + changelog (§2).

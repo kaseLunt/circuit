@@ -1,7 +1,7 @@
 {
  "meta": {
   "generated_by": "scripts/protocol-reads.mjs",
-  "rpc": "https://ethereum-rpc.publicnode.com",
+  "rpc": "eth-mainnet.g.alchemy.com (path/credentials redacted)",
   "pinned_block": {
    "number": "25592678",
    "hash": "0x7f1f53176578a6df42c94948c10623f002cca61398208c888edce99eaedbf0de",
@@ -66,6 +66,13 @@
    "fn": "eth_getStorageAt(EIP-1967 impl slot)",
    "args": [],
    "result": "0x728a138A4823392C2EFA55e028d434F526fE03CF"
+  },
+  {
+   "label": "Pool implementation (EIP-1967) — runtime code keccak256",
+   "to": "0x728a138A4823392C2EFA55e028d434F526fE03CF",
+   "fn": "keccak256(eth_getCode)",
+   "args": [],
+   "result": "0x530cdbba5eb9487cd5d041bb74b7a1936ad3230bf9e361893ecd025373c7fbe5"
   },
   {
    "label": "Pool.getRevision (internal in v3.x — expected revert)",
@@ -308,11 +315,25 @@
    "result": "2074589272086489883571186"
   },
   {
+   "label": "WETH.aToken.scaledTotalSupply",
+   "to": "0x4d5F47FA6A74757f35C14fD3a6Ef8E3C9BC514E8",
+   "fn": "scaledTotalSupply",
+   "args": [],
+   "result": "1941754363263954672923837"
+  },
+  {
    "label": "WETH.variableDebtToken.totalSupply",
    "to": "0xeA51d7853EEFb32b6ee06b1C12E6dcCA88Be0fFE",
    "fn": "totalSupply",
    "args": [],
    "result": "1686976405253926484032863"
+  },
+  {
+   "label": "WETH.variableDebtToken.scaledTotalSupply",
+   "to": "0xeA51d7853EEFb32b6ee06b1C12E6dcCA88Be0fFE",
+   "fn": "scaledTotalSupply",
+   "args": [],
+   "result": "1528979449425866809349360"
   },
   {
    "label": "WETH.underlying.balanceOf(aToken)",
@@ -457,11 +478,25 @@
    "result": "1056935824815496555839486"
   },
   {
+   "label": "weETH.aToken.scaledTotalSupply",
+   "to": "0xBdfa7b7893081B35Fb54027489e2Bc7A38275129",
+   "fn": "scaledTotalSupply",
+   "args": [],
+   "result": "1055881514564962443046398"
+  },
+  {
    "label": "weETH.variableDebtToken.totalSupply",
    "to": "0x77ad9BF13a52517AD698D65913e8D381300c8Bf3",
    "fn": "totalSupply",
    "args": [],
    "result": "50807641041949220750"
+  },
+  {
+   "label": "weETH.variableDebtToken.scaledTotalSupply",
+   "to": "0x77ad9BF13a52517AD698D65913e8D381300c8Bf3",
+   "fn": "scaledTotalSupply",
+   "args": [],
+   "result": "49282565651247765408"
   },
   {
    "label": "weETH.underlying.balanceOf(aToken)",
@@ -543,6 +578,24 @@
     1
    ],
    "result": "1"
+  },
+  {
+   "label": "eMode1.isIsolated (v3.7)",
+   "to": "0x87870Bca3F3fD6335C3F4ce8392D69350B4fA4E2",
+   "fn": "getIsEModeCategoryIsolated",
+   "args": [
+    1
+   ],
+   "result": false
+  },
+  {
+   "label": "eMode1.ltvZeroBitmap (v3.7)",
+   "to": "0x87870Bca3F3fD6335C3F4ce8392D69350B4fA4E2",
+   "fn": "getEModeCategoryLtvzeroBitmap",
+   "args": [
+    1
+   ],
+   "result": "0"
   },
   {
    "label": "Oracle.BASE_CURRENCY_UNIT",
@@ -637,6 +690,13 @@
    "result": "0x17A16747D03006c9754548AC0d0afF48783A4a45"
   },
   {
+   "label": "EtherFi LiquidityPool implementation (EIP-1967) — runtime code keccak256",
+   "to": "0x17A16747D03006c9754548AC0d0afF48783A4a45",
+   "fn": "keccak256(eth_getCode)",
+   "args": [],
+   "result": "0xd1b9b7d71c5fad098b7e3877a3cb976f6851b8de99f8011744fd8695a8a61227"
+  },
+  {
    "label": "eETH implementation (EIP-1967)",
    "to": "0x35fA164735182de50811E8e2E824cFb9B6118ac2",
    "fn": "eth_getStorageAt(EIP-1967 impl slot)",
@@ -644,11 +704,25 @@
    "result": "0xd1901dD36CBf4a81386d0162DF2707f7dDb60527"
   },
   {
+   "label": "eETH implementation (EIP-1967) — runtime code keccak256",
+   "to": "0xd1901dD36CBf4a81386d0162DF2707f7dDb60527",
+   "fn": "keccak256(eth_getCode)",
+   "args": [],
+   "result": "0xb38468c20c9f84fb21e6488763f10d02c64722e3800d01114438ab67b76a8b08"
+  },
+  {
    "label": "weETH implementation (EIP-1967)",
    "to": "0xCd5fE23C85820F7B72D0926FC9b05b43E359b7ee",
    "fn": "eth_getStorageAt(EIP-1967 impl slot)",
    "args": [],
    "result": "0xA6Ca0607190d03CF16fe6F2865Cf40c3D160ccf3"
+  },
+  {
+   "label": "weETH implementation (EIP-1967) — runtime code keccak256",
+   "to": "0xA6Ca0607190d03CF16fe6F2865Cf40c3D160ccf3",
+   "fn": "keccak256(eth_getCode)",
+   "args": [],
+   "result": "0xd43182be0eba15468f2e3f33cfe55685c9fcdda6c306156c046b6c4b076f52e7"
   },
   {
    "label": "weETH.getRate",

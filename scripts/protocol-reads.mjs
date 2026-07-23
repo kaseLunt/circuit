@@ -16,10 +16,25 @@
  * Run:  node scripts/protocol-reads.mjs            (RPC_URL env to override)
  */
 import { writeFileSync } from "node:fs";
-import { createPublicClient, http, parseAbi, getAddress } from "viem";
+import { createPublicClient, http, parseAbi, getAddress, keccak256 } from "viem";
 import { mainnet } from "viem/chains";
 
-const RPC = process.env.RPC_URL ?? "https://ethereum-rpc.publicnode.com";
+const RPC = process.env.RPC_URL;
+if (!RPC) {
+  console.error("FATAL: RPC_URL is required (archive-capable; the pinned block is historical). Never commit the URL.");
+  process.exit(1);
+}
+// Only a redacted provider label is ever serialized -- credentials must not enter the repo.
+const RPC_LABEL = `${new URL(RPC).hostname} (path/credentials redacted)`;
+// The pinned fixture. Default mode reads exactly this block and verifies its hash;
+// an archive-capable RPC is REQUIRED once the block ages out of the node's recent-state
+// window. Pass --repin to move the fixture (prints the new pin; update these constants
+// and regenerate the matrix in the same commit).
+const PIN = {
+  number: 25592678n,
+  hash: "0x7f1f53176578a6df42c94948c10623f002cca61398208c888edce99eaedbf0de",
+};
+const REPIN = process.argv.includes("--repin");
 
 // Anchors. Sources: bgd-labs/aave-address-book src/AaveV3Ethereum.sol
 // (POOL_ADDRESSES_PROVIDER, *_UNDERLYING), Lido deployed-contracts docs,
@@ -46,6 +61,8 @@ const abis = {
     "function getACLManager() view returns (address)",
   ]),
   pool: parseAbi([
+    "function getIsEModeCategoryIsolated(uint8) view returns (bool)",
+    "function getEModeCategoryLtvzeroBitmap(uint8) view returns (uint128)",
     "function ADDRESSES_PROVIDER() view returns (address)",
     "function getReservesList() view returns (address[])",
     "function getEModeCategoryLabel(uint8) view returns (string)",
@@ -78,6 +95,7 @@ const abis = {
     "function decimals() view returns (uint8)",
     "function latestAnswer() view returns (int256)",
   ]),
+  atoken: parseAbi(["function scaledTotalSupply() view returns (uint256)"]),
   erc20: parseAbi([
     "function symbol() view returns (string)",
     "function decimals() view returns (uint8)",
@@ -137,12 +155,24 @@ async function implSlot(label, address, blockNumber) {
   const raw = await client.getStorageAt({ address, slot: EIP1967_IMPL_SLOT, blockNumber });
   const impl = getAddress(`0x${raw.slice(-40)}`);
   reads.push({ label, to: address, fn: "eth_getStorageAt(EIP-1967 impl slot)", args: [], result: impl });
+  const code = await client.getCode({ address: impl, blockNumber });
+  reads.push({ label: `${label} — runtime code keccak256`, to: impl, fn: "keccak256(eth_getCode)", args: [], result: keccak256(code) });
   return impl;
 }
 
 // ---- pin the block -----------------------------------------------------------
-const latest = await client.getBlock();
-const pinned = await client.getBlock({ blockNumber: latest.number - 64n });
+let pinned;
+if (REPIN) {
+  const latest = await client.getBlock();
+  pinned = await client.getBlock({ blockNumber: latest.number - 64n });
+  console.log(`REPIN MODE: new fixture block ${pinned.number} hash ${pinned.hash} — update PIN in this script and regenerate everything in one commit`);
+} else {
+  pinned = await client.getBlock({ blockNumber: PIN.number });
+  if (pinned.hash !== PIN.hash) {
+    console.error(`FATAL: block ${PIN.number} hash ${pinned.hash} != pinned ${PIN.hash}`);
+    process.exit(1);
+  }
+}
 const B = pinned.number;
 console.log(`pinned block ${B} (${pinned.hash}) @ ${new Date(Number(pinned.timestamp) * 1000).toISOString()}`);
 
@@ -174,11 +204,13 @@ for (const [sym, asset] of Object.entries({ WETH: A.WETH, weETH: A.weETH })) {
   const tokens = await read(`${sym}.getReserveTokensAddresses`, { address: DATA, abi: abis.data, functionName: "getReserveTokensAddresses", args: [asset], blockNumber: B });
   await read(`${sym}.getReserveData`, { address: DATA, abi: abis.data, functionName: "getReserveData", args: [asset], blockNumber: B });
   await read(`${sym}.aToken.totalSupply`, { address: tokens[0], abi: abis.erc20, functionName: "totalSupply", blockNumber: B });
+  await read(`${sym}.aToken.scaledTotalSupply`, { address: tokens[0], abi: abis.atoken, functionName: "scaledTotalSupply", blockNumber: B });
   await read(`${sym}.variableDebtToken.totalSupply`, { address: tokens[2], abi: abis.erc20, functionName: "totalSupply", blockNumber: B });
+  await read(`${sym}.variableDebtToken.scaledTotalSupply`, { address: tokens[2], abi: abis.atoken, functionName: "scaledTotalSupply", blockNumber: B });
   await read(`${sym}.underlying.balanceOf(aToken)`, { address: asset, abi: abis.erc20, functionName: "balanceOf", args: [tokens[0]], blockNumber: B });
-  await read(`${sym}.getVirtualUnderlyingBalance`, { address: DATA, abi: abis.data, functionName: "getVirtualUnderlyingBalance", args: [asset], blockNumber: B, exploratory: true });
+  await read(`${sym}.getVirtualUnderlyingBalance`, { address: DATA, abi: abis.data, functionName: "getVirtualUnderlyingBalance", args: [asset], blockNumber: B });
   const strat = await read(`${sym}.getInterestRateStrategyAddress`, { address: DATA, abi: abis.data, functionName: "getInterestRateStrategyAddress", args: [asset], blockNumber: B });
-  await read(`${sym}.strategy.getInterestRateDataBps`, { address: strat, abi: abis.strategy, functionName: "getInterestRateDataBps", args: [asset], blockNumber: B, exploratory: true });
+  await read(`${sym}.strategy.getInterestRateDataBps`, { address: strat, abi: abis.strategy, functionName: "getInterestRateDataBps", args: [asset], blockNumber: B });
 }
 
 // ---- e-mode category 1 ------------------------------------------------------
@@ -186,15 +218,17 @@ await read("eMode1.label", { address: POOL, abi: abis.pool, functionName: "getEM
 await read("eMode1.collateralConfig", { address: POOL, abi: abis.pool, functionName: "getEModeCategoryCollateralConfig", args: [1], blockNumber: B });
 await read("eMode1.collateralBitmap", { address: POOL, abi: abis.pool, functionName: "getEModeCategoryCollateralBitmap", args: [1], blockNumber: B });
 await read("eMode1.borrowableBitmap", { address: POOL, abi: abis.pool, functionName: "getEModeCategoryBorrowableBitmap", args: [1], blockNumber: B });
+await read("eMode1.isIsolated (v3.7)", { address: POOL, abi: abis.pool, functionName: "getIsEModeCategoryIsolated", args: [1], blockNumber: B });
+await read("eMode1.ltvZeroBitmap (v3.7)", { address: POOL, abi: abis.pool, functionName: "getEModeCategoryLtvzeroBitmap", args: [1], blockNumber: B });
 
 // ---- oracle -----------------------------------------------------------------
 await read("Oracle.BASE_CURRENCY_UNIT", { address: ORACLE, abi: abis.oracle, functionName: "BASE_CURRENCY_UNIT", blockNumber: B });
 for (const [sym, asset] of Object.entries({ WETH: A.WETH, weETH: A.weETH })) {
   const src = await read(`Oracle.getSourceOfAsset(${sym})`, { address: ORACLE, abi: abis.oracle, functionName: "getSourceOfAsset", args: [asset], blockNumber: B });
   await read(`Oracle.getAssetPrice(${sym})`, { address: ORACLE, abi: abis.oracle, functionName: "getAssetPrice", args: [asset], blockNumber: B });
-  await read(`OracleSource(${sym}).description`, { address: src, abi: abis.feed, functionName: "description", blockNumber: B, exploratory: true });
-  await read(`OracleSource(${sym}).decimals`, { address: src, abi: abis.feed, functionName: "decimals", blockNumber: B, exploratory: true });
-  await read(`OracleSource(${sym}).latestAnswer`, { address: src, abi: abis.feed, functionName: "latestAnswer", blockNumber: B, exploratory: true });
+  await read(`OracleSource(${sym}).description`, { address: src, abi: abis.feed, functionName: "description", blockNumber: B });
+  await read(`OracleSource(${sym}).decimals`, { address: src, abi: abis.feed, functionName: "decimals", blockNumber: B });
+  await read(`OracleSource(${sym}).latestAnswer`, { address: src, abi: abis.feed, functionName: "latestAnswer", blockNumber: B });
 }
 
 // ---- EtherFi ----------------------------------------------------------------
@@ -203,10 +237,10 @@ await implSlot("eETH implementation (EIP-1967)", A.eETH, B);
 await implSlot("weETH implementation (EIP-1967)", A.weETH, B);
 await read("weETH.getRate", { address: A.weETH, abi: abis.weeth, functionName: "getRate", blockNumber: B });
 await read("LP.eETH (round-trip)", { address: A.ETHERFI_LP, abi: abis.lp, functionName: "eETH", blockNumber: B });
-await read("LP.getTotalPooledEther", { address: A.ETHERFI_LP, abi: abis.lp, functionName: "getTotalPooledEther", blockNumber: B, exploratory: true });
-await read("eETH.totalShares", { address: A.eETH, abi: abis.eeth, functionName: "totalShares", blockNumber: B, exploratory: true });
-await read("LP.amountForShare(1e18)", { address: A.ETHERFI_LP, abi: abis.lp, functionName: "amountForShare", args: [10n ** 18n], blockNumber: B, exploratory: true });
-await read("LP.sharesForAmount(1e18)", { address: A.ETHERFI_LP, abi: abis.lp, functionName: "sharesForAmount", args: [10n ** 18n], blockNumber: B, exploratory: true });
+await read("LP.getTotalPooledEther", { address: A.ETHERFI_LP, abi: abis.lp, functionName: "getTotalPooledEther", blockNumber: B });
+await read("eETH.totalShares", { address: A.eETH, abi: abis.eeth, functionName: "totalShares", blockNumber: B });
+await read("LP.amountForShare(1e18)", { address: A.ETHERFI_LP, abi: abis.lp, functionName: "amountForShare", args: [10n ** 18n], blockNumber: B });
+await read("LP.sharesForAmount(1e18)", { address: A.ETHERFI_LP, abi: abis.lp, functionName: "sharesForAmount", args: [10n ** 18n], blockNumber: B });
 
 // ---- Lido (P1 scope: reference only) ----------------------------------------
 await read("wstETH.stEthPerToken", { address: A.wstETH, abi: abis.wsteth, functionName: "stEthPerToken", blockNumber: B });
@@ -215,7 +249,7 @@ await read("wstETH.stEthPerToken", { address: A.wstETH, abi: abis.wsteth, functi
 const out = {
   meta: {
     generated_by: "scripts/protocol-reads.mjs",
-    rpc: RPC,
+    rpc: RPC_LABEL,
     pinned_block: { number: B.toString(), hash: pinned.hash, timestamp: pinned.timestamp.toString(), iso: new Date(Number(pinned.timestamp) * 1000).toISOString() },
     anchors: A,
     pool: POOL,
