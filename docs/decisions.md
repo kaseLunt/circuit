@@ -41,11 +41,13 @@ and capped.
 
 ### Protocol target: pinned facts
 
-See `docs/protocol-matrix.md` (verified 2026-07-22, block ≈25,592,355): Aave v3 Ethereum Core,
-deployed revision v3.6 (custom errors), e-mode category 1 "ETH correlated" (93% LTV / 95% LT /
-1% bonus; weETH collateral, WETH borrowable), weETH reserve collateral-only at ~96% supply-cap
-utilization (~43k headroom — cap validation is mandatory, SPEC §5.7), WETH reserve with ample
-headroom. Raw read log: `docs/protocol-matrix-reads.json`.
+See `docs/protocol-matrix.md` (regenerated at pinned block 25,592,678; the original 2026-07-22
+version misidentified the revision — see the W04 addendum below): Aave v3 Ethereum Core,
+deployed revision **v3.7** (custom errors), e-mode category 1 "ETH correlated" (93% LTV /
+95% LT / 1% bonus; weETH collateral, WETH borrowable), weETH reserve collateral-only at ~96%
+supply-cap utilization (~43k headroom — cap validation is mandatory, SPEC §5.7), WETH reserve
+with ample headroom. Raw read log: `docs/protocol-matrix-reads.json` (reproducible via
+`scripts/protocol-reads.mjs`).
 
 ## W04 addenda (2026-07-23)
 
