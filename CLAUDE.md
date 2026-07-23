@@ -53,7 +53,11 @@ Serial writer. Work flows through typed objects in `roadmap/` — see `AGENTS.md
 protocol. Commit policy is D-002 (`roadmap/decisions/`): conventional narrative commits, no AI
 attribution trailers, no hook bypasses.
 
-**Senior review (D-004):** Codex reviews everything load-bearing — SPEC changes, every `core/`
-money-math module before its phase-exit receipt, the execution family, and phase boundaries.
-Dispatch via the codex-reviewer agent, resuming the existing Codex session where one exists.
-Record the outcome in the receipt; skipping a warranted review requires a stated reason there.
+**Codex final approval (D-007, supersedes D-004):** complex work MUST receive an explicit Codex
+APPROVAL verdict before it can be marked `achieved` or before its phase may exit — a hard gate,
+not advisory. Complex = any `core/`/money-math, calldata/execution, security-bearing surface,
+protocol-integration correctness, phase boundary, architecture-bearing change, or anything the
+integrator judges load-bearing. If Codex withholds approval, the work is not done: fix and
+re-review (resume the standing Codex session) until approved. The receipt cites the approval
+verdict; the only exception is an explicit, recorded owner override. Trivial/mechanical work
+(docs, formatting, dep bumps, test-only tweaks) is exempt unless it changes complex behavior.
