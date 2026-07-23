@@ -1,0 +1,662 @@
+/**
+ * W03 fork gate: the 13-step SPEC §2 flagship plan executed end-to-end against
+ * the pinned anvil fork (block 25,592,678), with:
+ *   - snapshot capture reproducing the committed reads log byte-for-byte
+ *   - the matrix §7 deposit share model pinned empirically (return value +
+ *     share delta == floor formula)
+ *   - the exact W03 rebase mutation contract between steps
+ *   - HF asserted against Pool.getUserAccountData after every risk-changing
+ *     step (no-debt sentinel exactly; 1e-8 relative once debt exists)
+ *   - the full final-state assertion list (scaled balances, display balances,
+ *     residuals, native accounting, e-mode, collateral flag)
+ *   - post-action reserve rates reproduced via the §5.1 strategy formula
+ *     (reading reserve deficits live — matrix §9 OPEN item 3)
+ */
+import { beforeAll, describe, expect, it } from "vitest";
+import {
+  createPublicClient,
+  decodeEventLog,
+  decodeFunctionResult,
+  encodeEventTopics,
+  encodeFunctionData,
+  getAddress,
+  http,
+  parseAbi,
+  type Address,
+  type Hex,
+  type PublicClient,
+} from "viem";
+import { mainnet } from "viem/chains";
+import { captureChainSnapshot } from "../../src/server/chain/snapshot";
+import {
+  buildPlan,
+  encodeStep,
+  type ChainSnapshot,
+  type PlanSuccess,
+  type TransactionStep,
+} from "../../src/core/plan";
+import { computeHealthFactor, type CollateralEntry } from "../../src/core/health-factor";
+import { currentRatesRay, rayDivCeil, rayDivFloor, rayMulCeil, rayMulFloor } from "../../src/core/rates";
+import type { Block, StrategyGraph } from "../../src/core/graph";
+import { PINNED_BLOCK, PINNED_TS, bigRead, readsMeta } from "../helpers/protocol-reads";
+import { ANVIL_URL } from "./anvil";
+import { TxRevertedError, getStorageWord, nativeBalance, replayRevert, rpc, sendTx, setStorageWord, hexQuantity, type Receipt } from "./harness";
+import { decodeRevert } from "../../src/core/errors";
+
+// ————————————————————————— constants (named per W03) —————————————————————————
+
+const INPUT_ETH = "10";
+const INPUT_WEI = 10n * 10n ** 18n;
+const BORROW_BPS = 7000;
+/** buildPlan on the PRISTINE pinned state must equal the unit fixture. */
+const EXPECTED_PRISTINE_BORROW_WEI = 6999999999994802135n;
+const MAX_UINT256 = 2n ** 256n - 1n;
+/** Aggregate wrap-round-trip dust bound: 2 wraps × ≤1 integer share each. */
+const EETH_DUST_SHARES_AGGREGATE_MAX = 2n;
+const WEETH_RESIDUAL_MAX = 0n;
+const WETH_RESIDUAL_MAX = 0n;
+/** HF agreement bound: 1 part in 1e8, relative (W03 acceptance). */
+const HF_REL_POW = 10n ** 8n;
+/** Post-action rate agreement bound: 1e-6 relative (W03 acceptance). */
+const RATE_REL_POW = 10n ** 6n;
+const SCALED_SUPPLY_BOUND = 2n;
+const SCALED_DEBT_BOUND = 1n;
+const DISPLAY_BOUND = 1n;
+/** Induced rebase: +1.0000% of totalPooledEther (W03 mutation contract). */
+const REBASE_DIVISOR = 100n;
+const STORAGE_SCAN_SLOTS = 256n;
+const U128 = 1n << 128n;
+
+const ABI = {
+  pool: parseAbi([
+    "function getUserAccountData(address) view returns (uint256 totalCollateralBase, uint256 totalDebtBase, uint256 availableBorrowsBase, uint256 currentLiquidationThreshold, uint256 ltv, uint256 healthFactor)",
+    "function getUserEMode(address) view returns (uint256)",
+    "function getReserveNormalizedIncome(address) view returns (uint256)",
+    "function getReserveNormalizedVariableDebt(address) view returns (uint256)",
+    "function getReserveDeficit(address) view returns (uint256)",
+  ]),
+  data: parseAbi([
+    "function getUserReserveData(address,address) view returns (uint256 currentATokenBalance, uint256 currentStableDebt, uint256 currentVariableDebt, uint256 principalStableDebt, uint256 scaledVariableDebt, uint256 stableBorrowRate, uint256 liquidityRate, uint40 stableRateLastUpdated, bool usageAsCollateralEnabled)",
+    "function getReserveData(address) view returns (uint256 unbacked, uint256 accruedToTreasuryScaled, uint256 totalAToken, uint256 totalStableDebt, uint256 totalVariableDebt, uint256 liquidityRate, uint256 variableBorrowRate, uint256 stableBorrowRate, uint256 averageStableBorrowRate, uint256 liquidityIndex, uint256 variableBorrowIndex, uint40 lastUpdateTimestamp)",
+    "function getInterestRateStrategyAddress(address) view returns (address)",
+    "function getVirtualUnderlyingBalance(address) view returns (uint128)",
+    "function getReserveConfigurationData(address) view returns (uint256 decimals, uint256 ltv, uint256 liquidationThreshold, uint256 liquidationBonus, uint256 reserveFactor, bool usageAsCollateralEnabled, bool borrowingEnabled, bool stableBorrowRateEnabled, bool isActive, bool isFrozen)",
+  ]),
+  strategy: parseAbi([
+    "function getInterestRateDataBps(address) view returns ((uint16 optimalUsageRatio, uint32 baseVariableBorrowRate, uint32 variableRateSlope1, uint32 variableRateSlope2))",
+  ]),
+  scaledToken: parseAbi(["function scaledBalanceOf(address) view returns (uint256)"]),
+  erc20: parseAbi(["function balanceOf(address) view returns (uint256)"]),
+  eeth: parseAbi([
+    "function shares(address) view returns (uint256)",
+    "function totalShares() view returns (uint256)",
+    "function approve(address,uint256) returns (bool)",
+  ]),
+  lp: parseAbi([
+    "function deposit() payable returns (uint256)",
+    "function getTotalPooledEther() view returns (uint256)",
+    "function amountForShare(uint256) view returns (uint256)",
+  ]),
+  weeth: parseAbi(["function wrap(uint256) returns (uint256)"]),
+  weth: parseAbi(["function deposit() payable"]),
+  oracle: parseAbi(["function getAssetPrice(address) view returns (uint256)"]),
+  transfer: parseAbi(["event Transfer(address indexed from, address indexed to, uint256 value)"]),
+};
+
+const TRANSFER_TOPIC = encodeEventTopics({ abi: ABI.transfer, eventName: "Transfer" })[0];
+
+// ————————————————————————— fixture graph —————————————————————————
+
+function flagshipGraph(): StrategyGraph {
+  const blocks: Block[] = [
+    { id: "in", type: "input", params: { asset: "ETH", amount: INPUT_ETH } },
+    { id: "stake1", type: "stake", params: { protocol: "etherfi" } },
+    { id: "wrap1", type: "wrap", params: { from: "eETH", to: "weETH" } },
+    { id: "supply1", type: "lend", params: { protocol: "aave-v3", asset: "weETH" } },
+    { id: "borrow", type: "borrow", params: { protocol: "aave-v3", asset: "WETH", allocationBps: BORROW_BPS } },
+    { id: "unwrap", type: "unwrap", params: { from: "WETH", to: "ETH" } },
+    { id: "stake2", type: "stake", params: { protocol: "etherfi" } },
+    { id: "wrap2", type: "wrap", params: { from: "eETH", to: "weETH" } },
+    { id: "supply2", type: "lend", params: { protocol: "aave-v3", asset: "weETH" } },
+  ];
+  const chain = ["in", "stake1", "wrap1", "supply1", "borrow", "unwrap", "stake2", "wrap2", "supply2"];
+  const edges = chain.slice(0, -1).map((source, i) => ({
+    id: `e${i}`,
+    source,
+    target: chain[i + 1]!,
+    allocationBps: 10_000,
+  }));
+  return { blocks, edges };
+}
+
+// ————————————————————————— shared state —————————————————————————
+
+let client: PublicClient;
+let wallet: Address;
+let pristine: ChainSnapshot;
+let seeded: ChainSnapshot;
+let plan: PlanSuccess;
+let dataProvider: Address;
+
+interface ExecutedStep {
+  readonly step: TransactionStep;
+  readonly receipt: Receipt;
+  readonly resolvedAmount: bigint | null;
+  /** eETH share delta for deposit steps. */
+  readonly sharesDelta: bigint | null;
+}
+const executed = new Map<string, ExecutedStep>();
+const supplyRecords: Array<{ stepId: string; amountWei: bigint; blockNumber: bigint }> = [];
+let borrowRecord: { amountWei: bigint; blockNumber: bigint } | null = null;
+const hfWithDebt: bigint[] = [];
+let planGasPaid = 0n;
+let seedShares = 0n;
+let seedWeETH = 0n;
+let seedWETH = 0n;
+let nativeAfterSeeding = 0n;
+
+function relWithin(actual: bigint, expected: bigint, pow: bigint): boolean {
+  const diff = actual > expected ? actual - expected : expected - actual;
+  return diff * pow <= expected;
+}
+
+function read<T>(args: {
+  address: Address;
+  abi: typeof ABI[keyof typeof ABI];
+  functionName: string;
+  fnArgs?: readonly unknown[];
+  blockNumber?: bigint;
+}): Promise<T> {
+  return client.readContract({
+    address: args.address,
+    abi: args.abi as never,
+    functionName: args.functionName as never,
+    args: (args.fnArgs ?? []) as never,
+    ...(args.blockNumber !== undefined ? { blockNumber: args.blockNumber } : {}),
+  }) as Promise<T>;
+}
+
+function transferValueTo(receipt: Receipt, token: Address, to: Address): bigint {
+  let total = 0n;
+  let matches = 0;
+  for (const log of receipt.logs) {
+    if (getAddress(log.address) !== getAddress(token)) continue;
+    if (log.topics[0] !== TRANSFER_TOPIC) continue;
+    const decoded = decodeEventLog({
+      abi: ABI.transfer,
+      data: log.data,
+      topics: log.topics as [Hex, ...Hex[]],
+    });
+    if (getAddress(decoded.args.to) === getAddress(to)) {
+      total += decoded.args.value;
+      matches += 1;
+    }
+  }
+  if (matches === 0) {
+    throw new Error(`no Transfer(→wallet) on ${token} in tx ${receipt.txHash}`);
+  }
+  return total;
+}
+
+/** Token whose Transfer event attributes a producer step's output. */
+function outputTokenOf(step: TransactionStep): Address {
+  if (step.functionName === "wrap") return step.to;
+  if (step.functionName === "borrow") {
+    const asset = step.args[0];
+    if (asset !== undefined && asset.kind === "value" && typeof asset.value === "string") {
+      return getAddress(asset.value);
+    }
+  }
+  throw new Error(`no transfer-event output token for step ${step.id}`);
+}
+
+async function resolveAmount(step: TransactionStep): Promise<bigint | null> {
+  const spec = step.amount;
+  if (spec.kind === "none") return null;
+  if (spec.kind === "literal" || spec.kind === "derived") return spec.amount.value;
+  const producer = executed.get(spec.producerStepId);
+  if (producer === undefined) throw new Error(`producer ${spec.producerStepId} not executed`);
+  let output: bigint;
+  switch (spec.attribution) {
+    case "share-delta": {
+      if (producer.sharesDelta === null) throw new Error(`${spec.producerStepId} has no share delta`);
+      // Convert rebase-invariant shares to an amount at CONSUMPTION time — this
+      // is what survives the induced rebase between producer and consumer.
+      output = await read<bigint>({
+        address: seeded.etherfi.liquidityPool,
+        abi: ABI.lp,
+        functionName: "amountForShare",
+        fnArgs: [producer.sharesDelta],
+      });
+      break;
+    }
+    case "transfer-event":
+      output = transferValueTo(producer.receipt, outputTokenOf(producer.step), wallet);
+      break;
+    case "withdraw-argument":
+      if (producer.resolvedAmount === null) throw new Error(`${spec.producerStepId} has no amount`);
+      output = producer.resolvedAmount;
+      break;
+    case "return-value":
+      throw new Error("return-value attribution is not used by the flagship plan");
+  }
+  if (spec.allocationBps === 10_000) return output;
+  return (output * BigInt(spec.allocationBps)) / 10_000n;
+}
+
+async function executeStep(step: TransactionStep): Promise<ExecutedStep> {
+  const resolved = await resolveAmount(step);
+  const encoded =
+    step.amount.kind === "step-output" ? encodeStep(step, resolved!) : encodeStep(step);
+  const preShares =
+    step.functionName === "deposit"
+      ? await read<bigint>({ address: seeded.etherfi.eETH, abi: ABI.eeth, functionName: "shares", fnArgs: [wallet] })
+      : null;
+  let receipt: Receipt;
+  try {
+    receipt = await sendTx({ from: wallet, to: encoded.to, data: encoded.data, value: encoded.value });
+  } catch (cause) {
+    if (cause instanceof TxRevertedError) {
+      const revertData = await replayRevert(cause.txHash);
+      const decoded =
+        revertData !== null && revertData.startsWith("0x") ? decodeRevert(revertData) : null;
+      throw new Error(
+        `step ${step.id} reverted (${cause.txHash}): ${
+          decoded !== null ? `${decoded.message} [${decoded.raw}]` : String(revertData)
+        }`,
+      );
+    }
+    throw cause;
+  }
+  const sharesDelta =
+    preShares !== null
+      ? (await read<bigint>({ address: seeded.etherfi.eETH, abi: ABI.eeth, functionName: "shares", fnArgs: [wallet] })) - preShares
+      : null;
+  const record: ExecutedStep = { step, receipt, resolvedAmount: resolved, sharesDelta };
+  executed.set(step.id, record);
+  planGasPaid += receipt.gasUsed * receipt.effectiveGasPrice;
+  if (step.functionName === "supply") {
+    supplyRecords.push({ stepId: step.id, amountWei: resolved!, blockNumber: receipt.blockNumber });
+  }
+  if (step.functionName === "borrow") {
+    borrowRecord = { amountWei: resolved!, blockNumber: receipt.blockNumber };
+  }
+  return record;
+}
+
+/** Our accounting reconstruction of the position, priced like Aave does. */
+async function ourHealthFactor(): Promise<ReturnType<typeof computeHealthFactor>> {
+  const weETH = seeded.reserves.weETH.underlying;
+  const WETH = seeded.reserves.WETH.underlying;
+  const oracle = await oracleAddress();
+  let scaledCollateral = 0n;
+  for (const s of supplyRecords) {
+    const normAtSupply = await read<bigint>({
+      address: seeded.pool,
+      abi: ABI.pool,
+      functionName: "getReserveNormalizedIncome",
+      fnArgs: [weETH],
+      blockNumber: s.blockNumber,
+    });
+    scaledCollateral += rayDivFloor(s.amountWei, normAtSupply);
+  }
+  const normNow = await read<bigint>({ address: seeded.pool, abi: ABI.pool, functionName: "getReserveNormalizedIncome", fnArgs: [weETH] });
+  const priceWeETH = await read<bigint>({ address: oracle, abi: ABI.oracle, functionName: "getAssetPrice", fnArgs: [weETH] });
+  const collateralDisplay = rayMulFloor(scaledCollateral, normNow);
+  const collateralBase = (collateralDisplay * priceWeETH) / 10n ** 18n;
+
+  let debtBase: bigint | null = 0n;
+  if (borrowRecord !== null) {
+    const normDebtAtBorrow = await read<bigint>({
+      address: seeded.pool,
+      abi: ABI.pool,
+      functionName: "getReserveNormalizedVariableDebt",
+      fnArgs: [WETH],
+      blockNumber: borrowRecord.blockNumber,
+    });
+    const debtScaled = rayDivCeil(borrowRecord.amountWei, normDebtAtBorrow);
+    const normDebtNow = await read<bigint>({ address: seeded.pool, abi: ABI.pool, functionName: "getReserveNormalizedVariableDebt", fnArgs: [WETH] });
+    const priceWETH = await read<bigint>({ address: oracle, abi: ABI.oracle, functionName: "getAssetPrice", fnArgs: [WETH] });
+    debtBase = (rayMulCeil(debtScaled, normDebtNow) * priceWETH) / 10n ** 18n;
+  }
+  const ltBps = seeded.eModeCategories[0]!.liquidationThresholdBps.value;
+  const entries: CollateralEntry[] = collateralBase > 0n ? [{ base: collateralBase, ltBps }] : [];
+  return computeHealthFactor(entries, debtBase);
+}
+
+async function chainHealthFactor(): Promise<bigint> {
+  const acct = await read<readonly [bigint, bigint, bigint, bigint, bigint, bigint]>({
+    address: seeded.pool,
+    abi: ABI.pool,
+    functionName: "getUserAccountData",
+    fnArgs: [wallet],
+  });
+  return acct[5];
+}
+
+async function assertHfAgreement(label: string): Promise<void> {
+  const ours = await ourHealthFactor();
+  const chain = await chainHealthFactor();
+  if (ours.status === "no-debt") {
+    expect(chain, `${label}: no-debt sentinel`).toBe(MAX_UINT256);
+    return;
+  }
+  if (ours.status !== "healthy") throw new Error(`${label}: HF unexpectedly ${ours.status}`);
+  expect(
+    relWithin(ours.hfWad, chain, HF_REL_POW),
+    `${label}: |${ours.hfWad} - ${chain}| beyond 1e-8 relative`,
+  ).toBe(true);
+  hfWithDebt.push(ours.hfWad);
+}
+
+let cachedOracle: Address | null = null;
+async function oracleAddress(): Promise<Address> {
+  if (cachedOracle !== null) return cachedOracle;
+  const anchors = (readsMeta as { oracle?: string }).oracle;
+  if (typeof anchors !== "string") throw new Error("reads log meta.oracle missing");
+  cachedOracle = getAddress(anchors);
+  return cachedOracle;
+}
+
+// ————————————————————————— suite —————————————————————————
+
+describe("W03 fork gate — SPEC §2 flagship on the pinned fork", () => {
+  beforeAll(async () => {
+    // The fork IS mainnet state, so mainnet's Multicall3 deployment applies.
+    client = createPublicClient({ chain: mainnet, transport: http(ANVIL_URL, { timeout: 120_000 }) }) as unknown as PublicClient;
+    // NOT an anvil default account: their public dev keys mean mainnet carries
+    // EIP-7702 delegations on those addresses, and delegated fallbacks OOG the
+    // 2300-gas stipend of WETH9.withdraw's ETH send. A fresh impersonated EOA,
+    // verified code-free, sidesteps that entire class.
+    wallet = getAddress("0x1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c");
+    const code = await rpc<string>("eth_getCode", [wallet, "latest"]);
+    if (code !== "0x") {
+      throw new Error(`test wallet ${wallet} unexpectedly has code (${code.length} bytes) — pick an empty EOA`);
+    }
+    await rpc("anvil_setBalance", [wallet, hexQuantity(100_000n * 10n ** 18n)]);
+    await rpc("anvil_impersonateAccount", [wallet]);
+    pristine = await captureChainSnapshot(client, {
+      user: wallet,
+      blockNumber: PINNED_BLOCK,
+      expectBlockHash: readsMeta.pinned_block.hash as `0x${string}`,
+    });
+    dataProvider = getAddress(
+      (readsMeta as unknown as { pool_data_provider: string }).pool_data_provider,
+    );
+  });
+
+  it("snapshot capture pins the fixture and reproduces the committed log exactly", () => {
+    expect(pristine.block).toBe(PINNED_BLOCK);
+    expect(pristine.blockTimestamp).toBe(PINNED_TS);
+    expect(pristine.reserves.weETH.aTokenScaledTotalSupply.value).toBe(bigRead("weETH.aToken.scaledTotalSupply"));
+    expect(pristine.reserves.weETH.variableDebtScaledTotalSupply.value).toBe(bigRead("weETH.variableDebtToken.scaledTotalSupply"));
+    expect(pristine.reserves.WETH.aTokenScaledTotalSupply.value).toBe(bigRead("WETH.aToken.scaledTotalSupply"));
+    expect(pristine.reserves.WETH.variableDebtScaledTotalSupply.value).toBe(bigRead("WETH.variableDebtToken.scaledTotalSupply"));
+    expect(pristine.reserves.weETH.priceBase.value).toBe(bigRead("Oracle.getAssetPrice(weETH)"));
+    expect(pristine.reserves.WETH.priceBase.value).toBe(bigRead("Oracle.getAssetPrice(WETH)"));
+    expect(pristine.reserves.weETH.virtualUnderlyingBalance.value).toBe(bigRead("weETH.getVirtualUnderlyingBalance"));
+    expect(pristine.reserves.WETH.virtualUnderlyingBalance.value).toBe(bigRead("WETH.getVirtualUnderlyingBalance"));
+    expect(pristine.eModeCategories[0]!.collateralBitmap.value).toBe(bigRead("eMode1.collateralBitmap"));
+    expect(pristine.eModeCategories[0]!.borrowableBitmap.value).toBe(bigRead("eMode1.borrowableBitmap"));
+    expect(pristine.etherfi.totalPooledEther.value).toBe(bigRead("LP.getTotalPooledEther"));
+    expect(pristine.etherfi.totalShares.value).toBe(bigRead("eETH.totalShares"));
+    expect(pristine.user.eModeCategoryId.value).toBe(0);
+    expect(pristine.user.hasAaveFootprint.value).toBe(false);
+  });
+
+  it("buildPlan on the pristine snapshot reproduces the unit fixture", () => {
+    const result = buildPlan(flagshipGraph(), pristine);
+    if (!result.ok) throw new Error(`pristine plan failed: ${JSON.stringify(result.errors)}`);
+    expect(result.steps).toHaveLength(13);
+    expect(result.targetEModeCategoryId).toBe(1);
+    const borrow = result.steps.find((s) => s.id === "borrow:borrow")!;
+    if (borrow.amount.kind !== "derived") throw new Error("borrow amount must be derived");
+    expect(borrow.amount.amount.value).toBe(EXPECTED_PRISTINE_BORROW_WEI);
+  });
+
+  it("seeds pre-existing eETH shares, weETH and WETH, then re-plans from the seeded state", async () => {
+    const lp = pristine.etherfi.liquidityPool;
+    const eETH = pristine.etherfi.eETH;
+    const weETH = pristine.etherfi.weETH;
+    const WETH = pristine.reserves.WETH.underlying;
+    await sendTx({ from: wallet, to: lp, data: encodeFunctionData({ abi: ABI.lp, functionName: "deposit" }), value: 2n * 10n ** 18n });
+    await sendTx({ from: wallet, to: eETH, data: encodeFunctionData({ abi: ABI.eeth, functionName: "approve", args: [weETH, 10n ** 18n] }) });
+    await sendTx({ from: wallet, to: weETH, data: encodeFunctionData({ abi: ABI.weeth, functionName: "wrap", args: [10n ** 18n] }) });
+    await sendTx({ from: wallet, to: WETH, data: encodeFunctionData({ abi: ABI.weth, functionName: "deposit" }), value: 10n ** 18n });
+
+    seedShares = await read<bigint>({ address: eETH, abi: ABI.eeth, functionName: "shares", fnArgs: [wallet] });
+    seedWeETH = await read<bigint>({ address: weETH, abi: ABI.erc20, functionName: "balanceOf", fnArgs: [wallet] });
+    seedWETH = await read<bigint>({ address: WETH, abi: ABI.erc20, functionName: "balanceOf", fnArgs: [wallet] });
+    nativeAfterSeeding = await nativeBalance(wallet);
+    expect(seedShares > 0n).toBe(true);
+    expect(seedWeETH > 0n).toBe(true);
+    expect(seedWETH).toBe(10n ** 18n);
+
+    seeded = await captureChainSnapshot(client, { user: wallet });
+    // Wallet tokens are NOT an Aave footprint — the predicate must stay false.
+    expect(seeded.user.hasAaveFootprint.value).toBe(false);
+    const result = buildPlan(flagshipGraph(), seeded);
+    if (!result.ok) throw new Error(`seeded plan failed: ${JSON.stringify(result.errors)}`);
+    plan = result;
+    expect(plan.steps).toHaveLength(13);
+  });
+
+  it("step 1 (deposit): return value and share delta both equal the matrix §7 floor formula", async () => {
+    const step = plan.steps[0]!;
+    expect(step.id).toBe("stake1:deposit");
+    const lp = seeded.etherfi.liquidityPool;
+    const [totalShares, totalPooled] = await Promise.all([
+      read<bigint>({ address: seeded.etherfi.eETH, abi: ABI.eeth, functionName: "totalShares" }),
+      read<bigint>({ address: lp, abi: ABI.lp, functionName: "getTotalPooledEther" }),
+    ]);
+    const predicted = (INPUT_WEI * totalShares) / totalPooled;
+
+    // Pin the deposit RETURN VALUE via eth_call at the pre-state (OPEN item 1).
+    const call = await client.call({
+      account: wallet,
+      to: lp,
+      data: encodeFunctionData({ abi: ABI.lp, functionName: "deposit" }),
+      value: INPUT_WEI,
+    });
+    const returned = decodeFunctionResult({ abi: ABI.lp, functionName: "deposit", data: call.data! });
+    expect(returned).toBe(predicted);
+
+    const record = await executeStep(step);
+    expect(record.sharesDelta).toBe(predicted);
+  });
+
+  it("induces the exact W03 rebase between steps via the packed-accounting storage word", async () => {
+    const lp = seeded.etherfi.liquidityPool;
+    const totalBefore = await read<bigint>({ address: lp, abi: ABI.lp, functionName: "getTotalPooledEther" });
+    const sharesBefore = await read<bigint>({ address: seeded.etherfi.eETH, abi: ABI.eeth, functionName: "totalShares" });
+
+    const matches: Array<{ slot: bigint; word: bigint }> = [];
+    for (let slot = 0n; slot < STORAGE_SCAN_SLOTS; slot += 1n) {
+      const word = await getStorageWord(lp, slot);
+      if (word === 0n) continue;
+      const low = word & (U128 - 1n);
+      const high = word >> 128n;
+      if (low + high === totalBefore) matches.push({ slot, word });
+    }
+    if (matches.length !== 1) {
+      throw new Error(
+        `packed-accounting scan must find exactly one slot; found ${matches.length}: ${JSON.stringify(
+          matches.map((m) => ({ slot: m.slot.toString(), word: m.word.toString(16) })),
+        )}`,
+      );
+    }
+    const { slot, word } = matches[0]!;
+    const delta = totalBefore / REBASE_DIVISOR;
+    const low = word & (U128 - 1n);
+    expect(low + delta < U128, "low half must not overflow into the high half").toBe(true);
+    const neighborBefore = await Promise.all([getStorageWord(lp, slot - 1n), getStorageWord(lp, slot + 1n)]);
+    await setStorageWord(lp, slot, word + delta);
+
+    const totalAfter = await read<bigint>({ address: lp, abi: ABI.lp, functionName: "getTotalPooledEther" });
+    expect(totalAfter).toBe(totalBefore + delta);
+    const neighborAfter = await Promise.all([getStorageWord(lp, slot - 1n), getStorageWord(lp, slot + 1n)]);
+    expect(neighborAfter[0]).toBe(neighborBefore[0]);
+    expect(neighborAfter[1]).toBe(neighborBefore[1]);
+    const sharesAfter = await read<bigint>({ address: seeded.etherfi.eETH, abi: ABI.eeth, functionName: "totalShares" });
+    expect(sharesAfter).toBe(sharesBefore);
+    const rate = await read<bigint>({ address: lp, abi: ABI.lp, functionName: "amountForShare", fnArgs: [10n ** 18n] });
+    expect(rate).toBe((10n ** 18n * totalAfter) / sharesAfter);
+    // Recorded per the W03 mutation contract: slot id + pre/post words.
+    console.log(
+      `rebase: slot ${slot} word ${word.toString(16)} -> ${(word + delta).toString(16)} (delta ${delta})`,
+    );
+  });
+
+  it("executes steps 2–13 green, asserting HF against the chain after every risk-changing step", async () => {
+    const riskStepIds = new Set(["supply1:set-emode", "supply1:supply", "borrow:borrow", "supply2:supply"]);
+    for (const step of plan.steps.slice(1)) {
+      await executeStep(step);
+      if (riskStepIds.has(step.id)) {
+        await assertHfAgreement(`after ${step.id}`);
+      }
+    }
+    expect(executed.size).toBe(13);
+    expect(hfWithDebt.length).toBe(2); // borrow + resupply carry debt
+  });
+
+  it("final state: e-mode, collateral flag, scaled balances, display balances", async () => {
+    const weETH = seeded.reserves.weETH;
+    const WETH = seeded.reserves.WETH;
+    const emode = await read<bigint>({ address: seeded.pool, abi: ABI.pool, functionName: "getUserEMode", fnArgs: [wallet] });
+    expect(emode).toBe(1n);
+
+    const userReserve = await read<readonly [bigint, bigint, bigint, bigint, bigint, bigint, bigint, number, boolean]>({
+      address: dataProvider,
+      abi: ABI.data,
+      functionName: "getUserReserveData",
+      fnArgs: [weETH.underlying, wallet],
+    });
+    expect(userReserve[8], "weETH usageAsCollateralEnabledOnUser").toBe(true);
+
+    let expectedScaledCollateral = 0n;
+    for (const s of supplyRecords) {
+      const norm = await read<bigint>({
+        address: seeded.pool,
+        abi: ABI.pool,
+        functionName: "getReserveNormalizedIncome",
+        fnArgs: [weETH.underlying],
+        blockNumber: s.blockNumber,
+      });
+      expectedScaledCollateral += rayDivFloor(s.amountWei, norm);
+    }
+    const chainScaledCollateral = await read<bigint>({ address: weETH.aToken, abi: ABI.scaledToken, functionName: "scaledBalanceOf", fnArgs: [wallet] });
+    const scaledCollateralDiff =
+      chainScaledCollateral > expectedScaledCollateral
+        ? chainScaledCollateral - expectedScaledCollateral
+        : expectedScaledCollateral - chainScaledCollateral;
+    expect(scaledCollateralDiff <= SCALED_SUPPLY_BOUND, `scaled collateral diff ${scaledCollateralDiff}`).toBe(true);
+
+    const normDebtAtBorrow = await read<bigint>({
+      address: seeded.pool,
+      abi: ABI.pool,
+      functionName: "getReserveNormalizedVariableDebt",
+      fnArgs: [WETH.underlying],
+      blockNumber: borrowRecord!.blockNumber,
+    });
+    const expectedScaledDebt = rayDivCeil(borrowRecord!.amountWei, normDebtAtBorrow);
+    const chainScaledDebt = await read<bigint>({ address: WETH.variableDebtToken, abi: ABI.scaledToken, functionName: "scaledBalanceOf", fnArgs: [wallet] });
+    const scaledDebtDiff =
+      chainScaledDebt > expectedScaledDebt ? chainScaledDebt - expectedScaledDebt : expectedScaledDebt - chainScaledDebt;
+    expect(scaledDebtDiff <= SCALED_DEBT_BOUND, `scaled debt diff ${scaledDebtDiff}`).toBe(true);
+
+    // Display-level recomputation from the final block's indices vs balanceOf.
+    const normNow = await read<bigint>({ address: seeded.pool, abi: ABI.pool, functionName: "getReserveNormalizedIncome", fnArgs: [weETH.underlying] });
+    const aBal = await read<bigint>({ address: weETH.aToken, abi: ABI.erc20, functionName: "balanceOf", fnArgs: [wallet] });
+    const aDisplay = rayMulFloor(expectedScaledCollateral, normNow);
+    const aDiff = aBal > aDisplay ? aBal - aDisplay : aDisplay - aBal;
+    expect(aDiff <= DISPLAY_BOUND + SCALED_SUPPLY_BOUND, `aToken display diff ${aDiff}`).toBe(true);
+
+    const normDebtNow = await read<bigint>({ address: seeded.pool, abi: ABI.pool, functionName: "getReserveNormalizedVariableDebt", fnArgs: [WETH.underlying] });
+    const vBal = await read<bigint>({ address: WETH.variableDebtToken, abi: ABI.erc20, functionName: "balanceOf", fnArgs: [wallet] });
+    const vDisplay = rayMulCeil(expectedScaledDebt, normDebtNow);
+    const vDiff = vBal > vDisplay ? vBal - vDisplay : vDisplay - vBal;
+    expect(vDiff <= DISPLAY_BOUND + SCALED_DEBT_BOUND, `debt display diff ${vDiff}`).toBe(true);
+  });
+
+  it("no-sweep residuals and exact native accounting", async () => {
+    const weETH = seeded.etherfi.weETH;
+    const WETH = seeded.reserves.WETH.underlying;
+    const eETH = seeded.etherfi.eETH;
+
+    const weETHFinal = await read<bigint>({ address: weETH, abi: ABI.erc20, functionName: "balanceOf", fnArgs: [wallet] });
+    const wethFinal = await read<bigint>({ address: WETH, abi: ABI.erc20, functionName: "balanceOf", fnArgs: [wallet] });
+    const sharesFinal = await read<bigint>({ address: eETH, abi: ABI.eeth, functionName: "shares", fnArgs: [wallet] });
+
+    const weETHDiff = weETHFinal > seedWeETH ? weETHFinal - seedWeETH : seedWeETH - weETHFinal;
+    expect(weETHDiff <= WEETH_RESIDUAL_MAX, `weETH residual ${weETHDiff}`).toBe(true);
+    const wethDiff = wethFinal > seedWETH ? wethFinal - seedWETH : seedWETH - wethFinal;
+    expect(wethDiff <= WETH_RESIDUAL_MAX, `WETH residual ${wethDiff}`).toBe(true);
+
+    // Plan deposits mint shares; wraps consume all but ≤1 integer share each.
+    const shareResidual = sharesFinal - seedShares;
+    expect(shareResidual >= 0n, `share residual ${shareResidual} went negative`).toBe(true);
+    expect(
+      shareResidual <= EETH_DUST_SHARES_AGGREGATE_MAX,
+      `share residual ${shareResidual} beyond the aggregate wrap-dust bound`,
+    ).toBe(true);
+
+    const nativeFinal = await nativeBalance(wallet);
+    expect(nativeAfterSeeding - nativeFinal).toBe(INPUT_WEI + planGasPaid);
+  });
+
+  it("post-action reserve rates reproduce via the §5.1 strategy formula (deficits read live)", async () => {
+    for (const key of ["weETH", "WETH"] as const) {
+      const reserve = seeded.reserves[key];
+      const rd = await read<readonly [bigint, bigint, bigint, bigint, bigint, bigint, bigint, bigint, bigint, bigint, bigint, number]>({
+        address: dataProvider,
+        abi: ABI.data,
+        functionName: "getReserveData",
+        fnArgs: [reserve.underlying],
+      });
+      const cfg = await read<readonly [bigint, bigint, bigint, bigint, bigint, boolean, boolean, boolean, boolean, boolean]>({
+        address: dataProvider,
+        abi: ABI.data,
+        functionName: "getReserveConfigurationData",
+        fnArgs: [reserve.underlying],
+      });
+      const strategyAddr = await read<Address>({ address: dataProvider, abi: ABI.data, functionName: "getInterestRateStrategyAddress", fnArgs: [reserve.underlying] });
+      const strat = await read<{ optimalUsageRatio: number; baseVariableBorrowRate: number; variableRateSlope1: number; variableRateSlope2: number }>({
+        address: strategyAddr,
+        abi: ABI.strategy,
+        functionName: "getInterestRateDataBps",
+        fnArgs: [reserve.underlying],
+      });
+      const virtual = await read<bigint>({ address: dataProvider, abi: ABI.data, functionName: "getVirtualUnderlyingBalance", fnArgs: [reserve.underlying] });
+      const deficit = await read<bigint>({ address: seeded.pool, abi: ABI.pool, functionName: "getReserveDeficit", fnArgs: [reserve.underlying] });
+      const scaledTotal = await client.readContract({
+        address: reserve.variableDebtToken,
+        abi: parseAbi(["function scaledTotalSupply() view returns (uint256)"]),
+        functionName: "scaledTotalSupply",
+      });
+
+      const predicted = currentRatesRay({
+        strategy: {
+          optimalUsageRatio: strat.optimalUsageRatio,
+          baseVariableBorrowRate: strat.baseVariableBorrowRate,
+          variableRateSlope1: strat.variableRateSlope1,
+          variableRateSlope2: strat.variableRateSlope2,
+        },
+        reserveFactorBps: Number(cfg[4]),
+        totalDebtWei: rayMulCeil(scaledTotal, rd[10]),
+        virtualUnderlyingBalance: virtual,
+        liquidityAddedWei: 0n,
+        liquidityTakenWei: 0n,
+        deficitWei: deficit,
+      });
+      console.log(`${key}: reserve deficit (live read) = ${deficit}`);
+      expect(
+        relWithin(predicted.variableBorrowRateRay, rd[6], RATE_REL_POW),
+        `${key} variable rate: predicted ${predicted.variableBorrowRateRay} vs stored ${rd[6]}`,
+      ).toBe(true);
+      expect(
+        relWithin(predicted.liquidityRateRay, rd[5], RATE_REL_POW),
+        `${key} liquidity rate: predicted ${predicted.liquidityRateRay} vs stored ${rd[5]}`,
+      ).toBe(true);
+    }
+  });
+});
