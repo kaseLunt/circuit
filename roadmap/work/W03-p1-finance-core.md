@@ -3,7 +3,7 @@ id: W03
 type: work
 title: P1 finance core — 13-step plan green on a pinned fork, headless
 phase: P1
-status: candidate
+status: active
 evidence_target: thirteen-step-plan-green-on-pinned-fork-in-ci
 priority: 1
 depends_on: [W04]

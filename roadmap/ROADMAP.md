@@ -10,8 +10,8 @@ Phases mirror SPEC.md §11; the SPEC's gate column is the review gate for each b
 
 | ID | Phase | Goal | State |
 | --- | --- | --- | --- |
-| P0 | Bootstrap + spikes | Scaffold + CI green; sandbox provider proven executable; protocol matrix, name, display face pinned | **In progress** |
-| P1 | Finance core on a fork | core/ + server/chain complete; 13-step flagship plan executes green on pinned anvil fork in CI | Planned |
+| P0 | Bootstrap + spikes | Scaffold + CI green; sandbox provider proven executable; protocol matrix, name, display face pinned | Done |
+| P1 | Finance core on a fork | core/ + server/chain complete; 13-step flagship plan executes green on pinned anvil fork in CI | **In progress** |
 | P2 | Canvas on proven core | Composer transplanted + reskinned on P1's model; §3 steps 1–3, 8 pass | Planned |
 | P3 | Execution | Sandbox execution (provider, session registry, §6 security contract) + full tx UX family, both recovery machines, a11y, live gating; §3 steps 4–7 pass. SPEC splits this internally into P3a/P3b | Planned |
 | P4 | Launch polish | Landing, OG/meta, README GIF, scheduled prod smoke; full §3 green on production | Planned — **MVP line** |
@@ -26,7 +26,7 @@ claim the gate is automated unless a validator actually enforces it.
 | --- | --- | --- | --- | --- | --- |
 | W01 | P0 bootstrap — scaffold, CI, spikes, and pinned decisions | P0 | — | ci-green-scaffold-plus-executable-sandbox-proof | achieved |
 | W02 | Land founding product docs — spec and transplant manifest | P0 | — | docs-landed-and-compliant-with-vision-antigoals | achieved |
-| W03 | P1 finance core — 13-step plan green on a pinned fork, headless | P1 | W04 | thirteen-step-plan-green-on-pinned-fork-in-ci | candidate |
+| W03 | P1 finance core — 13-step plan green on a pinned fork, headless | P1 | W04 | thirteen-step-plan-green-on-pinned-fork-in-ci | active |
 | W04 | Disposition the P0→P1 boundary review findings | P0 | — | boundary-review-blockers-cleared-and-reconfirmed | achieved |
 
 The rows above project `work/W01-p0-bootstrap.md`, `work/W02-founding-docs.md`, and

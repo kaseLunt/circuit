@@ -1,32 +1,32 @@
 ---
-claim_id: 6509e70d-236f-44e6-8275-140cbaad533b
-generation: 4
+claim_id: 8db7f4e2-0457-45a8-b081-c238c77171b7
+generation: 5
 agent: claude-code
-task: W04
-status: released
+task: W03
+status: active
 integrator: true
 branch: main
 worktree_id: fcc099da-1d6b-593f-bfcb-bd6915fc89c2
-base_commit: 048d586215e0787fdc81eb73d95b0b5ee52e76be
+base_commit: ab3aed63f17e8d8842a16056009ce31c43cfd880
 allowed_paths:
+  - src/**
+  - tests/**
+  - .github/**
   - docs/**
   - spikes/**
-  - scripts/**
-  - src/app/page.tsx
-  - src/app/layout.tsx
   - package.json
   - package-lock.json
   - vitest.config.ts
+  - vitest.fork.config.ts
+  - tsconfig.json
   - eslint.config.mjs
-  - .github/**
   - roadmap/work/W03-p1-finance-core.md
-  - roadmap/work/W04-boundary-review-remediation.md
-scope_hash: sha256:d41a75f0d544f0d1c8929b66a380ea93c7608658766b1f423c5c39c42434c5b5
-issued_at: 2026-07-23T04:26:02Z
-lease_expires: 2026-07-23T12:26:02Z
-updated_at: 2026-07-23T04:26:02Z
+scope_hash: sha256:f08c33b4e45cbe2322f68e87f4f7846495d34bd3cf298fc3f7e2aac39aad21cd
+issued_at: 2026-07-23T04:38:48Z
+lease_expires: 2026-07-23T12:38:48Z
+updated_at: 2026-07-23T04:38:48Z
 ---
 
-# Claim: claude-code -> W04
+# Claim: claude-code -> W03
 
 This is a serial task/scope binding, not a distributed lock.
