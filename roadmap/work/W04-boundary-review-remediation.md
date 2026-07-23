@@ -28,7 +28,6 @@ deliverables:
   - docs/protocol-matrix-reads.json
   - spikes/sandbox-proof/proof.mjs
   - spikes/sandbox-proof/proof-output.txt
-  - roadmap/work/W03-p1-finance-core.md
 evidence_receipts: []
 invalidated_by:
   - docs/protocol-matrix.md
