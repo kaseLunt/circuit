@@ -1,6 +1,6 @@
-# Strategy Studio <!-- working title -->
+# Circuit — Visual DeFi Strategy Builder
 
-> A node-based DeFi strategy composer — every number on screen carries its provenance (observed
+> Compose DeFi strategies as visual circuits — every number on screen carries its provenance (observed
 > on chain, derived by tested math, or entered by you), every money-path is unit- and
 > fork-tested, and the execution UX is the part I'm proudest of.
 
