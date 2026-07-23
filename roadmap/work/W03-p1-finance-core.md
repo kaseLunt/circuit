@@ -6,7 +6,7 @@ phase: P1
 status: candidate
 evidence_target: thirteen-step-plan-green-on-pinned-fork-in-ci
 priority: 1
-depends_on: [W01]
+depends_on: [W04]
 blocked_by: []
 informs: [H0]
 allowed_paths:

@@ -6,7 +6,7 @@ phase: P0
 status: active
 evidence_target: boundary-review-blockers-cleared-and-reconfirmed
 priority: 0
-depends_on: [W01]
+depends_on: []
 blocked_by: []
 informs: [H0]
 allowed_paths:

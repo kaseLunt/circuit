@@ -3,7 +3,7 @@ id: W01
 type: work
 title: P0 bootstrap — scaffold, CI, spikes, and pinned decisions
 phase: P0
-status: achieved
+status: superseded
 evidence_target: ci-green-scaffold-plus-executable-sandbox-proof
 priority: 1
 depends_on: []
@@ -38,8 +38,7 @@ deliverables:
   - docs/decisions.md
   - spikes/sandbox-proof/proof.mjs
   - spikes/sandbox-proof/proof-output.txt
-evidence_receipts:
-  - roadmap/evidence/E-W01-p0-bootstrap.md
+evidence_receipts: []
 invalidated_by:
   - SPEC.md
   - TRANSPLANT.md
