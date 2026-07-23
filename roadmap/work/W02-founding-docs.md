@@ -3,7 +3,7 @@ id: W02
 type: work
 title: Land founding product docs — spec and transplant manifest
 phase: P0
-status: active
+status: achieved
 evidence_target: docs-landed-and-compliant-with-vision-antigoals
 priority: 0
 depends_on: []
@@ -16,12 +16,14 @@ allowed_paths:
 deliverables:
   - SPEC.md
   - TRANSPLANT.md
-evidence_receipts: []
+evidence_receipts:
+  - roadmap/evidence/E-W02-founding-docs.md
 invalidated_by:
   - SPEC.md
   - TRANSPLANT.md
 review_when: phase:P0:exit
 updated: 2026-07-22
+evidence_fingerprint: sha256:0a8b0077488dedb23f820cb15d5708a0f60a986fef4e23b807766f5597f2cb52
 ---
 
 # W02 — Land founding product docs
@@ -56,8 +58,8 @@ python roadmap/tools/doctor.py
 
 ## Evidence
 
-No attained evidence yet; record acceptance results against the landing commit in a receipt,
-then stamp per RULES.md.
+`roadmap/evidence/E-W02-founding-docs.md` — docs landed at the tested commit; anti-goal
+compliance reviewed; doctor green.
 
 ## Handoff
 

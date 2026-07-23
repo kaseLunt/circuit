@@ -3,7 +3,7 @@ claim_id: 1ca08607-d7fc-4687-99fe-636c32eeecbd
 generation: 1
 agent: claude-code
 task: W02
-status: active
+status: released
 integrator: true
 branch: squash2
 worktree_id: fcc099da-1d6b-593f-bfcb-bd6915fc89c2
