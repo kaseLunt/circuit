@@ -1,0 +1,31 @@
+#!/bin/sh
+# Validate exactly the staged snapshot, then enforce its committed-parent scope.
+set -u
+
+if command -v python >/dev/null 2>&1; then
+  PY=python
+elif command -v python3 >/dev/null 2>&1; then
+  PY=python3
+else
+  echo "pre-commit: BLOCKED -- Python is required for the control-plane gates" >&2
+  exit 1
+fi
+
+for tool in roadmap/tools/_control_plane.py roadmap/tools/doctor.py roadmap/tools/scope_gate.py; do
+  if [ ! -f "$tool" ]; then
+    echo "pre-commit: BLOCKED -- required runtime is missing: $tool" >&2
+    exit 1
+  fi
+done
+
+"$PY" roadmap/tools/doctor.py --snapshot index --check-live-leases || {
+  echo "pre-commit: BLOCKED -- staged control-plane snapshot is invalid" >&2
+  exit 1
+}
+
+"$PY" roadmap/tools/scope_gate.py || {
+  echo "pre-commit: BLOCKED -- staged paths exceed committed authority" >&2
+  exit 1
+}
+
+exit 0

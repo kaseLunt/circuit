@@ -1,0 +1,5 @@
+# BEGIN control-plane managed ignore rules
+.control-plane/*.tmp
+.control-plane/*.bak
+roadmap/tools/__pycache__/
+# END control-plane managed ignore rules
