@@ -104,7 +104,12 @@ try {
   // 5. unsigned execution via impersonation
   await rpc(A, "anvil_impersonateAccount", [account]);
   const txHash = await rpc(A, "eth_sendTransaction", [depositTx]);
-  const receipt = await rpc(A, "eth_getTransactionReceipt", [txHash]);
+  let receipt = null;
+  for (let i = 0; i < 20 && !receipt; i += 1) {
+    receipt = await rpc(A, "eth_getTransactionReceipt", [txHash]);
+    if (!receipt) await new Promise((r) => setTimeout(r, 250));
+  }
+  if (!receipt) throw new Error(`no receipt for ${txHash} after 5s`);
   const wethBalData = `0x70a08231000000000000000000000000${account.slice(2)}`;
   const wethBalA = await rpc(A, "eth_call", [{ to: WETH, data: wethBalData }, "latest"]);
   check(
@@ -138,13 +143,36 @@ try {
     `balB=${BigInt(balB)} wethB=${BigInt(wethBalB)} bnB=${Number(bnB2)}`,
   );
 
-  // 7. admin-RPC non-exposure
-  check(
-    "admin-RPC non-exposure: sessions launched bound to 127.0.0.1 only",
-    true,
-    "started with --host 127.0.0.1; production contract: fork RPC reachable only by the server " +
-      "(private networking), server executes only calldata it built from a validated graph",
-  );
+  // 7. admin-RPC non-exposure — genuine negative reachability test:
+  // the RPC must answer on loopback and REFUSE on this machine's non-loopback address.
+  const { networkInterfaces } = await import("node:os");
+  const lanIp = Object.values(networkInterfaces())
+    .flat()
+    .find((i) => i && i.family === "IPv4" && !i.internal)?.address;
+  if (!lanIp) {
+    check("admin-RPC non-exposure", false, "no non-loopback IPv4 interface found to test against");
+  } else {
+    let reachable = false;
+    try {
+      await fetch(`http://${lanIp}:8545`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "eth_blockNumber", params: [] }),
+        signal: AbortSignal.timeout(3000),
+      });
+      reachable = true;
+    } catch {
+      reachable = false;
+    }
+    const loopbackOk = Boolean(await rpc(A, "eth_blockNumber"));
+    check(
+      "admin-RPC non-exposure: RPC answers on 127.0.0.1 and refuses on the non-loopback address",
+      loopbackOk && !reachable,
+      `loopback=answering non-loopback(${lanIp}:8545)=${reachable ? "REACHABLE (fail)" : "refused"}; ` +
+        "production contract: fork RPC reachable only by the server, which executes only " +
+        "calldata it built from a validated graph",
+    );
+  }
 
   console.log(failures === 0 ? "\nRESULT: ALL CHECKS PASSED" : `\nRESULT: ${failures} CHECK(S) FAILED`);
 } finally {

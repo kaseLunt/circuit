@@ -1,11 +1,11 @@
-# upstream latest block 25592436; pinning both sessions to 25592372
-# fresh throwaway account: 0x2aacd44d850a994d98cf5ebd1035523a6c6eea47
-PASS  fork-block identity: both sessions at the pinned base block — A=25592372 B=25592372 pinned=25592372
+# upstream latest block 25592679; pinning both sessions to 25592615
+# fresh throwaway account: 0xa41224cdeaebc4d1b373b9b6a588cb16303bc270
+PASS  fork-block identity: both sessions at the pinned base block — A=25592615 B=25592615 pinned=25592615
 PASS  faucet: anvil_setBalance funds account in session A — bal=0x8ac7230489e80000
 PASS  gas estimation: WETH deposit estimate in sane range — gas=45060
 PASS  unsigned execution: impersonated WETH deposit mined successfully — status=0x1 weth=1000000000000000000
-PASS  snapshot/revert: state restored to pre-snapshot value — pre=0x7ce63ff8bc023cf0 mutated=0x2b5e3af16b1880000 post=0x7ce63ff8bc023cf0
-PASS  per-session isolation: concurrent session B saw none of A's mutations — balB=0 wethB=0 bnB=25592372
-PASS  admin-RPC non-exposure: sessions launched bound to 127.0.0.1 only — started with --host 127.0.0.1; production contract: fork RPC reachable only by the server (private networking), server executes only calldata it built from a validated graph
+PASS  snapshot/revert: state restored to pre-snapshot value — pre=0x7ce63f6755094624 mutated=0x2b5e3af16b1880000 post=0x7ce63f6755094624
+PASS  per-session isolation: concurrent session B saw none of A's mutations — balB=0 wethB=0 bnB=25592615
+PASS  admin-RPC non-exposure: RPC answers on 127.0.0.1 and refuses on the non-loopback address — loopback=answering non-loopback(169.254.83.107:8545)=refused; production contract: fork RPC reachable only by the server, which executes only calldata it built from a validated graph
 
 RESULT: ALL CHECKS PASSED

@@ -3,8 +3,8 @@ import type { ReactNode } from "react";
 import "./globals.css";
 
 export const metadata: Metadata = {
-  title: "Strategy Studio",
-  description: "A node-based DeFi strategy composer",
+  title: "Circuit — Visual DeFi Strategy Builder",
+  description: "Compose DeFi strategies as visual circuits",
 };
 
 export default function RootLayout({ children }: { children: ReactNode }) {
