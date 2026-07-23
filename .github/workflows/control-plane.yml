@@ -78,6 +78,10 @@ jobs:
           --branch "$HEAD_BRANCH" --check-live-lease
       - name: Replay pushed commits with candidate policy (advisory only)
         if: github.event_name == 'push' && github.event.before != '0000000000000000000000000000000000000000'
+        # Direct pushes cannot carry a PR-bound owner approval, so owner-reviewed
+        # governance transitions are unverifiable here by design. Report, don't fail:
+        # D-003 records this posture and the PR-flow upgrade path for going public.
+        continue-on-error: true
         env:
           BASE_SHA: ${{ github.event.before }}
           HEAD_SHA: ${{ github.sha }}
