@@ -3,7 +3,7 @@ id: W01
 type: work
 title: P0 bootstrap — scaffold, CI, spikes, and pinned decisions
 phase: P0
-status: superseded
+status: achieved
 evidence_target: ci-green-scaffold-plus-executable-sandbox-proof
 priority: 1
 depends_on: []
@@ -38,7 +38,8 @@ deliverables:
   - docs/decisions.md
   - spikes/sandbox-proof/proof.mjs
   - spikes/sandbox-proof/proof-output.txt
-evidence_receipts: []
+evidence_receipts:
+  - roadmap/evidence/E-W01-p0-bootstrap-r2.md
 invalidated_by:
   - SPEC.md
   - TRANSPLANT.md
@@ -46,7 +47,7 @@ invalidated_by:
   - .github/workflows/**
 review_when: phase:P0:exit
 updated: 2026-07-22
-evidence_fingerprint: sha256:3572623d65300b13be68567ba8be9a268c2805b04f75961726ce4751e25fe2ff
+evidence_fingerprint: sha256:a9618fc2aec22d37497d9fc7e456cba61fd365129f1a7defdac69075e9cbad01
 ---
 
 # W01 — P0 bootstrap: scaffold, CI, spikes, and pinned decisions

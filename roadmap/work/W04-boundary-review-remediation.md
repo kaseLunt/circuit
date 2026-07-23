@@ -3,7 +3,7 @@ id: W04
 type: work
 title: Disposition the P0→P1 boundary review findings
 phase: P0
-status: active
+status: achieved
 evidence_target: boundary-review-blockers-cleared-and-reconfirmed
 priority: 0
 depends_on: []
@@ -28,13 +28,15 @@ deliverables:
   - docs/protocol-matrix-reads.json
   - spikes/sandbox-proof/proof.mjs
   - spikes/sandbox-proof/proof-output.txt
-evidence_receipts: []
+evidence_receipts:
+  - roadmap/evidence/E-W04-boundary-remediation.md
 invalidated_by:
   - docs/protocol-matrix.md
   - docs/protocol-matrix-reads.json
   - scripts/**
 review_when: phase:P0:exit
 updated: 2026-07-23
+evidence_fingerprint: sha256:0942417f19df1ebc61d1f220f32ca585e7358d6b64fcb4f289b6a6f6ca573e01
 ---
 
 # W04 — Disposition the P0→P1 boundary review
