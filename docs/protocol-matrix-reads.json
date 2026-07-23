@@ -1,0 +1,549 @@
+{
+  "rpc": "https://ethereum-rpc.publicnode.com",
+  "block": "25592355",
+  "reads": {
+    "AP.getPool": "0x87870Bca3F3fD6335C3F4ce8392D69350B4fA4E2",
+    "AP.getPoolDataProvider": "0x0a16f2FCC0D44FaE41cc54e079281D84A363bECD",
+    "AP.getPriceOracle": "0x54586bE62E3c3580375aE3723C145253060Ca0C2",
+    "AP.getACLManager": "0xc2aaCf6553D20d1e9d78E365AAba8032af9c85b0",
+    "POOL.ADDRESSES_PROVIDER": "0x2f39d218133AFaB8F2B819B1066c7E434Ad94E9e",
+    "POOL.getRevision": "REVERT/ERROR: The contract function \"getRevision\" reverted.",
+    "POOL.getReservesList": [
+      "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2",
+      "0x7f39C581F595B53c5cb19bD0b3f8dA6c935E2Ca0",
+      "0x2260FAC5E5542a773Aa44fBCfeDf7C193bc2C599",
+      "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48",
+      "0x6B175474E89094C44Da98b954EedeAC495271d0F",
+      "0x514910771AF9Ca656af840dff83E8264EcF986CA",
+      "0x7Fc66500c84A76Ad7e9c93437bFc5Ac33E2DDaE9",
+      "0xBe9895146f7AF43049ca1c1AE358B0541Ea49704",
+      "0xdAC17F958D2ee523a2206206994597C13D831ec7",
+      "0xae78736Cd615f374D3085123A210448E74Fc6393",
+      "0x5f98805A4E8be255a32880FDeC7F6728C6568bA0",
+      "0xD533a949740bb3306d119CC777fa900bA034cd52",
+      "0x9f8F72aA9304c8B593d555F12eF6589cC3A579A2",
+      "0xC011a73ee8576Fb46F5E1c5751cA3B9Fe0af2a6F",
+      "0xba100000625a3754423978a60c9317c58a424e3D",
+      "0x1f9840a85d5aF5bf1D1762F925BDADdC4201F984",
+      "0x5A98FcBEA516Cf06857215779Fd812CA3beF1B32",
+      "0xC18360217D8F7Ab5e7c516566761Ea12Ce7F9D72",
+      "0x111111111117dC0aa78b770fA6A738034120C302",
+      "0x853d955aCEf822Db058eb8505911ED77F175b99e",
+      "0x40D16FC0246aD3160Ccc09B8D0D3A2cD28aE6C2f",
+      "0xD33526068D116cE69F19A9ee46F0bd304F21A51f",
+      "0x83F20F44975D03b1b09e64809B757c47f942BEeA",
+      "0xAf5191B0De278C7286d6C7CC6ab6BB8A73bA2Cd6",
+      "0xdeFA4e8a7bcBA345F687a2f1456F5Edd9CE97202",
+      "0x3432B6A60D23Ca0dFCa7761B7ab56459D9C964D0",
+      "0xf939E0A03FB07F59A73314E73794Be0E57ac1b4E",
+      "0x6c3ea9036406852006290770BEdFcAbA0e23A0e8",
+      "0xCd5fE23C85820F7B72D0926FC9b05b43E359b7ee",
+      "0xf1C9acDc66974dFB6dEcB12aA385b9cD01190E38",
+      "0x4c9EDD5852cd905f086C759E8383e09bff1E68B3",
+      "0xA35b1B31Ce002FBF2058D22F30f95D405200A15b",
+      "0x9D39A5DE30e57443BfF2A8307A4256c8797A3497",
+      "0x18084fbA666a33d37592fA2633fD49a74DD93a88",
+      "0xcbB7C0000aB88B473b1f5aFd9ef808440eed33Bf",
+      "0xdC035D45d973E3EC169d2276DDab16f1e407384F",
+      "0xA1290d69c65A6Fe4DF752f95823fae25cB99e5A7",
+      "0x8236a87084f8B84306f72007F36F2618A5634494",
+      "0x657e8C867D8B37dCC18fA4Caead9C45EB088C642",
+      "0x8292Bb45bf1Ee4d140127049757C2E0fF06317eD",
+      "0x50D2C7992b802Eef16c04FeADAB310f31866a545",
+      "0x3b3fB9C57858EF816833dC91565EFcd85D96f634",
+      "0xC139190F447e929f090Edeb554D95AbB8b18aC1C",
+      "0x917459337CaAC939D41d7493B3999f571D20D667",
+      "0x14Bdc3A3AE09f5518b923b69489CBcAfB238e617",
+      "0x90D2af7d622ca3141efA4d8f1F24d86E5974Cc8F",
+      "0xC96dE26018A54D51c097160568752c4E3BD6C364",
+      "0x1aBaEA1f7C830bD89Acc67eC4af516284b1bC33c",
+      "0x9F56094C450763769BA0EA9Fe2876070c0fD5F77",
+      "0xBC6736d346a5eBC0dEbc997397912CD9b8FAe10a",
+      "0xD11c452fc99cF405034ee446803b6F6c1F6d5ED8",
+      "0xbf5495Efe5DB9ce00f80364C8B423567e58d2110",
+      "0x68749665FF8D2d112Fa859AA293F07A622782F38",
+      "0xe6A934089BBEe34F832060CE98848359883749B3",
+      "0x62C6E813b9589C3631Ba0Cdb013acdB8544038B7",
+      "0x1F84a51296691320478c98b8d77f2Bbd17D34350",
+      "0xE8483517077afa11A9B07f849cee2552f040d7b2",
+      "0xacA92E438df0B2401fF60dA7E4337B687a2435DA",
+      "0x356B8d89c1e1239Cbbb9dE4815c39A1474d5BA7D",
+      "0xe343167631d89B6Ffc58B88d6b7fB0228795491D",
+      "0xAeBf0Bb9f57E89260d57f31AF34eB58657d96Ce0",
+      "0x3de0ff76E8b528C092d47b9DaC775931cef80F49",
+      "0x9Bf45ab47747F4B4dD09B3C2c73953484b4eB375",
+      "0xB0F70C0bD6FD87dbEb7C10dC692a2a6106817072",
+      "0x619D75E3b790eBC21c289f2805Bb7177A7D732E2",
+      "0x9db38D74a0D29380899aD354121DfB521aDb0548",
+      "0x59bC9FaE5D62B19d4f8d07D758047aCb9EE19d34"
+    ],
+    "ORACLE.BASE_CURRENCY_UNIT": "100000000",
+    "ORACLE.ADDRESSES_PROVIDER": "0x2f39d218133AFaB8F2B819B1066c7E434Ad94E9e",
+    "DP.getAllReservesTokens": [
+      {
+        "symbol": "WETH",
+        "tokenAddress": "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2"
+      },
+      {
+        "symbol": "wstETH",
+        "tokenAddress": "0x7f39C581F595B53c5cb19bD0b3f8dA6c935E2Ca0"
+      },
+      {
+        "symbol": "WBTC",
+        "tokenAddress": "0x2260FAC5E5542a773Aa44fBCfeDf7C193bc2C599"
+      },
+      {
+        "symbol": "USDC",
+        "tokenAddress": "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48"
+      },
+      {
+        "symbol": "DAI",
+        "tokenAddress": "0x6B175474E89094C44Da98b954EedeAC495271d0F"
+      },
+      {
+        "symbol": "LINK",
+        "tokenAddress": "0x514910771AF9Ca656af840dff83E8264EcF986CA"
+      },
+      {
+        "symbol": "AAVE",
+        "tokenAddress": "0x7Fc66500c84A76Ad7e9c93437bFc5Ac33E2DDaE9"
+      },
+      {
+        "symbol": "cbETH",
+        "tokenAddress": "0xBe9895146f7AF43049ca1c1AE358B0541Ea49704"
+      },
+      {
+        "symbol": "USDT",
+        "tokenAddress": "0xdAC17F958D2ee523a2206206994597C13D831ec7"
+      },
+      {
+        "symbol": "rETH",
+        "tokenAddress": "0xae78736Cd615f374D3085123A210448E74Fc6393"
+      },
+      {
+        "symbol": "LUSD",
+        "tokenAddress": "0x5f98805A4E8be255a32880FDeC7F6728C6568bA0"
+      },
+      {
+        "symbol": "CRV",
+        "tokenAddress": "0xD533a949740bb3306d119CC777fa900bA034cd52"
+      },
+      {
+        "symbol": "MKR",
+        "tokenAddress": "0x9f8F72aA9304c8B593d555F12eF6589cC3A579A2"
+      },
+      {
+        "symbol": "SNX",
+        "tokenAddress": "0xC011a73ee8576Fb46F5E1c5751cA3B9Fe0af2a6F"
+      },
+      {
+        "symbol": "BAL",
+        "tokenAddress": "0xba100000625a3754423978a60c9317c58a424e3D"
+      },
+      {
+        "symbol": "UNI",
+        "tokenAddress": "0x1f9840a85d5aF5bf1D1762F925BDADdC4201F984"
+      },
+      {
+        "symbol": "LDO",
+        "tokenAddress": "0x5A98FcBEA516Cf06857215779Fd812CA3beF1B32"
+      },
+      {
+        "symbol": "ENS",
+        "tokenAddress": "0xC18360217D8F7Ab5e7c516566761Ea12Ce7F9D72"
+      },
+      {
+        "symbol": "1INCH",
+        "tokenAddress": "0x111111111117dC0aa78b770fA6A738034120C302"
+      },
+      {
+        "symbol": "FRAX",
+        "tokenAddress": "0x853d955aCEf822Db058eb8505911ED77F175b99e"
+      },
+      {
+        "symbol": "GHO",
+        "tokenAddress": "0x40D16FC0246aD3160Ccc09B8D0D3A2cD28aE6C2f"
+      },
+      {
+        "symbol": "RPL",
+        "tokenAddress": "0xD33526068D116cE69F19A9ee46F0bd304F21A51f"
+      },
+      {
+        "symbol": "sDAI",
+        "tokenAddress": "0x83F20F44975D03b1b09e64809B757c47f942BEeA"
+      },
+      {
+        "symbol": "STG",
+        "tokenAddress": "0xAf5191B0De278C7286d6C7CC6ab6BB8A73bA2Cd6"
+      },
+      {
+        "symbol": "KNC",
+        "tokenAddress": "0xdeFA4e8a7bcBA345F687a2f1456F5Edd9CE97202"
+      },
+      {
+        "symbol": "FXS",
+        "tokenAddress": "0x3432B6A60D23Ca0dFCa7761B7ab56459D9C964D0"
+      },
+      {
+        "symbol": "crvUSD",
+        "tokenAddress": "0xf939E0A03FB07F59A73314E73794Be0E57ac1b4E"
+      },
+      {
+        "symbol": "PYUSD",
+        "tokenAddress": "0x6c3ea9036406852006290770BEdFcAbA0e23A0e8"
+      },
+      {
+        "symbol": "weETH",
+        "tokenAddress": "0xCd5fE23C85820F7B72D0926FC9b05b43E359b7ee"
+      },
+      {
+        "symbol": "osETH",
+        "tokenAddress": "0xf1C9acDc66974dFB6dEcB12aA385b9cD01190E38"
+      },
+      {
+        "symbol": "USDe",
+        "tokenAddress": "0x4c9EDD5852cd905f086C759E8383e09bff1E68B3"
+      },
+      {
+        "symbol": "ETHx",
+        "tokenAddress": "0xA35b1B31Ce002FBF2058D22F30f95D405200A15b"
+      },
+      {
+        "symbol": "sUSDe",
+        "tokenAddress": "0x9D39A5DE30e57443BfF2A8307A4256c8797A3497"
+      },
+      {
+        "symbol": "tBTC",
+        "tokenAddress": "0x18084fbA666a33d37592fA2633fD49a74DD93a88"
+      },
+      {
+        "symbol": "cbBTC",
+        "tokenAddress": "0xcbB7C0000aB88B473b1f5aFd9ef808440eed33Bf"
+      },
+      {
+        "symbol": "USDS",
+        "tokenAddress": "0xdC035D45d973E3EC169d2276DDab16f1e407384F"
+      },
+      {
+        "symbol": "rsETH",
+        "tokenAddress": "0xA1290d69c65A6Fe4DF752f95823fae25cB99e5A7"
+      },
+      {
+        "symbol": "LBTC",
+        "tokenAddress": "0x8236a87084f8B84306f72007F36F2618A5634494"
+      },
+      {
+        "symbol": "eBTC",
+        "tokenAddress": "0x657e8C867D8B37dCC18fA4Caead9C45EB088C642"
+      },
+      {
+        "symbol": "RLUSD",
+        "tokenAddress": "0x8292Bb45bf1Ee4d140127049757C2E0fF06317eD"
+      },
+      {
+        "symbol": "PT-eUSDE-29MAY2025",
+        "tokenAddress": "0x50D2C7992b802Eef16c04FeADAB310f31866a545"
+      },
+      {
+        "symbol": "PT-sUSDE-31JUL2025",
+        "tokenAddress": "0x3b3fB9C57858EF816833dC91565EFcd85D96f634"
+      },
+      {
+        "symbol": "USDtb",
+        "tokenAddress": "0xC139190F447e929f090Edeb554D95AbB8b18aC1C"
+      },
+      {
+        "symbol": "PT-USDe-31JUL2025",
+        "tokenAddress": "0x917459337CaAC939D41d7493B3999f571D20D667"
+      },
+      {
+        "symbol": "PT-eUSDE-14AUG2025",
+        "tokenAddress": "0x14Bdc3A3AE09f5518b923b69489CBcAfB238e617"
+      },
+      {
+        "symbol": "eUSDe",
+        "tokenAddress": "0x90D2af7d622ca3141efA4d8f1F24d86E5974Cc8F"
+      },
+      {
+        "symbol": "FBTC",
+        "tokenAddress": "0xC96dE26018A54D51c097160568752c4E3BD6C364"
+      },
+      {
+        "symbol": "EURC",
+        "tokenAddress": "0x1aBaEA1f7C830bD89Acc67eC4af516284b1bC33c"
+      },
+      {
+        "symbol": "PT-sUSDE-25SEP2025",
+        "tokenAddress": "0x9F56094C450763769BA0EA9Fe2876070c0fD5F77"
+      },
+      {
+        "symbol": "PT-USDe-25SEP2025",
+        "tokenAddress": "0xBC6736d346a5eBC0dEbc997397912CD9b8FAe10a"
+      },
+      {
+        "symbol": "tETH",
+        "tokenAddress": "0xD11c452fc99cF405034ee446803b6F6c1F6d5ED8"
+      },
+      {
+        "symbol": "ezETH",
+        "tokenAddress": "0xbf5495Efe5DB9ce00f80364C8B423567e58d2110"
+      },
+      {
+        "symbol": "XAUt",
+        "tokenAddress": "0x68749665FF8D2d112Fa859AA293F07A622782F38"
+      },
+      {
+        "symbol": "PT-sUSDE-27NOV2025",
+        "tokenAddress": "0xe6A934089BBEe34F832060CE98848359883749B3"
+      },
+      {
+        "symbol": "PT-USDe-27NOV2025",
+        "tokenAddress": "0x62C6E813b9589C3631Ba0Cdb013acdB8544038B7"
+      },
+      {
+        "symbol": "PT-USDe-5FEB2026",
+        "tokenAddress": "0x1F84a51296691320478c98b8d77f2Bbd17D34350"
+      },
+      {
+        "symbol": "PT-sUSDE-5FEB2026",
+        "tokenAddress": "0xE8483517077afa11A9B07f849cee2552f040d7b2"
+      },
+      {
+        "symbol": "mUSD",
+        "tokenAddress": "0xacA92E438df0B2401fF60dA7E4337B687a2435DA"
+      },
+      {
+        "symbol": "syrupUSDT",
+        "tokenAddress": "0x356B8d89c1e1239Cbbb9dE4815c39A1474d5BA7D"
+      },
+      {
+        "symbol": "USDG",
+        "tokenAddress": "0xe343167631d89B6Ffc58B88d6b7fB0228795491D"
+      },
+      {
+        "symbol": "PT-USDe-7MAY2026",
+        "tokenAddress": "0xAeBf0Bb9f57E89260d57f31AF34eB58657d96Ce0"
+      },
+      {
+        "symbol": "PT-sUSDE-7MAY2026",
+        "tokenAddress": "0x3de0ff76E8b528C092d47b9DaC775931cef80F49"
+      },
+      {
+        "symbol": "PT-srUSDe-2APR2026",
+        "tokenAddress": "0x9Bf45ab47747F4B4dD09B3C2c73953484b4eB375"
+      },
+      {
+        "symbol": "BTC.b",
+        "tokenAddress": "0xB0F70C0bD6FD87dbEb7C10dC692a2a6106817072"
+      },
+      {
+        "symbol": "PT-srUSDe-25JUN2026",
+        "tokenAddress": "0x619D75E3b790eBC21c289f2805Bb7177A7D732E2"
+      },
+      {
+        "symbol": "PT-USDG-28MAY2026",
+        "tokenAddress": "0x9db38D74a0D29380899aD354121DfB521aDb0548"
+      },
+      {
+        "symbol": "PT-srUSDe-22OCT2026",
+        "tokenAddress": "0x59bC9FaE5D62B19d4f8d07D758047aCb9EE19d34"
+      }
+    ],
+    "_WETH_underlying_fromAave": "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2",
+    "_weETH_underlying_fromAave": "0xCd5fE23C85820F7B72D0926FC9b05b43E359b7ee",
+    "_WETH_reserveIndex": 0,
+    "_weETH_reserveIndex": 28,
+    "WETH.getReserveConfigurationData": [
+      "18",
+      "8050",
+      "8300",
+      "10500",
+      "1500",
+      true,
+      true,
+      false,
+      true,
+      false
+    ],
+    "WETH.getReserveCaps": [
+      "2400000",
+      "2700000"
+    ],
+    "WETH.getPaused": false,
+    "WETH.getReserveTokensAddresses": [
+      "0x4d5F47FA6A74757f35C14fD3a6Ef8E3C9BC514E8",
+      "0x0000000000000000000000000000000000000000",
+      "0xeA51d7853EEFb32b6ee06b1C12E6dcCA88Be0fFE"
+    ],
+    "WETH.underlying.symbol": "WETH",
+    "WETH.underlying.decimals": 18,
+    "WETH.aToken.totalSupply": "REVERT/ERROR: Address \"undefined\" is invalid.",
+    "WETH.vToken.totalSupply": "REVERT/ERROR: Address \"undefined\" is invalid.",
+    "weETH.getReserveConfigurationData": [
+      "18",
+      "7750",
+      "8000",
+      "10700",
+      "4500",
+      true,
+      false,
+      false,
+      true,
+      false
+    ],
+    "weETH.getReserveCaps": [
+      "1",
+      "1100000"
+    ],
+    "weETH.getPaused": false,
+    "weETH.getReserveTokensAddresses": [
+      "0xBdfa7b7893081B35Fb54027489e2Bc7A38275129",
+      "0x0000000000000000000000000000000000000000",
+      "0x77ad9BF13a52517AD698D65913e8D381300c8Bf3"
+    ],
+    "weETH.underlying.symbol": "weETH",
+    "weETH.underlying.decimals": 18,
+    "weETH.aToken.totalSupply": "REVERT/ERROR: Address \"undefined\" is invalid.",
+    "weETH.vToken.totalSupply": "REVERT/ERROR: Address \"undefined\" is invalid.",
+    "emode[1].label": "ETH correlated",
+    "emode[1].collateralConfig": {
+      "ltv": 9300,
+      "liquidationThreshold": 9500,
+      "liquidationBonus": 10100
+    },
+    "emode[1].collateralBitmap": "2952790659",
+    "emode[1].borrowableBitmap": "1",
+    "emode[1].weETH_isCollateral": true,
+    "emode[1].WETH_isBorrowable": true,
+    "emode[2].label": "sUSDe Stablecoins",
+    "emode[2].collateralConfig": {
+      "ltv": 9000,
+      "liquidationThreshold": 9200,
+      "liquidationBonus": 10400
+    },
+    "emode[2].collateralBitmap": "5368709120",
+    "emode[2].borrowableBitmap": "264",
+    "emode[2].weETH_isCollateral": false,
+    "emode[2].WETH_isBorrowable": false,
+    "emode[3].label": "rsETH__ETH_wstETH_ETHx",
+    "emode[3].collateralConfig": {
+      "ltv": 9300,
+      "liquidationThreshold": 9500,
+      "liquidationBonus": 10100
+    },
+    "emode[3].collateralBitmap": "68719476736",
+    "emode[3].borrowableBitmap": "2147483651",
+    "emode[3].weETH_isCollateral": false,
+    "emode[3].WETH_isBorrowable": true,
+    "emode[4].label": "LBTC_WBTC",
+    "emode[4].collateralConfig": {
+      "ltv": 8400,
+      "liquidationThreshold": 8600,
+      "liquidationBonus": 10300
+    },
+    "emode[4].collateralBitmap": "137438953472",
+    "emode[4].borrowableBitmap": "4",
+    "emode[4].weETH_isCollateral": false,
+    "emode[4].WETH_isBorrowable": false,
+    "emode[5].label": "LBTC_cbBTC",
+    "emode[5].collateralConfig": {
+      "ltv": 8400,
+      "liquidationThreshold": 8600,
+      "liquidationBonus": 10300
+    },
+    "emode[5].collateralBitmap": "137438953472",
+    "emode[5].borrowableBitmap": "17179869184",
+    "emode[5].weETH_isCollateral": false,
+    "emode[5].WETH_isBorrowable": false,
+    "emode[6].label": "LBTC_tBTC",
+    "emode[6].collateralConfig": {
+      "ltv": 8400,
+      "liquidationThreshold": 8600,
+      "liquidationBonus": 10300
+    },
+    "emode[6].collateralBitmap": "137438953472",
+    "emode[6].borrowableBitmap": "8589934592",
+    "emode[6].weETH_isCollateral": false,
+    "emode[6].WETH_isBorrowable": false,
+    "emode[7].label": "eBTC/WBTC",
+    "emode[7].collateralConfig": {
+      "ltv": 8300,
+      "liquidationThreshold": 8500,
+      "liquidationBonus": 10300
+    },
+    "emode[7].collateralBitmap": "274877906944",
+    "emode[7].borrowableBitmap": "4",
+    "emode[7].weETH_isCollateral": false,
+    "emode[7].WETH_isBorrowable": false,
+    "emode[8].label": "PT-sUSDe Stablecoins Jul 2025",
+    "emode[8].collateralConfig": {
+      "ltv": 9000,
+      "liquidationThreshold": 9200,
+      "liquidationBonus": 10300
+    },
+    "emode[8].collateralBitmap": "2203318222848",
+    "emode[8].borrowableBitmap": "264",
+    "emode[8].weETH_isCollateral": false,
+    "emode[8].WETH_isBorrowable": false,
+    "emode[9].label": "PT-eUSDe Stablecoins May 2025",
+    "emode[9].collateralConfig": {
+      "ltv": 9100,
+      "liquidationThreshold": 9300,
+      "liquidationBonus": 10210
+    },
+    "emode[9].collateralBitmap": "36283883716608",
+    "emode[9].borrowableBitmap": "264",
+    "emode[9].weETH_isCollateral": false,
+    "emode[9].WETH_isBorrowable": false,
+    "emode[10].label": "PT-USDe Stablecoins July 2025",
+    "emode[10].collateralConfig": {
+      "ltv": 9100,
+      "liquidationThreshold": 9300,
+      "liquidationBonus": 10210
+    },
+    "emode[10].collateralBitmap": "8797166764032",
+    "emode[10].borrowableBitmap": "264",
+    "emode[10].weETH_isCollateral": false,
+    "emode[10].WETH_isBorrowable": false,
+    "emode[11].label": "USDe Stablecoin",
+    "emode[11].collateralConfig": {
+      "ltv": 9000,
+      "liquidationThreshold": 9300,
+      "liquidationBonus": 10200
+    },
+    "emode[11].collateralBitmap": "1073741824",
+    "emode[11].borrowableBitmap": "264",
+    "emode[11].weETH_isCollateral": false,
+    "emode[11].WETH_isBorrowable": false,
+    "emode[12].label": "PT-USDe USDe July 2025",
+    "emode[12].collateralConfig": {
+      "ltv": 9400,
+      "liquidationThreshold": 9600,
+      "liquidationBonus": 10110
+    },
+    "emode[12].collateralBitmap": "8797166764032",
+    "emode[12].borrowableBitmap": "1073741824",
+    "emode[12].weETH_isCollateral": false,
+    "emode[12].WETH_isBorrowable": false,
+    "eETH.symbol": "eETH",
+    "eETH.decimals": 18,
+    "eETH.name": "ether.fi ETH",
+    "weETH.symbol": "weETH",
+    "weETH.decimals": 18,
+    "weETH.getRate": "1099835630480344736",
+    "weETH.eETH": "0x35fA164735182de50811E8e2E824cFb9B6118ac2",
+    "weETH.liquidityPool": "0x308861A430be4cce5502d0A12724771Fc6DaF216",
+    "LP.eETH": "0x35fA164735182de50811E8e2E824cFb9B6118ac2",
+    "stETH.symbol": "stETH",
+    "stETH.decimals": 18,
+    "wstETH.symbol": "wstETH",
+    "wstETH.decimals": 18,
+    "wstETH.stEthPerToken": "1239952638214169360",
+    "wstETH.stETH": "0xae7ab96520DE3A18E5e111B5EaAb095312D7fE84",
+    "eETH.impl(EIP1967)": "0xd1901dd36cbf4a81386d0162df2707f7ddb60527",
+    "weETH.impl(EIP1967)": "0xa6ca0607190d03cf16fe6f2865cf40c3d160ccf3",
+    "LP.impl(EIP1967)": "0x17a16747d03006c9754548ac0d0aff48783a4a45",
+    "POOL.impl(EIP1967)": "0x728a138a4823392c2efa55e028d434f526fe03cf",
+    "ORACLE.impl(EIP1967)": "0x0000000000000000000000000000000000000000"
+  }
+}
