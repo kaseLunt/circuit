@@ -3,7 +3,7 @@ id: W02
 type: work
 title: Land founding product docs — spec and transplant manifest
 phase: P0
-status: candidate
+status: active
 evidence_target: docs-landed-and-compliant-with-vision-antigoals
 priority: 0
 depends_on: []
