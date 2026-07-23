@@ -10,19 +10,32 @@
  */
 import { toFunctionSelector } from "viem";
 
-/** Aave custom errors we surface with tailored copy (extend as needed). */
+/**
+ * Aave v3.7 custom errors we surface with tailored copy. Names match
+ * aave-v3-origin `Errors.sol`; selectors are derived from the BARE signature
+ * (Solidity error selectors == keccak256(canonicalSig)[:4], no "error " prefix).
+ * SELECTOR_SELFTEST below pins a few against their known on-chain values so a
+ * future viem/API change cannot silently reintroduce a wrong derivation.
+ */
 const CUSTOM_ERROR_SIGNATURES: Record<string, string> = {
   "SupplyCapExceeded()": "Aave supply cap reached for this reserve",
   "BorrowCapExceeded()": "Aave borrow cap reached for this reserve",
   "HealthFactorLowerThanLiquidationThreshold()":
     "Health factor would fall below the liquidation threshold",
   "CollateralCannotCoverNewBorrow()": "Collateral cannot cover the requested borrow",
-  "CollateralBalanceIsZero()": "No collateral supplied",
+  "LtvValidationFailed()": "Loan-to-value validation failed",
   "BorrowingNotEnabled()": "Borrowing is not enabled for this reserve",
+  "NotBorrowableInEMode()": "Asset is not borrowable in the selected e-mode category",
+  "ReserveInactive()": "Reserve is inactive",
   "ReserveFrozen()": "Reserve is frozen",
   "ReservePaused()": "Reserve is paused",
   "InconsistentEModeCategory()": "Position is inconsistent with the selected e-mode category",
   "NotEnoughAvailableUserBalance()": "Not enough balance for this action",
+};
+
+/** Known-correct selectors (keccak256(sig)[:4]) — non-tautological guard. */
+const SELECTOR_SELFTEST: Record<string, string> = {
+  "SupplyCapExceeded()": "0xf58f733a",
 };
 
 /** Legacy Error(string) numeric codes (pre-v3.4). Matrix §2 documents the model. */
@@ -33,13 +46,18 @@ const LEGACY_CODES: Record<string, string> = {
   "50": "Aave borrow cap reached for this reserve",
 };
 
-/** selector (0x + 8 hex) → human message, derived from signatures at load. */
+/** selector (0x + 8 hex) → message, derived from the BARE signature at load. */
 const SELECTOR_TO_MESSAGE: ReadonlyMap<string, string> = new Map(
-  Object.entries(CUSTOM_ERROR_SIGNATURES).map(([sig, msg]) => [
-    toFunctionSelector(`error ${sig}`),
-    msg,
-  ]),
+  Object.entries(CUSTOM_ERROR_SIGNATURES).map(([sig, msg]) => [toFunctionSelector(sig), msg]),
 );
+
+// Fail fast if the derivation ever diverges from a known on-chain selector.
+for (const [sig, expected] of Object.entries(SELECTOR_SELFTEST)) {
+  const got = toFunctionSelector(sig);
+  if (got !== expected) {
+    throw new Error(`error-selector derivation broken: ${sig} → ${got}, expected ${expected}`);
+  }
+}
 
 export interface DecodedRevert {
   /** Human-readable explanation. */

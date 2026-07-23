@@ -12,17 +12,30 @@ export const RAY = 10n ** 27n;
 /** WAD = 1e18 (Aave health-factor fixed point, and 18-decimal tokens). */
 export const WAD = 10n ** 18n;
 
+export type RoundingMode = "trunc" | "nearest";
+
 /**
  * Format a fixed-point bigint as a decimal string with exactly `displayDecimals`
- * fraction digits, truncated (not rounded) toward zero. `decimals` is the
- * value's own fixed-point scale.
+ * fraction digits. `decimals` is the value's own fixed-point scale. `mode`:
+ * "trunc" (default, conservative — never overstates a token amount) or "nearest"
+ * (half-up away from zero, conventional for money and rate displays).
  */
-export function formatUnits(value: bigint, decimals: number, displayDecimals: number): string {
+export function formatUnits(
+  value: bigint,
+  decimals: number,
+  displayDecimals: number,
+  mode: RoundingMode = "trunc",
+): string {
   if (decimals < 0 || displayDecimals < 0) {
     throw new RangeError("decimals and displayDecimals must be non-negative");
   }
   const negative = value < 0n;
-  const abs = negative ? -value : value;
+  let abs = negative ? -value : value;
+  // Half-up rounding when dropping precision for a "nearest" display.
+  if (mode === "nearest" && displayDecimals < decimals) {
+    const drop = 10n ** BigInt(decimals - displayDecimals);
+    abs = ((abs + drop / 2n) / drop) * drop;
+  }
   const scale = 10n ** BigInt(decimals);
   const whole = abs / scale;
   const frac = abs % scale;
@@ -60,7 +73,7 @@ export function formatToken(wei: bigint, displayDecimals = 4): string {
  * as a currency string.
  */
 export function formatUsdBase(base8: bigint, displayDecimals = 2): string {
-  return `$${formatUnits(base8, 8, displayDecimals)}`;
+  return `$${formatUnits(base8, 8, displayDecimals, "nearest")}`;
 }
 
 /**
@@ -83,9 +96,10 @@ export function formatHealthFactor(hfWad: bigint | null): string {
  */
 export function formatRayRateAsPct(ratePerAnnumRay: bigint, displayDecimals = 2): string {
   // percent = rate / RAY * 100; scale to keep integer math, truncate.
-  const scale = 10n ** BigInt(displayDecimals);
-  const pctScaled = (ratePerAnnumRay * 100n * scale) / RAY;
-  return `${formatUnits(pctScaled, displayDecimals, displayDecimals)}%`;
+  // Scale to one extra digit, then round half-up to displayDecimals.
+  const scale = 10n ** BigInt(displayDecimals + 1);
+  const pctScaledPlus1 = (ratePerAnnumRay * 100n * scale) / RAY;
+  return `${formatUnits(pctScaledPlus1, displayDecimals + 1, displayDecimals, "nearest")}%`;
 }
 
 /** Shorten an address for display: 0x1234…abcd. */

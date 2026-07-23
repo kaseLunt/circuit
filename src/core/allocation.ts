@@ -17,34 +17,43 @@ export function outgoingBps(edges: readonly Edge[], sourceId: string): number {
 
 /**
  * Split `amount` across `edges` (all sharing one source) by allocation bps.
- * Returns `[edgeId, amount]` pairs. Floor each share; the final edge absorbs the
- * rounding remainder so the split is conservative and exactly summing.
+ * Returns `[edgeId, amount]` pairs. Each share is floored; the rounding
+ * remainder is assigned to the edge with the LARGEST allocation (ties → lowest
+ * index) — a canonical, order-independent recipient, so the dust always lands on
+ * the most significant edge rather than wherever it happens to sit in the array.
  *
+ * Zero-allocation edges are rejected (a 0-bps edge has no place in a plan).
  * `edges` must total ≤ 10000 bps (validated upstream). If they total < 10000,
- * the unallocated portion is intentionally dropped (retained by the source),
- * so the returned amounts sum to `floor(amount * totalBps / 10000)`, not `amount`.
+ * the unallocated portion is intentionally retained by the source, so the parts
+ * sum to `floor(amount · totalBps / 10000)`, not `amount`.
  */
 export function splitAmount(
   amount: bigint,
   edges: readonly Edge[],
 ): Array<{ readonly edgeId: string; readonly amount: bigint }> {
   if (amount < 0n) throw new RangeError("amount must be non-negative");
+  if (edges.length === 0) return [];
+  if (edges.some((e) => e.allocationBps <= 0)) {
+    throw new RangeError("zero/negative-allocation edge is not permitted in a split");
+  }
   const totalBps = edges.reduce((s, e) => s + e.allocationBps, 0);
   if (totalBps > 10_000) throw new RangeError(`allocation exceeds 100%: ${totalBps} bps`);
-  if (edges.length === 0) return [];
 
-  const allocated = (amount * BigInt(totalBps)) / 10_000n; // total that actually flows out
-  const out: Array<{ edgeId: string; amount: bigint }> = [];
-  let assigned = 0n;
-  for (let i = 0; i < edges.length; i += 1) {
-    const e = edges[i]!;
-    if (i === edges.length - 1) {
-      out.push({ edgeId: e.id, amount: allocated - assigned });
-    } else {
-      const share = totalBps === 0 ? 0n : (allocated * BigInt(e.allocationBps)) / BigInt(totalBps);
-      out.push({ edgeId: e.id, amount: share });
-      assigned += share;
+  const allocated = (amount * BigInt(totalBps)) / 10_000n; // total that flows out
+  const out = edges.map((e) => ({
+    edgeId: e.id,
+    amount: (allocated * BigInt(e.allocationBps)) / BigInt(totalBps),
+  }));
+
+  // Assign the remainder to the largest-allocation edge (deterministic).
+  const assigned = out.reduce((s, o) => s + o.amount, 0n);
+  const remainder = allocated - assigned;
+  if (remainder > 0n) {
+    let maxIdx = 0;
+    for (let i = 1; i < edges.length; i += 1) {
+      if (edges[i]!.allocationBps > edges[maxIdx]!.allocationBps) maxIdx = i;
     }
+    out[maxIdx] = { edgeId: out[maxIdx]!.edgeId, amount: out[maxIdx]!.amount + remainder };
   }
   return out;
 }

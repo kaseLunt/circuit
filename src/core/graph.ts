@@ -35,6 +35,69 @@ export interface StrategyGraph {
 export const MAX_BLOCKS = 64;
 export const MAX_EDGES = 128;
 
+const STAKE_PROTOCOLS = new Set<string>(["etherfi", "lido"]);
+const LEND_PROTOCOLS = new Set<string>(["aave-v3"]);
+/** Supported collateral assets for a lend block on the pinned Core market. */
+const LEND_ASSETS = new Set<string>(["weETH", "wstETH", "WETH"]);
+/** Borrowable assets in v1 (matrix: WETH is borrowable, weETH is collateral-only). */
+const BORROW_ASSETS = new Set<string>(["WETH"]);
+/** Valid wrap/unwrap conversions (matrix §7). */
+const WRAP_PAIRS = new Set<string>(["eETH>weETH", "stETH>wstETH", "ETH>WETH"]);
+const UNWRAP_PAIRS = new Set<string>(["weETH>eETH", "wstETH>stETH", "WETH>ETH"]);
+
+function isPositiveAmount(v: unknown): boolean {
+  if (typeof v === "number") return Number.isFinite(v) && v > 0;
+  if (typeof v === "string") return /^\d+(\.\d+)?$/.test(v) && Number(v) > 0;
+  return false;
+}
+
+/** Per-block parameter/semantic checks (SPEC §5.6). Pushes into `errors`. */
+function validateBlockParams(b: Block, errors: string[]): void {
+  const p = b.params;
+  const need = (key: string): string | number | undefined => p[key];
+  switch (b.type) {
+    case "input":
+      if (need("asset") !== "ETH") errors.push(`block ${b.id}: input asset must be ETH`);
+      if (!isPositiveAmount(need("amount"))) errors.push(`block ${b.id}: input needs a positive amount`);
+      break;
+    case "stake":
+      if (!STAKE_PROTOCOLS.has(String(need("protocol")))) {
+        errors.push(`block ${b.id}: unsupported stake protocol '${need("protocol")}'`);
+      }
+      break;
+    case "wrap":
+      if (!WRAP_PAIRS.has(`${need("from")}>${need("to")}`)) {
+        errors.push(`block ${b.id}: unsupported wrap ${need("from")}→${need("to")}`);
+      }
+      break;
+    case "unwrap":
+      if (!UNWRAP_PAIRS.has(`${need("from")}>${need("to")}`)) {
+        errors.push(`block ${b.id}: unsupported unwrap ${need("from")}→${need("to")}`);
+      }
+      break;
+    case "lend":
+      if (!LEND_PROTOCOLS.has(String(need("protocol")))) {
+        errors.push(`block ${b.id}: lend protocol must be aave-v3`);
+      }
+      if (!LEND_ASSETS.has(String(need("asset")))) {
+        errors.push(`block ${b.id}: unsupported lend asset '${need("asset")}'`);
+      }
+      break;
+    case "borrow":
+      if (!LEND_PROTOCOLS.has(String(need("protocol")))) {
+        errors.push(`block ${b.id}: borrow protocol must be aave-v3`);
+      }
+      if (!BORROW_ASSETS.has(String(need("asset")))) {
+        errors.push(`block ${b.id}: unsupported/collateral-only borrow asset '${need("asset")}'`);
+      }
+      const bps = need("allocationBps");
+      if (typeof bps !== "number" || bps < 1 || bps > 10_000) {
+        errors.push(`block ${b.id}: borrow allocationBps must be in [1,10000]`);
+      }
+      break;
+  }
+}
+
 export interface GraphValidation {
   readonly ok: boolean;
   readonly errors: readonly string[];
@@ -89,12 +152,54 @@ export function validateGraph(g: StrategyGraph): GraphValidation {
   // Exactly one input block, and inputs have no incoming edges.
   const inputs = g.blocks.filter((b) => b.type === "input");
   if (inputs.length !== 1) errors.push(`expected exactly one input block, found ${inputs.length}`);
-  const hasIncoming = new Set(g.edges.map((e) => e.target));
-  for (const b of inputs) {
-    if (hasIncoming.has(b.id)) errors.push(`input block ${b.id} must have no incoming edges`);
+
+  // Single-producer flow (SPEC §5.6): every non-input block has exactly one
+  // incoming edge; the input has none. This gives plan.ts an unambiguous
+  // step-output(producerStepId) for each consuming block.
+  const inDegree = new Map<string, number>();
+  for (const b of g.blocks) inDegree.set(b.id, 0);
+  for (const e of g.edges) {
+    if (blockIds.has(e.target)) inDegree.set(e.target, (inDegree.get(e.target) ?? 0) + 1);
+  }
+  for (const b of g.blocks) {
+    const deg = inDegree.get(b.id) ?? 0;
+    if (b.type === "input" && deg !== 0) errors.push(`input block ${b.id} must have no incoming edges`);
+    if (b.type !== "input" && deg !== 1) {
+      errors.push(`block ${b.id} must have exactly one producer (has ${deg})`);
+    }
   }
 
+  // Reachability: every block reachable from the single input (no islands).
+  if (inputs.length === 1 && !errors.some((e) => e.includes("is not a block"))) {
+    const reached = reachableFrom(g, inputs[0]!.id);
+    for (const b of g.blocks) {
+      if (!reached.has(b.id)) errors.push(`block ${b.id} is not reachable from the input`);
+    }
+  }
+
+  // Per-block parameter/semantic validation.
+  for (const b of g.blocks) validateBlockParams(b, errors);
+
   return errors.length === 0 ? ok() : { ok: false, errors };
+}
+
+/** Block ids reachable from `startId` following edges forward. */
+function reachableFrom(g: StrategyGraph, startId: string): Set<string> {
+  const adj = new Map<string, string[]>();
+  for (const b of g.blocks) adj.set(b.id, []);
+  for (const e of g.edges) adj.get(e.source)?.push(e.target);
+  const seen = new Set<string>([startId]);
+  const stack = [startId];
+  while (stack.length > 0) {
+    const id = stack.pop()!;
+    for (const next of adj.get(id) ?? []) {
+      if (!seen.has(next)) {
+        seen.add(next);
+        stack.push(next);
+      }
+    }
+  }
+  return seen;
 }
 
 /** Kahn's algorithm cycle detection over the block graph. */

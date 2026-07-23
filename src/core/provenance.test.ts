@@ -6,6 +6,7 @@ import {
   configured,
   valueOf,
   provenanceTrail,
+  observationMinter,
 } from "./provenance";
 
 describe("provenance constructors", () => {
@@ -31,6 +32,37 @@ describe("provenance constructors", () => {
     const c = configured(150, "HF_WARN_BPS", "health-factor.ts");
     expect(c.kind).toBe("configured");
     expect(c.name).toBe("HF_WARN_BPS");
+  });
+});
+
+describe("observationMinter — snapshot-bound observations", () => {
+  it("stamps every observation with the snapshot's block", () => {
+    const m = observationMinter(25_592_678n, 1_753_240_451);
+    const p = m.observe(211_593_732_385n, "AaveOracle.getAssetPrice(weETH)");
+    expect(p.kind).toBe("observed");
+    expect(p.block).toBe(25_592_678n);
+    expect(p.fetchedAt).toBe(1_753_240_451);
+  });
+  it("rejects a non-positive block", () => {
+    expect(() => observationMinter(0n, 0)).toThrow(RangeError);
+  });
+});
+
+describe("derived — same-block enforcement", () => {
+  it("allows a derivation whose observations share a block", () => {
+    const m = observationMinter(100n, 0);
+    const a = m.observe(3n, "a");
+    const b = m.observe(4n, "b");
+    expect(() => derived(12n, "a*b", [a, b])).not.toThrow();
+  });
+  it("throws when observations come from different blocks", () => {
+    const a = observed(3n, "a", 100n, 0);
+    const b = observed(4n, "b", 101n, 0);
+    expect(() => derived(12n, "a*b", [a, b])).toThrow(/multiple blocks/);
+  });
+  it("allows mixing observed with entered/configured (no extra block)", () => {
+    const a = observed(3n, "a", 100n, 0);
+    expect(() => derived(9n, "a*3", [a, entered(3n)])).not.toThrow();
   });
 });
 

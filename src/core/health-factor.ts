@@ -1,15 +1,15 @@
 /**
  * Health-factor and liquidation math (SPEC §5.4). Pure, integer, WAD/base8.
  *
- * Algebra ported from the prototype's liquidation service (its strongest code),
- * rebuilt with the boundary-review corrections: bigint throughout (no float drift
- * near HF=1), e-mode-category liquidation thresholds, an explicit no-debt sentinel
- * and unknown state, and — for the correlated weETH/WETH pair — a liquidation
- * *ratio* rather than a misleading USD liquidation price (matrix §5: weETH is
- * priced by a capped exchange-rate oracle over ETH/USD, so pair risk moves with
- * the ratio, not the ETH price level).
+ * The HF sequence replicates Aave v3.7 `GenericLogic.calculateUserAccountData`
+ * exactly — weighted-average liquidation threshold, then `percentMul` (half-up),
+ * then `wadDiv` (half-up) — so `computeHealthFactor` reproduces the on-chain
+ * `getUserAccountData().healthFactor` the fork suite cross-checks against. bigint
+ * throughout (no float drift near HF=1); explicit no-debt sentinel and unknown
+ * state; and, for the correlated weETH/WETH pair, a liquidation *ratio* (matrix
+ * §5: weETH is priced by a capped exchange-rate oracle over ETH/USD).
  *
- * NOTE (D-004): money-math — Codex senior review before the P1-exit receipt.
+ * NOTE (D-004): money-math — reviewed by Codex; fork cross-check is authoritative.
  */
 import { WAD, HF_NO_DEBT } from "./format";
 
@@ -17,6 +17,20 @@ export { HF_NO_DEBT };
 
 /** Warning threshold: below this HF the borrow block shows its warning state. */
 export const HF_WARN_WAD = (150n * WAD) / 100n; // 1.50, named constant (SPEC §7)
+
+const PERCENTAGE_FACTOR = 10_000n;
+const HALF_PERCENTAGE_FACTOR = 5_000n;
+
+/** Aave percentMul: (value · pctBps + 0.5·1e4) / 1e4, half-up. */
+export function percentMul(value: bigint, pctBps: bigint): bigint {
+  return (value * pctBps + HALF_PERCENTAGE_FACTOR) / PERCENTAGE_FACTOR;
+}
+
+/** Aave wadDiv: (a · WAD + b/2) / b, half-up. Throws on zero denominator. */
+export function wadDiv(a: bigint, b: bigint): bigint {
+  if (b <= 0n) throw new RangeError("wadDiv denominator must be positive");
+  return (a * WAD + b / 2n) / b;
+}
 
 /** Oracle base-currency amount (8 decimals) of an 18-decimal token position. */
 export function usdBase(amountWei: bigint, priceBase8: bigint): bigint {
@@ -35,9 +49,14 @@ export type HealthFactor =
   | { readonly status: "no-debt" }
   | { readonly status: "unknown"; readonly reason: string };
 
+/** Tri-state risk classification — "unknown" is never collapsed into a safe boolean. */
+export type RiskState = "ok" | "warning" | "unknown";
+
 /**
- * Health factor from collateral entries and total debt (base8).
- *   hf = Σ(collateral_i.base · lt_i) / totalDebtBase        (WAD)
+ * Health factor via the exact Aave v3.7 GenericLogic sequence:
+ *   avgLT   = floor(Σ base_i·lt_i / Σ base_i)              (bps)
+ *   adjusted = percentMul(Σ base_i, avgLT)                 (half-up)
+ *   hf       = wadDiv(adjusted, totalDebtBase)             (half-up, WAD)
  * debt == 0 → no-debt; any null input → unknown (never silently "safe").
  */
 export function computeHealthFactor(
@@ -48,11 +67,19 @@ export function computeHealthFactor(
     return { status: "unknown", reason: "missing collateral or debt snapshot" };
   }
   if (totalDebtBase === 0n) return { status: "no-debt" };
-  let weighted = 0n; // Σ base·ltBps  (base8 × bps)
-  for (const c of collateral) weighted += c.base * BigInt(c.ltBps);
-  const adjustedBase = weighted / 10_000n; // base8
-  const hfWad = (adjustedBase * WAD) / totalDebtBase;
-  return { status: "healthy", hfWad };
+
+  let totalColl = 0n;
+  let weighted = 0n; // Σ base·ltBps
+  for (const c of collateral) {
+    if (c.ltBps < 0 || c.ltBps > 10_000) {
+      return { status: "unknown", reason: `ltBps ${c.ltBps} out of range` };
+    }
+    totalColl += c.base;
+    weighted += c.base * BigInt(c.ltBps);
+  }
+  const avgLtBps = totalColl === 0n ? 0n : weighted / totalColl; // floor, as on-chain
+  const adjusted = percentMul(totalColl, avgLtBps);
+  return { status: "healthy", hfWad: wadDiv(adjusted, totalDebtBase) };
 }
 
 /** Numeric HF for comparisons; no-debt → sentinel, unknown → null. */
@@ -62,22 +89,27 @@ export function hfWadValue(hf: HealthFactor): bigint | null {
   return null;
 }
 
-/** True when a known HF sits below the warning threshold (unknown ⇒ not "safe"). */
-export function isWarning(hf: HealthFactor): boolean {
+/**
+ * Tri-state risk. "unknown" is returned distinctly so no caller can read a
+ * missing snapshot as safe (SPEC §5.4). A boolean gate must branch on this.
+ */
+export function riskState(hf: HealthFactor): RiskState {
   const v = hfWadValue(hf);
-  return v !== null && v < HF_WARN_WAD;
+  if (v === null) return "unknown";
+  return v < HF_WARN_WAD ? "warning" : "ok";
 }
 
 /**
  * Liquidation ratio for a single correlated collateral/debt pair: the
  * collateral/debt oracle price ratio (WAD) at which HF reaches 1.
  *
- *   HF = collWei·priceColl·LT / (debtWei·priceDebt)
- *   HF = 1  ⇒  priceColl/priceDebt = debtWei / (collWei · LT)
+ *   HF = collWei·priceColl·LT / (debtWei·priceDebt) = 1
+ *   ⇒ priceColl/priceDebt = debtWei / (collWei · LT)
+ *   R_liq(WAD) = debtWei · 1e4 · WAD / (collWei · ltBps)
  *
- * Returns the WAD ratio `R_liq`. Compare to the current ratio to render
- * "liquidates if weETH/WETH falls −X%". Throws if the position cannot be
- * liquidated by a ratio move (no collateral or no debt).
+ * Rounded UP (ceiling): a higher liquidation ratio means liquidation triggers
+ * on a smaller downward move — conservative for a risk display. Throws on
+ * degenerate positions or an invalid threshold (never divides by a floored zero).
  */
 export function liquidationRatioWad(
   collateralWei: bigint,
@@ -86,15 +118,15 @@ export function liquidationRatioWad(
 ): bigint {
   if (collateralWei <= 0n) throw new RangeError("collateralWei must be positive");
   if (debtWei <= 0n) throw new RangeError("debtWei must be positive");
-  const ltWad = (BigInt(ltBps) * WAD) / 10_000n;
-  const denom = (collateralWei * ltWad) / WAD;
-  return (debtWei * WAD) / denom;
+  if (ltBps <= 0 || ltBps > 10_000) throw new RangeError("ltBps out of range");
+  const numer = debtWei * PERCENTAGE_FACTOR * WAD;
+  const denom = collateralWei * BigInt(ltBps);
+  return (numer + denom - 1n) / denom; // ceiling
 }
 
 /**
  * Signed WAD fraction the collateral/debt ratio must move to reach liquidation:
- * (R_liq − R_now) / R_now. Negative ⇒ ratio must fall (the normal case);
- * the display is "−X% from now".
+ * (R_liq − R_now) / R_now. Negative ⇒ ratio must fall (the normal case).
  */
 export function ratioMoveToLiquidationWad(currentRatioWad: bigint, liqRatioWad: bigint): bigint {
   if (currentRatioWad <= 0n) throw new RangeError("currentRatioWad must be positive");

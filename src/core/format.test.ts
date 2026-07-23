@@ -12,9 +12,15 @@ import {
 } from "./format";
 
 describe("formatUnits", () => {
-  it("truncates toward zero, does not round", () => {
+  it("truncates toward zero by default, does not round", () => {
     // 1.99999 at 5 decimals shown to 2 → "1.99"
     expect(formatUnits(199_999n, 5, 2)).toBe("1.99");
+  });
+
+  it("nearest mode rounds half-up away from zero", () => {
+    expect(formatUnits(199_999n, 5, 2, "nearest")).toBe("2.00");
+    expect(formatUnits(125n, 3, 2, "nearest")).toBe("0.13"); // 0.125 → 0.13
+    expect(formatUnits(-125n, 3, 2, "nearest")).toBe("-0.13");
   });
 
   it("groups thousands", () => {
@@ -43,9 +49,9 @@ describe("formatToken / formatUsdBase", () => {
     expect(formatToken(1_099_835_630_856_114_428n)).toBe("1.0998");
   });
 
-  it("formats an 8-decimal USD base amount", () => {
-    // 2115.93732385 USD (weETH price base) → "$2,115.93"
-    expect(formatUsdBase(211_593_732_385n)).toBe("$2,115.93");
+  it("formats an 8-decimal USD base amount with nearest rounding", () => {
+    // 2115.93732385 USD (weETH price base) → "$2,115.94" (nearest, conventional)
+    expect(formatUsdBase(211_593_732_385n)).toBe("$2,115.94");
   });
 });
 

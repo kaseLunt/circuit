@@ -12,19 +12,29 @@ function errorString(reason: string): string {
 }
 
 describe("decodeRevert — custom errors (v3.7)", () => {
-  it("maps a known custom-error selector to human copy", () => {
-    const data = toFunctionSelector("error SupplyCapExceeded()");
-    const r = decodeRevert(data);
+  it("decodes the KNOWN on-chain SupplyCapExceeded selector 0xf58f733a", () => {
+    // Hardcoded real selector — independent of the module's derivation (non-tautological).
+    const r = decodeRevert("0xf58f733a");
     expect(r.source).toBe("custom-error");
     expect(r.message).toContain("supply cap");
-    expect(r.raw).toBe(data);
+    expect(r.raw).toBe("0xf58f733a");
+  });
+
+  it("the module derives selectors from the BARE signature", () => {
+    // Sanity: bare-signature derivation equals the known selector.
+    expect(toFunctionSelector("SupplyCapExceeded()")).toBe("0xf58f733a");
   });
 
   it("maps the HF liquidation-threshold error (the failure-beat revert)", () => {
-    const data = toFunctionSelector("error HealthFactorLowerThanLiquidationThreshold()");
+    const data = toFunctionSelector("HealthFactorLowerThanLiquidationThreshold()");
     const r = decodeRevert(data);
     expect(r.source).toBe("custom-error");
     expect(r.message).toContain("liquidation threshold");
+  });
+
+  it("maps a v3.7 e-mode borrowability error", () => {
+    const r = decodeRevert(toFunctionSelector("NotBorrowableInEMode()"));
+    expect(r.message).toContain("e-mode");
   });
 });
 
@@ -71,7 +81,7 @@ describe("decodeRevert — unknown data is surfaced, never swallowed", () => {
   });
 
   it("normalizes data without a 0x prefix", () => {
-    const sel = toFunctionSelector("error ReservePaused()").slice(2);
+    const sel = toFunctionSelector("ReservePaused()").slice(2);
     const r = decodeRevert(sel);
     expect(r.message).toContain("paused");
   });

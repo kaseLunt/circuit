@@ -4,9 +4,12 @@
  * Conventions:
  * - Aave `liquidityRate`/`variableBorrowRate` are per-annum APRs in RAY (1e27).
  * - Internally we work in WAD (1e18) fractions: 1e18 == 100% == 1.0.
- * - APR→APY compounding uses Aave's own on-chain third-order expansion
- *   (`MathUtils.calculateCompoundedInterest` over one year), so displayed APYs
- *   match the protocol's accrual method rather than a divergent float formula.
+ * - APR→APY compounding mirrors Aave's on-chain third-order expansion
+ *   (`MathUtils.calculateCompoundedInterest`) evaluated over one year. This is a
+ *   defensible current-rate *projection*, not an exact realized supplier APY:
+ *   Aave's liquidity index accrues with linear interest, and utilization drifts.
+ *   The cubic differs from continuous compounding by <1bp at the rates in play,
+ *   below the 2-dp display, and is the same shape Aave uses for the debt index.
  *
  * NOTE (D-004): this module is money-math and is slated for Codex senior review
  * before the P1-exit receipt. The compounding order and the net-APY exposure
@@ -51,6 +54,7 @@ export function trailingAprWad(
   rateBefore: bigint,
   secondsElapsed: bigint,
 ): bigint {
+  if (rateNow <= 0n) throw new RangeError("rateNow must be positive");
   if (rateBefore <= 0n) throw new RangeError("rateBefore must be positive");
   if (secondsElapsed <= 0n) throw new RangeError("secondsElapsed must be positive");
   const growthWad = ((rateNow - rateBefore) * WAD) / rateBefore;
@@ -86,17 +90,21 @@ export function wadToRay(wad: bigint): bigint {
  * This is the run-rate the borrow leg pays after our own borrow moves U.
  */
 export function variableBorrowAprRay(strategy: RateStrategyBps, utilizationWad: bigint): bigint {
+  if (utilizationWad < 0n || utilizationWad > WAD) {
+    throw new RangeError("utilization must be within [0, 1] (WAD)");
+  }
   const uOpt = bpsToWad(strategy.optimalUsageRatio);
+  if (uOpt <= 0n || uOpt >= WAD) {
+    throw new RangeError("optimalUsageRatio must be strictly within (0, 100%)");
+  }
   const base = bpsToWad(strategy.baseVariableBorrowRate);
   const slope1 = bpsToWad(strategy.variableRateSlope1);
   const slope2 = bpsToWad(strategy.variableRateSlope2);
   let aprWad: bigint;
   if (utilizationWad <= uOpt) {
-    aprWad = uOpt === 0n ? base : base + mulWad(slope1, (utilizationWad * WAD) / uOpt);
+    aprWad = base + mulWad(slope1, (utilizationWad * WAD) / uOpt);
   } else {
-    const excess = utilizationWad - uOpt;
-    const denom = WAD - uOpt;
-    const excessRatio = denom === 0n ? 0n : (excess * WAD) / denom;
+    const excessRatio = ((utilizationWad - uOpt) * WAD) / (WAD - uOpt);
     aprWad = base + slope1 + mulWad(slope2, excessRatio);
   }
   return wadToRay(aprWad);

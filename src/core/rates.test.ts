@@ -65,8 +65,7 @@ describe("variableBorrowAprRay (matrix WETH strategy)", () => {
   };
   it("at optimal utilization equals base + slope1", () => {
     const apr = variableBorrowAprRay(weth, bpsToWad(9200));
-    expect(apr).toBe(rayRateToWad(bpsToWad(235)) === 0n ? apr : apr); // sanity
-    expect(rayRateToWad(apr)).toBe(bpsToWad(235)); // 2.35%
+    expect(rayRateToWad(apr)).toBe(bpsToWad(235)); // base 0 + slope1 2.35%
   });
   it("below optimal scales slope1 linearly", () => {
     const apr = variableBorrowAprRay(weth, bpsToWad(4600)); // half of optimal
@@ -79,27 +78,20 @@ describe("variableBorrowAprRay (matrix WETH strategy)", () => {
   });
 });
 
-describe("variableBorrowAprRay — degenerate strategy params", () => {
-  it("optimalUsageRatio 0 → base only below/at optimal path", () => {
-    const s: RateStrategyBps = {
-      optimalUsageRatio: 0,
-      baseVariableBorrowRate: 100,
-      variableRateSlope1: 235,
-      variableRateSlope2: 600,
-    };
-    // U=0 <= uOpt=0 → base (guards the uOpt===0 branch)
-    expect(rayRateToWad(variableBorrowAprRay(s, 0n))).toBe(bpsToWad(100));
+describe("variableBorrowAprRay — invalid domains rejected (not masked)", () => {
+  const weth: RateStrategyBps = {
+    optimalUsageRatio: 9200,
+    baseVariableBorrowRate: 0,
+    variableRateSlope1: 235,
+    variableRateSlope2: 600,
+  };
+  it("rejects utilization outside [0,1]", () => {
+    expect(() => variableBorrowAprRay(weth, -1n)).toThrow(RangeError);
+    expect(() => variableBorrowAprRay(weth, WAD + 1n)).toThrow(RangeError);
   });
-  it("optimalUsageRatio 100% → excess denom guard at full utilization", () => {
-    const s: RateStrategyBps = {
-      optimalUsageRatio: 10_000,
-      baseVariableBorrowRate: 0,
-      variableRateSlope1: 235,
-      variableRateSlope2: 600,
-    };
-    // U at optimal (=100%) takes the <=uOpt branch, denom guard unused; U slightly
-    // above is impossible at 100%. Exercise the boundary.
-    expect(rayRateToWad(variableBorrowAprRay(s, WAD))).toBe(bpsToWad(235));
+  it("rejects optimalUsageRatio of 0 or 100%", () => {
+    expect(() => variableBorrowAprRay({ ...weth, optimalUsageRatio: 0 }, 0n)).toThrow(RangeError);
+    expect(() => variableBorrowAprRay({ ...weth, optimalUsageRatio: 10_000 }, WAD)).toThrow(RangeError);
   });
 });
 
@@ -109,6 +101,11 @@ describe("netApyWad (§5.2 leveraged-restake)", () => {
     // (1.03)(1.02) - 1 = 0.0506
     expect(net).toBeGreaterThan(pctWad(5));
     expect(net).toBeLessThan(pctWad(5.1));
+  });
+
+  it("exact fixture: b=0.5, stake 3%, supply 2%, debt 2.5% → 0.0634e18", () => {
+    // rColl=(1.03)(1.02)-1=0.0506; (1.5)(1.0506)-0.5(1.025)-1 = 0.0634 exactly
+    expect(netApyWad(WAD / 2n, pctWad(3), pctWad(2), pctWad(2.5))).toBe(63_400_000_000_000_000n);
   });
   it("leverage amplifies a positive carry", () => {
     const unlev = netApyWad(0n, pctWad(3), pctWad(2), pctWad(2.5));

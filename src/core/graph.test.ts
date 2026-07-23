@@ -93,6 +93,65 @@ describe("validateGraph — structural rejections (§5.6)", () => {
   });
 });
 
+describe("validateGraph — semantic validation (§5.6)", () => {
+  const withParams = (id: string, params: Record<string, string | number>): StrategyGraph => {
+    const g = flagship();
+    return {
+      blocks: g.blocks.map((b) => (b.id === id ? { ...b, params } : b)),
+      edges: g.edges,
+    };
+  };
+
+  it("rejects an unsupported stake protocol", () => {
+    const r = validateGraph(withParams("stake1", { protocol: "attacker" }));
+    expect(r.errors.some((e) => e.includes("unsupported stake protocol"))).toBe(true);
+  });
+  it("rejects a non-ETH input asset and a missing amount", () => {
+    const r = validateGraph(withParams("in", { asset: "USDC" }));
+    expect(r.errors.some((e) => e.includes("input asset must be ETH"))).toBe(true);
+    expect(r.errors.some((e) => e.includes("positive amount"))).toBe(true);
+  });
+  it("rejects an unsupported wrap conversion", () => {
+    const r = validateGraph(withParams("wrap1", { from: "eETH", to: "USDC" }));
+    expect(r.errors.some((e) => e.includes("unsupported wrap"))).toBe(true);
+  });
+  it("rejects an unsupported unwrap conversion", () => {
+    const r = validateGraph(withParams("unwrap", { from: "WETH", to: "USDC" }));
+    expect(r.errors.some((e) => e.includes("unsupported unwrap"))).toBe(true);
+  });
+  it("rejects a bad lend protocol/asset", () => {
+    const r = validateGraph(withParams("supply1", { protocol: "compound", asset: "USDC" }));
+    expect(r.errors.some((e) => e.includes("lend protocol must be aave-v3"))).toBe(true);
+    expect(r.errors.some((e) => e.includes("unsupported lend asset"))).toBe(true);
+  });
+  it("rejects a collateral-only borrow asset and bad allocationBps", () => {
+    const r1 = validateGraph(withParams("borrow", { protocol: "aave-v3", asset: "weETH", allocationBps: 7000 }));
+    expect(r1.errors.some((e) => e.includes("collateral-only borrow asset"))).toBe(true);
+    const r2 = validateGraph(withParams("borrow", { protocol: "aave-v3", asset: "WETH", allocationBps: 0 }));
+    expect(r2.errors.some((e) => e.includes("allocationBps must be in"))).toBe(true);
+  });
+
+  it("rejects fan-in (a non-input block with two producers)", () => {
+    const g = flagship();
+    const fanIn: StrategyGraph = {
+      blocks: g.blocks,
+      edges: [...g.edges, { id: "extra", source: "wrap1", target: "supply2", allocationBps: 10_000 }],
+    };
+    const r = validateGraph(fanIn);
+    expect(r.errors.some((e) => e.includes("exactly one producer"))).toBe(true);
+  });
+
+  it("rejects an unreachable (disconnected) block", () => {
+    const g = flagship();
+    const island: StrategyGraph = {
+      blocks: [...g.blocks, { id: "orphan", type: "stake", params: { protocol: "lido" } }],
+      edges: g.edges,
+    };
+    const r = validateGraph(island);
+    expect(r.errors.some((e) => e.includes("orphan") && e.includes("not reachable"))).toBe(true);
+  });
+});
+
 describe("topologicalOrder", () => {
   it("orders the flagship producers before consumers", () => {
     const order = topologicalOrder(flagship());

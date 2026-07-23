@@ -50,6 +50,30 @@ export type Provenanced<T> = Observed<T> | Derived<T> | Entered<T> | Configured<
 // Heterogeneous provenance list (a derivation's inputs may differ in T).
 export type AnyProvenanced = Provenanced<unknown>;
 
+/**
+ * A snapshot context binds every observation to one block. `server/chain` mints
+ * a single `ObservationMinter` per block-pinned read set and uses `.observe(...)`
+ * for all reads, so observations cannot drift across blocks and an `Observed`
+ * always carries a real block from an actual snapshot rather than a bare literal.
+ */
+export interface ObservationMinter {
+  readonly block: bigint;
+  readonly fetchedAt: number;
+  observe<T>(value: T, source: string): Observed<T>;
+}
+
+export function observationMinter(block: bigint, fetchedAt: number): ObservationMinter {
+  if (block <= 0n) throw new RangeError("block must be positive");
+  return {
+    block,
+    fetchedAt,
+    observe(value, source) {
+      return { kind: "observed", value, source, block, fetchedAt };
+    },
+  };
+}
+
+/** Low-level Observed constructor. Prefer `observationMinter(...).observe`. */
 export function observed<T>(
   value: T,
   source: string,
@@ -59,11 +83,31 @@ export function observed<T>(
   return { kind: "observed", value, source, block, fetchedAt };
 }
 
+/** Distinct blocks any `observed` leaves in a provenance tree were read at. */
+export function observedBlocks(p: AnyProvenanced, acc: Set<bigint> = new Set()): Set<bigint> {
+  if (p.kind === "observed") acc.add(p.block);
+  else if (p.kind === "derived") for (const i of p.inputs) observedBlocks(i, acc);
+  return acc;
+}
+
+/**
+ * Construct a derived value. Enforces that all observed leaves across its inputs
+ * were read at the SAME block — a derivation mixing blocks is a correctness bug
+ * (SPEC §5.4 block-pinned reads), so it throws rather than silently producing a
+ * cross-block number.
+ */
 export function derived<T>(
   value: T,
   expression: string,
   inputs: readonly AnyProvenanced[],
 ): Derived<T> {
+  const blocks = new Set<bigint>();
+  for (const i of inputs) observedBlocks(i, blocks);
+  if (blocks.size > 1) {
+    throw new RangeError(
+      `derived value mixes observations from multiple blocks: ${[...blocks].join(", ")}`,
+    );
+  }
   return { kind: "derived", value, expression, inputs };
 }
 

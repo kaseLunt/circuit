@@ -37,16 +37,20 @@ describe("splitAmount", () => {
     expect(out[0]!.amount).toBe((WAD * 7n) / 10n);
   });
 
-  it("last edge absorbs the rounding remainder", () => {
-    // an amount not divisible by three thirds
-    const amt = 100n;
-    const out = splitAmount(amt, [
-      edge("a", "s", 3333),
-      edge("b", "s", 3333),
-      edge("c", "s", 3334),
-    ]);
-    const total = out.reduce((s, o) => s + o.amount, 0n);
-    expect(total).toBe(amt); // exact
+  it("remainder goes to the largest-allocation edge, not the last (position-independent)", () => {
+    // 6667/3333 split of an odd amount: dust must land on the 6667 edge (index 0),
+    // proving the recipient is the max-bps edge, not the array's final element.
+    const amt = 7n;
+    const out = splitAmount(amt, [edge("big", "s", 6667), edge("small", "s", 3333)]);
+    expect(out.reduce((s, o) => s + o.amount, 0n)).toBe(amt);
+    expect(out[0]!.amount).toBeGreaterThanOrEqual(out[1]!.amount);
+    // 7·6667/10000 = 4 (floor), 7·3333/10000 = 2 (floor), remainder 1 → big
+    expect(out[0]!.amount).toBe(5n);
+    expect(out[1]!.amount).toBe(2n);
+  });
+
+  it("rejects zero-allocation edges", () => {
+    expect(() => splitAmount(100n, [edge("a", "s", 5000), edge("z", "s", 0)])).toThrow(RangeError);
   });
 
   it("property: parts always sum to floor(amount*totalBps/1e4) across random splits", () => {
