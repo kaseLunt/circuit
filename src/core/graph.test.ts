@@ -172,4 +172,13 @@ describe("topologicalOrder", () => {
     };
     expect(() => topologicalOrder(cyc)).toThrow(/acyclic/);
   });
+
+  it("throws a precise error when an edge references a non-block id", () => {
+    const g = flagship();
+    const dangling: StrategyGraph = {
+      blocks: g.blocks,
+      edges: [...g.edges, { id: "ghost", source: "in", target: "nope", allocationBps: 1 }],
+    };
+    expect(() => topologicalOrder(dangling)).toThrow(/references a non-block id/);
+  });
 });

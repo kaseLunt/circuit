@@ -150,7 +150,8 @@ export function validateGraph(g: StrategyGraph): GraphValidation {
   // Per-source allocation conservation: outgoing allocation must not exceed 100%.
   const outBySource = new Map<string, number>();
   for (const e of g.edges) {
-    outBySource.set(e.source, (outBySource.get(e.source) ?? 0) + e.allocationBps);
+    const prev = outBySource.get(e.source);
+    outBySource.set(e.source, (prev === undefined ? 0 : prev) + e.allocationBps);
   }
   for (const [source, total] of outBySource) {
     if (total > 10_000) errors.push(`block ${source} over-allocates outgoing flow: ${total} bps`);
@@ -171,10 +172,10 @@ export function validateGraph(g: StrategyGraph): GraphValidation {
   const inDegree = new Map<string, number>();
   for (const b of g.blocks) inDegree.set(b.id, 0);
   for (const e of g.edges) {
-    if (blockIds.has(e.target)) inDegree.set(e.target, (inDegree.get(e.target) ?? 0) + 1);
+    if (blockIds.has(e.target)) inDegree.set(e.target, inDegree.get(e.target)! + 1);
   }
   for (const b of g.blocks) {
-    const deg = inDegree.get(b.id) ?? 0;
+    const deg = inDegree.get(b.id)!;
     if (b.type === "input" && deg !== 0) errors.push(`input block ${b.id} must have no incoming edges`);
     if (b.type !== "input" && deg !== 1) {
       errors.push(`block ${b.id} must have exactly one producer (has ${deg})`);
@@ -222,17 +223,18 @@ function hasCycle(g: StrategyGraph): boolean {
     indeg.set(b.id, 0);
     adj.set(b.id, []);
   }
+  // Callers guard referential integrity first, so every endpoint is seeded.
   for (const e of g.edges) {
     adj.get(e.source)!.push(e.target);
-    indeg.set(e.target, (indeg.get(e.target) ?? 0) + 1);
+    indeg.set(e.target, indeg.get(e.target)! + 1);
   }
   const queue = [...indeg.entries()].filter(([, d]) => d === 0).map(([id]) => id);
   let visited = 0;
   while (queue.length > 0) {
     const id = queue.shift()!;
     visited += 1;
-    for (const next of adj.get(id) ?? []) {
-      const d = (indeg.get(next) ?? 0) - 1;
+    for (const next of adj.get(id)!) {
+      const d = indeg.get(next)! - 1;
       indeg.set(next, d);
       if (d === 0) queue.push(next);
     }
@@ -249,16 +251,21 @@ export function topologicalOrder(g: StrategyGraph): string[] {
     adj.set(b.id, []);
   }
   for (const e of g.edges) {
-    adj.get(e.source)!.push(e.target);
-    indeg.set(e.target, (indeg.get(e.target) ?? 0) + 1);
+    const out = adj.get(e.source);
+    const deg = indeg.get(e.target);
+    if (out === undefined || deg === undefined) {
+      throw new Error(`edge ${e.id} references a non-block id`);
+    }
+    out.push(e.target);
+    indeg.set(e.target, deg + 1);
   }
   const queue = [...indeg.entries()].filter(([, d]) => d === 0).map(([id]) => id);
   const order: string[] = [];
   while (queue.length > 0) {
     const id = queue.shift()!;
     order.push(id);
-    for (const next of adj.get(id) ?? []) {
-      const d = (indeg.get(next) ?? 0) - 1;
+    for (const next of adj.get(id)!) {
+      const d = indeg.get(next)! - 1;
       indeg.set(next, d);
       if (d === 0) queue.push(next);
     }
