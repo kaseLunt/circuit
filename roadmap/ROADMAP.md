@@ -27,9 +27,10 @@ claim the gate is automated unless a validator actually enforces it.
 | W01 | P0 bootstrap — scaffold, CI, spikes, and pinned decisions | P0 | — | ci-green-scaffold-plus-executable-sandbox-proof | achieved |
 | W02 | Land founding product docs — spec and transplant manifest | P0 | — | docs-landed-and-compliant-with-vision-antigoals | achieved |
 | W03 | P1 finance core — 13-step plan green on a pinned fork, headless | P1 | W01 | thirteen-step-plan-green-on-pinned-fork-in-ci | candidate |
+| W04 | Disposition the P0→P1 boundary review findings | P0 | W01 | boundary-review-blockers-cleared-and-reconfirmed | active |
 
 The rows above project `work/W01-p0-bootstrap.md`, `work/W02-founding-docs.md`, and
-`work/W03-p1-finance-core.md`. Work objects are created when their phase approaches, not
+`work/W03-p1-finance-core.md`, and `work/W04-boundary-review-remediation.md`. Work objects are created when their phase approaches, not
 speculatively — one committing work item at a time (serial writer).
 
 ## Evidence model
