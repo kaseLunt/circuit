@@ -52,3 +52,8 @@ not in the manifest does not exist. One module per port commit, provenance in th
 Serial writer. Work flows through typed objects in `roadmap/` — see `AGENTS.md` for the session
 protocol. Commit policy is D-002 (`roadmap/decisions/`): conventional narrative commits, no AI
 attribution trailers, no hook bypasses.
+
+**Senior review (D-004):** Codex reviews everything load-bearing — SPEC changes, every `core/`
+money-math module before its phase-exit receipt, the execution family, and phase boundaries.
+Dispatch via the codex-reviewer agent, resuming the existing Codex session where one exists.
+Record the outcome in the receipt; skipping a warranted review requires a stated reason there.
