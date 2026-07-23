@@ -136,3 +136,117 @@ export function netApyWad(
   const debtLeg = mulWad(bWad, one + rDebtApyWad);
   return collLeg - debtLeg - one;
 }
+
+// Aave v3.7 accounting math, implemented byte-exactly from the deployed
+// revision's sources (aave-dao/aave-v3-origin; revision evidence in
+// docs/protocol-matrix.md §2):
+//   math/WadRayMath.sol            rayMul half-up; Floor/Ceil directional variants
+//   math/MathUtils.sol             calculateLinearInterest / calculateCompoundedInterest
+//   logic/ReserveLogic.sol         _updateIndexes applies factors with half-up rayMul
+//   helpers/TokenMath.sol          aToken balances rayMulFloor, vToken balances rayMulCeil
+// The rates.test.ts accrual suite reproduces the committed reads log from these
+// definitions, pinning them empirically to on-chain state at the fixture block.
+
+const HALF_RAY = RAY / 2n;
+
+function requireUnsigned(a: bigint, b: bigint): void {
+  if (a < 0n || b < 0n) throw new RangeError("ray math operands must be non-negative");
+}
+
+function requireDivisor(b: bigint): void {
+  if (b === 0n) throw new RangeError("ray division by zero");
+}
+
+/** WadRayMath.rayMul — half-up. Index accrual only; balances use the directional variants. */
+export function rayMul(a: bigint, b: bigint): bigint {
+  requireUnsigned(a, b);
+  return (a * b + HALF_RAY) / RAY;
+}
+
+/** WadRayMath.rayMulFloor — v3.7 aToken-balance rounding. */
+export function rayMulFloor(a: bigint, b: bigint): bigint {
+  requireUnsigned(a, b);
+  return (a * b) / RAY;
+}
+
+/** WadRayMath.rayMulCeil — v3.7 vToken-balance rounding. */
+export function rayMulCeil(a: bigint, b: bigint): bigint {
+  requireUnsigned(a, b);
+  const p = a * b;
+  return p / RAY + (p % RAY === 0n ? 0n : 1n);
+}
+
+/** WadRayMath.rayDivFloor — v3.7 aToken mint scaling. */
+export function rayDivFloor(a: bigint, b: bigint): bigint {
+  requireUnsigned(a, b);
+  requireDivisor(b);
+  return (a * RAY) / b;
+}
+
+/** WadRayMath.rayDivCeil — v3.7 vToken mint scaling. */
+export function rayDivCeil(a: bigint, b: bigint): bigint {
+  requireUnsigned(a, b);
+  requireDivisor(b);
+  const p = a * RAY;
+  return p / b + (p % b === 0n ? 0n : 1n);
+}
+
+function requireOrderedTimestamps(lastUpdateTs: bigint, currentTs: bigint): void {
+  if (currentTs < lastUpdateTs) {
+    throw new RangeError("current timestamp precedes lastUpdateTimestamp");
+  }
+}
+
+/** MathUtils.calculateLinearInterest: RAY + rate·Δt/SECONDS_PER_YEAR (floor division). */
+function linearInterestFactorRay(rateRay: bigint, lastUpdateTs: bigint, currentTs: bigint): bigint {
+  requireUnsigned(rateRay, rateRay);
+  requireOrderedTimestamps(lastUpdateTs, currentTs);
+  return RAY + (rateRay * (currentTs - lastUpdateTs)) / SECONDS_PER_YEAR;
+}
+
+/**
+ * MathUtils.calculateCompoundedInterest, v3.7 Taylor form:
+ * x = rate·Δt/SECONDS_PER_YEAR; factor = RAY + x + rayMul(x, x/2 + rayMul(x, x/6)).
+ */
+function compoundedInterestFactorRay(
+  rateRay: bigint,
+  lastUpdateTs: bigint,
+  currentTs: bigint,
+): bigint {
+  requireUnsigned(rateRay, rateRay);
+  requireOrderedTimestamps(lastUpdateTs, currentTs);
+  const exp = currentTs - lastUpdateTs;
+  if (exp === 0n) return RAY;
+  const x = (rateRay * exp) / SECONDS_PER_YEAR;
+  return RAY + x + rayMul(x, x / 2n + rayMul(x, x / 6n));
+}
+
+/** ReserveLogic._updateIndexes: nextLiquidityIndex = linearFactor.rayMul(liquidityIndex). */
+export function accruedLiquidityIndexRay(
+  rateRay: bigint,
+  indexRay: bigint,
+  lastUpdateTs: bigint,
+  currentTs: bigint,
+): bigint {
+  return rayMul(linearInterestFactorRay(rateRay, lastUpdateTs, currentTs), indexRay);
+}
+
+/** ReserveLogic._updateIndexes: nextVariableBorrowIndex = compoundedFactor.rayMul(index). */
+export function accruedVariableBorrowIndexRay(
+  rateRay: bigint,
+  indexRay: bigint,
+  lastUpdateTs: bigint,
+  currentTs: bigint,
+): bigint {
+  return rayMul(compoundedInterestFactorRay(rateRay, lastUpdateTs, currentTs), indexRay);
+}
+
+/** TokenMath.getATokenBalance: scaled.rayMulFloor(liquidityIndex). */
+export function aTokenBalance(scaledAmount: bigint, liquidityIndexRay: bigint): bigint {
+  return rayMulFloor(scaledAmount, liquidityIndexRay);
+}
+
+/** TokenMath.getVTokenBalance: scaled.rayMulCeil(variableBorrowIndex). */
+export function vTokenBalance(scaledAmount: bigint, variableBorrowIndexRay: bigint): bigint {
+  return rayMulCeil(scaledAmount, variableBorrowIndexRay);
+}

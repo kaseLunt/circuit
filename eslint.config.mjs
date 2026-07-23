@@ -5,7 +5,15 @@ const eslintConfig = [
   ...nextCoreWebVitals,
   ...nextTypescript,
   {
-    ignores: [".next/**", "node_modules/**", "roadmap/**", "spikes/**", "scripts/**", "coverage/**"],
+    ignores: [
+      ".next/**",
+      "node_modules/**",
+      "roadmap/**",
+      "spikes/**",
+      "scripts/**",
+      "coverage/**",
+      ".remember/**",
+    ],
   },
   {
     // Application code is console-free; a `log` util gates any debug output.

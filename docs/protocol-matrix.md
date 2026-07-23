@@ -103,6 +103,26 @@ these formulas with the recorded scaled values. **Price-oracle-sentinel: no sent
 exists in v3.7 `validateBorrow` (verified absence)** — sentinel state is not a constraint for
 this market.
 
+**Rounding + accrual semantics for those formulas (v3.7 sources, read verbatim 2026-07-23):**
+`helpers/TokenMath.sol`
+(https://github.com/aave-dao/aave-v3-origin/blob/main/src/contracts/protocol/libraries/helpers/TokenMath.sol)
+— aToken balances and supply `scaledAmount` round **down** (`rayMulFloor` / mint
+`rayDivFloor`); vToken balances and borrow `amountScaled` round **up** (`rayMulCeil` / mint
+`rayDivCeil`). `math/MathUtils.sol`
+(https://github.com/aave-dao/aave-v3-origin/blob/main/src/contracts/protocol/libraries/math/MathUtils.sol)
+— liquidity accrues linearly (`RAY + rate·Δt/SECONDS_PER_YEAR`, floor division); variable
+debt compounds via the Taylor form `RAY + x + x.rayMul(x/2 + x.rayMul(x/6))` with
+`x = rate·Δt/SECONDS_PER_YEAR`. `logic/ReserveLogic.sol`
+(https://github.com/aave-dao/aave-v3-origin/blob/main/src/contracts/protocol/libraries/logic/ReserveLogic.sol)
+applies either factor to the stored index with **half-up** `rayMul` (`_updateIndexes`).
+Available-liquidity enforcement: `updateInterestRatesAndVirtualBalance` subtracts
+`liquidityTaken` from `uint128 virtualUnderlyingBalance` under checked arithmetic — a borrow
+above virtual balance reverts on underflow, so the plan-validation constraint is
+`amount <= getVirtualUnderlyingBalance`. These semantics are implemented in
+`src/core/rates.ts`; the `rates.test.ts` accrual suite reproduces this file's recorded
+aToken/vToken `totalSupply` values from their scaled counterparts at the pinned block
+(Δt = 60 s and 11,760 s), pinning the math to the deployed contracts.
+
 > **Plan-validation consequences (SPEC §5.7):** weETH supply-cap headroom is the binding
 > mainnet constraint; WETH borrow validation must additionally respect **available liquidity**
 > (virtual balance), not just cap headroom. Both reserves are non-siloed, non-isolated at the

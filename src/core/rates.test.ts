@@ -9,8 +9,18 @@ import {
   variableBorrowAprRay,
   netApyWad,
   SECONDS_PER_YEAR,
+  rayMul,
+  rayMulFloor,
+  rayMulCeil,
+  rayDivFloor,
+  rayDivCeil,
+  accruedLiquidityIndexRay,
+  accruedVariableBorrowIndexRay,
+  aTokenBalance,
+  vTokenBalance,
   type RateStrategyBps,
 } from "./rates";
+import readsLog from "../../docs/protocol-matrix-reads.json";
 
 const pctWad = (p: number) => (BigInt(Math.round(p * 100)) * WAD) / 10_000n; // p% → WAD
 
@@ -123,5 +133,151 @@ describe("netApyWad (§5.2 leveraged-restake)", () => {
 describe("SECONDS_PER_YEAR", () => {
   it("is the Aave constant", () => {
     expect(SECONDS_PER_YEAR).toBe(31_536_000n);
+  });
+});
+
+const READS = readsLog as unknown as {
+  readonly meta: { readonly pinned_block: { readonly number: string; readonly timestamp: string } };
+  readonly reads: ReadonlyArray<{ readonly label: string; readonly result?: unknown }>;
+};
+
+function readResult(label: string): unknown {
+  const hit = READS.reads.find((r) => r.label === label);
+  if (hit === undefined || hit.result === undefined) throw new Error(`missing read: ${label}`);
+  return hit.result;
+}
+
+function bigRead(label: string): bigint {
+  const v = readResult(label);
+  if (typeof v !== "string") throw new Error(`read ${label} is not a decimal string`);
+  return BigInt(v);
+}
+
+// AaveProtocolDataProvider.getReserveData tuple layout (scripts/protocol-reads.mjs):
+// [5] liquidityRate · [6] variableBorrowRate · [9] liquidityIndex ·
+// [10] variableBorrowIndex · [11] lastUpdateTimestamp
+function reserveAccrual(sym: "WETH" | "weETH") {
+  const rd = readResult(`${sym}.getReserveData`);
+  if (!Array.isArray(rd)) throw new Error(`${sym}.getReserveData is not a tuple`);
+  const at = (i: number): bigint => {
+    const v: unknown = rd[i];
+    if (typeof v !== "string" && typeof v !== "number") throw new Error(`unexpected field ${i}`);
+    return BigInt(v);
+  };
+  return {
+    liquidityRate: at(5),
+    variableBorrowRate: at(6),
+    liquidityIndex: at(9),
+    variableBorrowIndex: at(10),
+    lastUpdateTimestamp: at(11),
+  };
+}
+
+const PINNED_TS = BigInt(READS.meta.pinned_block.timestamp);
+const HALF_RAY = RAY / 2n;
+
+describe("aave v3.7 ray roundings (WadRayMath)", () => {
+  it("rayMul rounds half-up; Floor/Ceil are directional", () => {
+    expect(rayMul(3n, HALF_RAY)).toBe(2n); // 1.5 rounds up
+    expect(rayMulFloor(3n, HALF_RAY)).toBe(1n);
+    expect(rayMulCeil(3n, HALF_RAY)).toBe(2n);
+    expect(rayMulCeil(2n, HALF_RAY)).toBe(1n); // exact — no bump
+  });
+
+  it("multiplying by RAY is the identity in every variant", () => {
+    const x = 123456789123456789123456789n;
+    expect(rayMul(x, RAY)).toBe(x);
+    expect(rayMulFloor(x, RAY)).toBe(x);
+    expect(rayMulCeil(x, RAY)).toBe(x);
+  });
+
+  it("rayDiv floor/ceil bracket an inexact quotient", () => {
+    const third = 333333333333333333333333333n; // floor(RAY / 3)
+    expect(rayDivFloor(1n, 3n)).toBe(third);
+    expect(rayDivCeil(1n, 3n)).toBe(third + 1n);
+    expect(rayDivCeil(2n, 2n)).toBe(RAY); // exact — no bump
+  });
+
+  it("rejects zero divisors and negative operands instead of defaulting", () => {
+    expect(() => rayDivFloor(1n, 0n)).toThrow(RangeError);
+    expect(() => rayDivCeil(1n, 0n)).toThrow(RangeError);
+    expect(() => rayMulFloor(-1n, RAY)).toThrow(RangeError);
+    expect(() => rayMul(RAY, -1n)).toThrow(RangeError);
+  });
+});
+
+describe("v3.7 index accrual reproduces the pinned reads log exactly", () => {
+  // The committed log records scaled AND display totalSupply at the pinned block,
+  // plus rate/index/lastUpdateTimestamp. Reproducing display from scaled pins the
+  // whole chain — linear/compounded factor (MathUtils), half-up index rayMul
+  // (ReserveLogic._updateIndexes), and v3.7 TokenMath directional balance
+  // roundings — against the deployed contracts rather than invented fixtures.
+  // WETH accrues over 60s, weETH over 11,760s.
+  for (const sym of ["WETH", "weETH"] as const) {
+    it(`${sym}: aToken totalSupply == scaled.rayMulFloor(accrued liquidity index)`, () => {
+      const a = reserveAccrual(sym);
+      const idx = accruedLiquidityIndexRay(
+        a.liquidityRate,
+        a.liquidityIndex,
+        a.lastUpdateTimestamp,
+        PINNED_TS,
+      );
+      expect(aTokenBalance(bigRead(`${sym}.aToken.scaledTotalSupply`), idx)).toBe(
+        bigRead(`${sym}.aToken.totalSupply`),
+      );
+    });
+
+    it(`${sym}: variableDebt totalSupply == scaled.rayMulCeil(accrued borrow index)`, () => {
+      const a = reserveAccrual(sym);
+      const idx = accruedVariableBorrowIndexRay(
+        a.variableBorrowRate,
+        a.variableBorrowIndex,
+        a.lastUpdateTimestamp,
+        PINNED_TS,
+      );
+      expect(vTokenBalance(bigRead(`${sym}.variableDebtToken.scaledTotalSupply`), idx)).toBe(
+        bigRead(`${sym}.variableDebtToken.totalSupply`),
+      );
+    });
+  }
+
+  it("zero elapsed time leaves both indices unchanged", () => {
+    const a = reserveAccrual("WETH");
+    expect(
+      accruedLiquidityIndexRay(
+        a.liquidityRate,
+        a.liquidityIndex,
+        a.lastUpdateTimestamp,
+        a.lastUpdateTimestamp,
+      ),
+    ).toBe(a.liquidityIndex);
+    expect(
+      accruedVariableBorrowIndexRay(
+        a.variableBorrowRate,
+        a.variableBorrowIndex,
+        a.lastUpdateTimestamp,
+        a.lastUpdateTimestamp,
+      ),
+    ).toBe(a.variableBorrowIndex);
+  });
+
+  it("a current timestamp before lastUpdateTimestamp is rejected", () => {
+    const a = reserveAccrual("WETH");
+    expect(() =>
+      accruedLiquidityIndexRay(
+        a.liquidityRate,
+        a.liquidityIndex,
+        a.lastUpdateTimestamp,
+        a.lastUpdateTimestamp - 1n,
+      ),
+    ).toThrow(RangeError);
+    expect(() =>
+      accruedVariableBorrowIndexRay(
+        a.variableBorrowRate,
+        a.variableBorrowIndex,
+        a.lastUpdateTimestamp,
+        a.lastUpdateTimestamp - 1n,
+      ),
+    ).toThrow(RangeError);
   });
 });
