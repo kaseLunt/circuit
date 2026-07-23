@@ -24,7 +24,7 @@ claim the gate is automated unless a validator actually enforces it.
 
 | ID | Work item | Phase | Depends on | Evidence target | Status |
 | --- | --- | --- | --- | --- | --- |
-| W01 | P0 bootstrap — scaffold, CI, spikes, and pinned decisions | P0 | — | ci-green-scaffold-plus-executable-sandbox-proof | active |
+| W01 | P0 bootstrap — scaffold, CI, spikes, and pinned decisions | P0 | — | ci-green-scaffold-plus-executable-sandbox-proof | achieved |
 | W02 | Land founding product docs — spec and transplant manifest | P0 | — | docs-landed-and-compliant-with-vision-antigoals | achieved |
 
 The rows above project `work/W01-p0-bootstrap.md` and `work/W02-founding-docs.md`. Work objects for P1+ are created when their

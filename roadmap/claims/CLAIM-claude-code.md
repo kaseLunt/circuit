@@ -3,7 +3,7 @@ claim_id: 0ca7d3a2-1ec3-4957-a5aa-503e88166ba3
 generation: 2
 agent: claude-code
 task: W01
-status: active
+status: released
 integrator: true
 branch: main
 worktree_id: fcc099da-1d6b-593f-bfcb-bd6915fc89c2
