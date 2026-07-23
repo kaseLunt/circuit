@@ -46,3 +46,22 @@ deployed revision v3.6 (custom errors), e-mode category 1 "ETH correlated" (93% 
 1% bonus; weETH collateral, WETH borrowable), weETH reserve collateral-only at ~96% supply-cap
 utilization (~43k headroom — cap validation is mandatory, SPEC §5.7), WETH reserve with ample
 headroom. Raw read log: `docs/protocol-matrix-reads.json`.
+
+## W04 addenda (2026-07-23)
+
+### Revision correction: Aave v3.7, not v3.6
+
+The initial matrix inferred v3.6 from a stale changelog read. Corrected via implementation
+mapping (matrix §2): on-chain Pool impl equals the address-book `POOL_IMPL`, and the Aave
+changelog records v3.7 Part 2 reaching Ethereum Core on 2026-05-29. Recorded here because a
+generated document overclaimed once; the reads script + "cite only the committed log" rule are
+the structural fix.
+
+### P3a deferred gates (sandbox operability — not proven by the W01 spike)
+
+The anvil spike proved local primitives only. Before P3a closes, each of the following needs
+its own executable proof: TTL destruction and crash cleanup; durable session ownership
+(registry or provider hard-limit rejection); per-session and global rate/tx caps under
+concurrent load; startup latency and memory under N concurrent forks; reverse-proxy boundary
+(the negative reachability test rerun from outside the host, not just a non-loopback local
+address); upstream RPC quota behavior; gas/simulation fidelity for the full 13-step bundle.
