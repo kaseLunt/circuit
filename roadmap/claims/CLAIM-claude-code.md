@@ -1,13 +1,13 @@
 ---
-claim_id: 2b67272f-9bd7-47ca-902a-e59bb26dc61a
-generation: 3
+claim_id: 6509e70d-236f-44e6-8275-140cbaad533b
+generation: 4
 agent: claude-code
 task: W04
 status: active
 integrator: true
 branch: main
 worktree_id: fcc099da-1d6b-593f-bfcb-bd6915fc89c2
-base_commit: dc214bea2ae200fac867f388022a9a39997bcd28
+base_commit: 048d586215e0787fdc81eb73d95b0b5ee52e76be
 allowed_paths:
   - docs/**
   - spikes/**
@@ -17,13 +17,14 @@ allowed_paths:
   - package.json
   - package-lock.json
   - vitest.config.ts
+  - eslint.config.mjs
   - .github/**
   - roadmap/work/W03-p1-finance-core.md
   - roadmap/work/W04-boundary-review-remediation.md
-scope_hash: sha256:432964d074d52ff05b9279f3fed3f2e5effb9acefffcfa2996a20727e140fffa
-issued_at: 2026-07-23T03:02:37Z
-lease_expires: 2026-07-23T11:02:37Z
-updated_at: 2026-07-23T03:02:37Z
+scope_hash: sha256:d41a75f0d544f0d1c8929b66a380ea93c7608658766b1f423c5c39c42434c5b5
+issued_at: 2026-07-23T04:26:02Z
+lease_expires: 2026-07-23T12:26:02Z
+updated_at: 2026-07-23T04:26:02Z
 ---
 
 # Claim: claude-code -> W04
