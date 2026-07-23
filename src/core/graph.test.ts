@@ -128,7 +128,10 @@ describe("validateGraph — semantic validation (§5.6)", () => {
     const r1 = validateGraph(withParams("borrow", { protocol: "aave-v3", asset: "weETH", allocationBps: 7000 }));
     expect(r1.errors.some((e) => e.includes("collateral-only borrow asset"))).toBe(true);
     const r2 = validateGraph(withParams("borrow", { protocol: "aave-v3", asset: "WETH", allocationBps: 0 }));
-    expect(r2.errors.some((e) => e.includes("allocationBps must be in"))).toBe(true);
+    expect(r2.errors.some((e) => e.includes("allocationBps must be an integer"))).toBe(true);
+    // fractional bps also rejected (Number.isInteger guard)
+    const r3 = validateGraph(withParams("borrow", { protocol: "aave-v3", asset: "WETH", allocationBps: 70.5 }));
+    expect(r3.errors.some((e) => e.includes("allocationBps must be an integer"))).toBe(true);
   });
 
   it("rejects fan-in (a non-input block with two producers)", () => {

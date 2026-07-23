@@ -101,8 +101,8 @@ function validateBlockParams(b: Block, errors: string[]): void {
         errors.push(`block ${b.id}: unsupported/collateral-only borrow asset '${need("asset")}'`);
       }
       const bps = need("allocationBps");
-      if (typeof bps !== "number" || bps < 1 || bps > 10_000) {
-        errors.push(`block ${b.id}: borrow allocationBps must be in [1,10000]`);
+      if (typeof bps !== "number" || !Number.isInteger(bps) || bps < 1 || bps > 10_000) {
+        errors.push(`block ${b.id}: borrow allocationBps must be an integer in [1,10000]`);
       }
       break;
   }

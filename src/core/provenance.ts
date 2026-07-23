@@ -77,7 +77,11 @@ export function observationMinter(block: bigint, fetchedAt: number): Observation
 // `observationMinter`, which server/chain creates from a real block-pinned
 // snapshot. Keeping this internal removes casual literal-labeling in core and
 // keeps observation creation at the chain-snapshot boundary (D-004 finding 6).
-// A lint rule additionally forbids `{ kind: "observed" }` object literals in core.
+// An ESLint no-restricted-syntax rule (eslint.config.mjs) additionally forbids
+// forging the shape via a `{ kind: "observed" }` object literal anywhere but
+// this file. (TS structural typing can't prove an actual RPC read; a runtime
+// brand would only prove factory use, so same-block-derivation enforcement +
+// this construction boundary is the honest limit.)
 function observed<T>(value: T, source: string, block: bigint, fetchedAt: number): Observed<T> {
   return { kind: "observed", value, source, block, fetchedAt };
 }

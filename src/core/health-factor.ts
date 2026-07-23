@@ -2,12 +2,12 @@
  * Health-factor and liquidation math (SPEC §5.4). Pure, integer, WAD/base8.
  *
  * The HF sequence replicates Aave v3.7 `GenericLogic.calculateUserAccountData`
- * exactly — weighted-average liquidation threshold, then `percentMul` (half-up),
- * then `wadDiv` (half-up) — so `computeHealthFactor` reproduces the on-chain
- * `getUserAccountData().healthFactor` the fork suite cross-checks against. bigint
- * throughout (no float drift near HF=1); explicit no-debt sentinel and unknown
- * state; and, for the correlated weETH/WETH pair, a liquidation *ratio* (matrix
- * §5: weETH is priced by a capped exchange-rate oracle over ETH/USD).
+ * exactly — `wadDiv(Σ base·lt, totalDebt) / 10000` (half-up wadDiv) — so
+ * `computeHealthFactor` reproduces the on-chain `getUserAccountData().healthFactor`
+ * the fork suite cross-checks against. bigint throughout (no float drift near
+ * HF=1); explicit no-debt sentinel and unknown state; and, for the correlated
+ * weETH/WETH pair, a liquidation *ratio* (matrix §5: weETH is priced by a capped
+ * exchange-rate oracle over ETH/USD).
  *
  * NOTE (D-004): money-math — reviewed by Codex; fork cross-check is authoritative.
  */

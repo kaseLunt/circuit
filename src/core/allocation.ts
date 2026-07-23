@@ -3,8 +3,9 @@
  *
  * An amount entering a block is split across its outgoing edges by their
  * allocation bps. Splitting is floor-per-edge with the remainder assigned to the
- * last edge, so the parts sum EXACTLY to the input (no wei created or lost) —
- * the invariant the property tests assert.
+ * largest-allocation edge (ties → smallest edge id), so the parts sum EXACTLY to
+ * the routed total (no wei created or lost) regardless of edge ordering — the
+ * invariant the property tests assert.
  */
 import type { Edge } from "./graph";
 
