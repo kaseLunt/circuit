@@ -1,30 +1,37 @@
 ---
 id: D-002
 type: decision
-title: Proposed project commit and attribution policy
-status: proposed
+title: Project commit and attribution policy
+status: accepted
 date: 2026-07-22
+approved_by: Kase Lunt (owner)
 supersedes: []
 updated: 2026-07-22
 ---
 
-# D-002 — Proposed project commit and attribution policy
+# D-002 — Project commit and attribution policy
 
 ## Context
 
 Commit formatting, authorship, attribution, signing, and automation policy belong to the project
-owner and may already be governed by repository or organization rules. A reusable control-plane
-skill must not silently impose a personal policy.
+owner. Recorded here after inspection of the repository's actual practice; accepted by the owner
+on 2026-07-23.
 
-## Questions to ratify
+## Policy
 
-- Which existing commit convention, signing rule, and authorship policy must be preserved?
-- Are automated or agent-generated attribution trailers required, allowed, or prohibited?
-- Which checks are local feedback, and which are server-enforced requirements?
-- What explicit human override path, if any, is permitted and audited?
-
-## Proposal
-
-Record the project's actual policy here after inspecting existing rules. Keep this Decision
-`proposed` until the owner supplies and accepts that policy. Do not enable a commit-message guard
-whose behavior is stronger than the accepted record.
+- **Format:** conventional, narrative commits — `type: subject` with a body explaining why, not a
+  restatement of the diff. Types in use: `init`, `docs`, `governance`, `chore`, `port`, `feat`,
+  `fix`, `test`, `ci`.
+- **Ports:** one module per commit; the message records provenance (source path in the earlier
+  prototype) and confirms the TRANSPLANT.md edits were applied in the same commit.
+- **Attribution:** author and committer are the owner's personal identity
+  (`kaselunt.dev@gmail.com`, pinned repo-locally). No AI attribution trailers of any kind
+  (no Co-Authored-By, no Generated-with).
+- **Signing:** not required.
+- **Enforcement reality:** the local pre-commit gate (doctor + scope-gate) and the in-repo GitHub
+  workflow are feedback, not server-enforced authority; no branch protection or required checks
+  are configured yet. This record must be updated if that changes.
+- **Audited override paths:** `CONTROL_PLANE_ADOPT=1` (isolated adoption when no committed
+  authority exists) and `CONTROL_PLANE_OWNER_REVIEWED=1` (owner acknowledgement of governance
+  transitions). Both are local acknowledgements, logged by the gate output; neither is
+  authenticated server authority. Hook bypass flags (`--no-verify`) are prohibited.

@@ -2,7 +2,7 @@
 id: H0
 type: goal
 title: A deployed, provably-correct DeFi strategy composer that survives a cold expert read
-status: candidate
+status: committed
 review_by: 2026-09-30
 informs: []
 updated: 2026-07-22
@@ -33,5 +33,4 @@ defensible under 20 minutes of adversarial reading.
 
 ## Use
 
-Evaluate every phase and promotion against this goal. Keep it `candidate` until the owner replaces
-the scaffold text and ratifies it.
+Evaluate every phase and promotion against this goal. Ratified by the owner 2026-07-23.

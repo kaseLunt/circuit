@@ -3,7 +3,7 @@ id: W01
 type: work
 title: P0 bootstrap — scaffold, CI, spikes, and pinned decisions
 phase: P0
-status: candidate
+status: active
 evidence_target: ci-green-scaffold-plus-executable-sandbox-proof
 priority: 1
 depends_on: []

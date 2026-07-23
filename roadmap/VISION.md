@@ -70,6 +70,6 @@ the product).
 
 ## Review record
 
-- status: draft
-- owner ratification: pending
+- status: ratified
+- owner ratification: 2026-07-23 (owner-directed transition)
 - next review: P0 exit gate
