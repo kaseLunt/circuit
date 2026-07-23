@@ -18,6 +18,7 @@ allowed_paths:
   - package.json
   - package-lock.json
   - vitest.config.ts
+  - eslint.config.mjs
   - .github/**
   - roadmap/work/W03-p1-finance-core.md
   - roadmap/work/W04-boundary-review-remediation.md
