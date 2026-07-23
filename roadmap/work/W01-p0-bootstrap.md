@@ -36,7 +36,8 @@ deliverables:
   - LICENSE
   - README.md
   - docs/decisions.md
-  - spikes/sandbox-proof/
+  - spikes/sandbox-proof/proof.mjs
+  - spikes/sandbox-proof/proof-output.txt
 evidence_receipts: []
 invalidated_by:
   - SPEC.md
