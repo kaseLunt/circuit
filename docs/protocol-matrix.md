@@ -198,3 +198,12 @@ phase does.
    fork suite.
 2. Numeric `Pool.getRevision()` — not externally readable (recorded expected revert); revision
    claim rests on the implementation mapping + changelog (§2).
+3. **WETH `reserve.deficit` is not recorded.** v3.7 feeds `reserve.deficit` into the rate
+   strategy as its `unbacked` param (ReserveLogic `updateInterestRatesAndVirtualBalance`,
+   read verbatim from main — no v3.7 tag exists), and it enters only the supply-usage
+   denominator. The recorded WETH `variableBorrowRate` reproduces **exactly** from recorded
+   state; the recorded `liquidityRate` does not reproduce with deficit 0 (weETH does),
+   implying a nonzero WETH deficit. Resolution: add `getReserveDeficit` reads to
+   `scripts/protocol-reads.mjs` and regenerate this log at the pinned block (archive RPC
+   required); the P1 fork suite reads the same getter live from the fork. No value is
+   asserted here until read on-chain.

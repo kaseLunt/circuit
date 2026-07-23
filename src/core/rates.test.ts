@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
 import { WAD, RAY } from "./format";
 import {
+  currentRatesRay,
   mulWad,
   rayRateToWad,
   rayAprToApyWad,
@@ -20,7 +21,7 @@ import {
   vTokenBalance,
   type RateStrategyBps,
 } from "./rates";
-import { PINNED_TS, bigRead, tupleBig } from "../../tests/helpers/protocol-reads";
+import { PINNED_TS, bigRead, readResult, tupleBig } from "../../tests/helpers/protocol-reads";
 
 const pctWad = (p: number) => (BigInt(Math.round(p * 100)) * WAD) / 10_000n; // p% → WAD
 
@@ -254,6 +255,104 @@ describe("v3.7 index accrual reproduces the pinned reads log exactly", () => {
         a.lastUpdateTimestamp,
         a.lastUpdateTimestamp - 1n,
       ),
+    ).toThrow(RangeError);
+  });
+});
+
+describe("v3.7 interest-rate strategy reproduces the recorded current rates", () => {
+  // DefaultReserveInterestRateStrategyV2.calculateInterestRates, read verbatim:
+  // borrowU = debt.rayDiv(virtual+added-taken+debt); below-optimal
+  // varRate = base + slope1.rayMul(U).rayDiv(Uopt); above-optimal
+  // varRate = base + slope1 + slope2.rayMul((U-Uopt).rayDiv(RAY-Uopt));
+  // liquidityRate = varRate.rayMul(supplyU).percentMul(1e4 - reserveFactor),
+  // where supplyU's denominator additionally carries the v3.7 reserve deficit
+  // (`unbacked: reserve.deficit` in ReserveLogic). Debt enters at the STORED
+  // variable index with vToken (ceil) rounding — rates were written at
+  // lastUpdateTimestamp, which the exact reproductions below pin empirically.
+  function strategyOf(sym: "WETH" | "weETH"): RateStrategyBps {
+    const raw = readResult(`${sym}.strategy.getInterestRateDataBps`) as Record<string, number>;
+    return {
+      optimalUsageRatio: raw.optimalUsageRatio!,
+      baseVariableBorrowRate: raw.baseVariableBorrowRate!,
+      variableRateSlope1: raw.variableRateSlope1!,
+      variableRateSlope2: raw.variableRateSlope2!,
+    };
+  }
+
+  function reproduction(sym: "WETH" | "weETH", deficitWei: bigint) {
+    const a = reserveAccrual(sym);
+    const debtAtStoredIndex = vTokenBalance(
+      bigRead(`${sym}.variableDebtToken.scaledTotalSupply`),
+      a.variableBorrowIndex,
+    );
+    return currentRatesRay({
+      strategy: strategyOf(sym),
+      reserveFactorBps: Number(tupleBig(`${sym}.getReserveConfigurationData`, 4)),
+      totalDebtWei: debtAtStoredIndex,
+      virtualUnderlyingBalance: bigRead(`${sym}.getVirtualUnderlyingBalance`),
+      liquidityAddedWei: 0n,
+      liquidityTakenWei: 0n,
+      deficitWei,
+    });
+  }
+
+  it("variable borrow rates reproduce exactly for both reserves (deficit-independent)", () => {
+    const weth = reserveAccrual("WETH");
+    const weeth = reserveAccrual("weETH");
+    expect(reproduction("WETH", 0n).variableBorrowRateRay).toBe(weth.variableBorrowRate);
+    expect(reproduction("weETH", 0n).variableBorrowRateRay).toBe(weeth.variableBorrowRate);
+  });
+
+  it("weETH liquidity rate reproduces exactly with a zero deficit", () => {
+    // WETH's liquidity rate additionally requires WETH's reserve deficit, which
+    // the committed log does not yet record (matrix §4 OPEN item) — its exact
+    // reproduction lands with the regenerated log.
+    const weeth = reserveAccrual("weETH");
+    expect(reproduction("weETH", 0n).liquidityRateRay).toBe(weeth.liquidityRate);
+  });
+
+  it("a zero-debt reserve earns nothing and borrows at the base rate", () => {
+    const out = currentRatesRay({
+      strategy: { optimalUsageRatio: 5000, baseVariableBorrowRate: 100, variableRateSlope1: 200, variableRateSlope2: 10_000 },
+      reserveFactorBps: 1500,
+      totalDebtWei: 0n,
+      virtualUnderlyingBalance: 10n ** 18n,
+      liquidityAddedWei: 0n,
+      liquidityTakenWei: 0n,
+      deficitWei: 0n,
+    });
+    expect(out.liquidityRateRay).toBe(0n);
+    expect(out.variableBorrowRateRay).toBe((100n * RAY) / 10_000n);
+  });
+
+  it("above the optimal ratio the second slope engages (exact bigint check)", () => {
+    // U = 3/(1+3) = 0.75, Uopt = 0.5 → excess = 0.5;
+    // var = 1% + 2% + 100%·0.5 = 53%; supplyU = U (no deficit);
+    // liq = 53%·0.75·(1 − 15%) = 33.7875%.
+    const out = currentRatesRay({
+      strategy: { optimalUsageRatio: 5000, baseVariableBorrowRate: 100, variableRateSlope1: 200, variableRateSlope2: 10_000 },
+      reserveFactorBps: 1500,
+      totalDebtWei: 3n * 10n ** 18n,
+      virtualUnderlyingBalance: 1n * 10n ** 18n,
+      liquidityAddedWei: 0n,
+      liquidityTakenWei: 0n,
+      deficitWei: 0n,
+    });
+    expect(out.variableBorrowRateRay).toBe((5300n * RAY) / 10_000n);
+    expect(out.liquidityRateRay).toBe((337_875n * RAY) / 1_000_000n);
+  });
+
+  it("liquidity taken beyond available liquidity is rejected", () => {
+    expect(() =>
+      currentRatesRay({
+        strategy: strategyOf("WETH"),
+        reserveFactorBps: 1500,
+        totalDebtWei: 1n,
+        virtualUnderlyingBalance: 5n,
+        liquidityAddedWei: 0n,
+        liquidityTakenWei: 6n,
+        deficitWei: 0n,
+      }),
     ).toThrow(RangeError);
   });
 });

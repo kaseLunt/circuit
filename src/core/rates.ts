@@ -250,3 +250,78 @@ export function aTokenBalance(scaledAmount: bigint, liquidityIndexRay: bigint): 
 export function vTokenBalance(scaledAmount: bigint, variableBorrowIndexRay: bigint): bigint {
   return rayMulCeil(scaledAmount, variableBorrowIndexRay);
 }
+
+/** PercentageMath.percentMul — half-up at PERCENTAGE_FACTOR (1e4). */
+function percentMul(a: bigint, bps: bigint): bigint {
+  return (a * bps + 5_000n) / 10_000n;
+}
+
+/** WadRayMath.rayDiv — half-up (the strategy's usage-ratio rounding). */
+function rayDivHalfUp(a: bigint, b: bigint): bigint {
+  if (b === 0n) throw new RangeError("ray division by zero");
+  return (a * RAY + b / 2n) / b;
+}
+
+export interface CurrentRatesInput {
+  readonly strategy: RateStrategyBps;
+  readonly reserveFactorBps: number;
+  /** vToken balance at the rate-setting index (scaled debt, ceil rounding). */
+  readonly totalDebtWei: bigint;
+  readonly virtualUnderlyingBalance: bigint;
+  readonly liquidityAddedWei: bigint;
+  readonly liquidityTakenWei: bigint;
+  /** v3.7 passes `reserve.deficit` as the strategy's `unbacked` param. */
+  readonly deficitWei: bigint;
+}
+
+export interface CurrentRatesRay {
+  readonly liquidityRateRay: bigint;
+  readonly variableBorrowRateRay: bigint;
+}
+
+/**
+ * DefaultReserveInterestRateStrategyV2.calculateInterestRates, byte-exact from
+ * the deployed revision's source (aave-dao/aave-v3-origin
+ * src/contracts/misc/DefaultReserveInterestRateStrategyV2.sol):
+ *
+ *   borrowU  = totalDebt.rayDiv(virtual + added − taken + totalDebt)
+ *   supplyU  = totalDebt.rayDiv(virtual + added − taken + totalDebt + unbacked)
+ *   varRate  = U ≤ Uopt ? base + slope1.rayMul(U).rayDiv(Uopt)
+ *                       : base + slope1 + slope2.rayMul((U−Uopt).rayDiv(RAY−Uopt))
+ *   liqRate  = varRate.rayMul(supplyU).percentMul(1e4 − reserveFactor)
+ *
+ * with bps strategy params rayified as bps·RAY/1e4 and `unbacked` fed from the
+ * v3.7 reserve deficit (ReserveLogic.updateInterestRatesAndVirtualBalance).
+ * The rates.test.ts reproduction suite pins this against the recorded current
+ * rates at the fixture block.
+ */
+export function currentRatesRay(input: CurrentRatesInput): CurrentRatesRay {
+  const bpsToRay = (bps: number): bigint => (BigInt(bps) * RAY) / 10_000n;
+  const base = bpsToRay(input.strategy.baseVariableBorrowRate);
+  const slope1 = bpsToRay(input.strategy.variableRateSlope1);
+  const slope2 = bpsToRay(input.strategy.variableRateSlope2);
+  const uOpt = bpsToRay(input.strategy.optimalUsageRatio);
+  if (input.totalDebtWei === 0n) {
+    return { liquidityRateRay: 0n, variableBorrowRateRay: base };
+  }
+  const availableLiquidity =
+    input.virtualUnderlyingBalance + input.liquidityAddedWei - input.liquidityTakenWei;
+  if (availableLiquidity < 0n) {
+    throw new RangeError("liquidity taken exceeds available liquidity");
+  }
+  const availablePlusDebt = availableLiquidity + input.totalDebtWei;
+  const borrowUsageRay = rayDivHalfUp(input.totalDebtWei, availablePlusDebt);
+  const supplyUsageRay = rayDivHalfUp(input.totalDebtWei, availablePlusDebt + input.deficitWei);
+  let variableBorrowRateRay = base;
+  if (borrowUsageRay > uOpt) {
+    const excessRay = rayDivHalfUp(borrowUsageRay - uOpt, RAY - uOpt);
+    variableBorrowRateRay += slope1 + rayMul(slope2, excessRay);
+  } else {
+    variableBorrowRateRay += rayDivHalfUp(rayMul(slope1, borrowUsageRay), uOpt);
+  }
+  const liquidityRateRay = percentMul(
+    rayMul(variableBorrowRateRay, supplyUsageRay),
+    10_000n - BigInt(input.reserveFactorBps),
+  );
+  return { liquidityRateRay, variableBorrowRateRay };
+}
