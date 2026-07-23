@@ -2,11 +2,12 @@
 id: D-004
 type: decision
 title: Codex is the senior reviewer for load-bearing work
-status: accepted
+status: superseded
 date: 2026-07-22
 approved_by: Kase Lunt (owner)
 supersedes: []
-updated: 2026-07-22
+superseded_by: D-007
+updated: 2026-07-23
 ---
 
 # D-004 — Codex senior review
