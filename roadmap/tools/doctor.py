@@ -291,6 +291,7 @@ def validate_evidence_receipt(
     now: dt.datetime,
     *,
     require_pass: bool = True,
+    check_currency: bool = True,
 ) -> None:
     if not receipt.startswith("roadmap/evidence/") or not snapshot.exists(receipt):
         raise ControlPlaneError(
@@ -338,7 +339,9 @@ def validate_evidence_receipt(
         snapshot, current_path, current_work
     )
     recorded_contract = scalar(data, "contract_fingerprint", receipt, required=True)
-    if recorded_contract != tested_contract or current_contract != tested_contract:
+    if recorded_contract != tested_contract or (
+        check_currency and current_contract != tested_contract
+    ):
         raise ControlPlaneError(
             f"{receipt}: verification contract differs from the tested commit"
         )
@@ -347,7 +350,9 @@ def validate_evidence_receipt(
     )
     current_inputs = verification_input_fingerprint(snapshot, current_path, current_work)
     recorded_inputs = scalar(data, "input_fingerprint", receipt, required=True)
-    if recorded_inputs != tested_inputs or current_inputs != tested_inputs:
+    if recorded_inputs != tested_inputs or (
+        check_currency and current_inputs != tested_inputs
+    ):
         raise ControlPlaneError(
             f"{receipt}: current inputs/deliverables differ from the tested commit"
         )
@@ -793,8 +798,13 @@ def main() -> int:
                 referenced_work = scalar(data, "work", path, required=True)
                 if referenced_work not in objects:
                     errors.append(f"{path}: evidence work -> missing id '{referenced_work}'")
+                # Currency (contract/input freshness vs the current snapshot) is an
+                # attainment claim: it applies only to receipts referenced by achieved
+                # work (D-005). Unreferenced/superseded receipts are append-only history
+                # and validate structure, binding, and ancestry only.
                 validate_evidence_receipt(
-                    snapshot, path, referenced_work, now, require_pass=False
+                    snapshot, path, referenced_work, now,
+                    require_pass=False, check_currency=False,
                 )
             elif object_type in TYPE_STATUSES and object_status not in TYPE_STATUSES[object_type]:
                 errors.append(f"{path}: invalid {object_type} status '{object_status}'")
