@@ -20,7 +20,7 @@ import {
   vTokenBalance,
   type RateStrategyBps,
 } from "./rates";
-import readsLog from "../../docs/protocol-matrix-reads.json";
+import { PINNED_TS, bigRead, tupleBig } from "../../tests/helpers/protocol-reads";
 
 const pctWad = (p: number) => (BigInt(Math.round(p * 100)) * WAD) / 10_000n; // p% → WAD
 
@@ -136,44 +136,20 @@ describe("SECONDS_PER_YEAR", () => {
   });
 });
 
-const READS = readsLog as unknown as {
-  readonly meta: { readonly pinned_block: { readonly number: string; readonly timestamp: string } };
-  readonly reads: ReadonlyArray<{ readonly label: string; readonly result?: unknown }>;
-};
-
-function readResult(label: string): unknown {
-  const hit = READS.reads.find((r) => r.label === label);
-  if (hit === undefined || hit.result === undefined) throw new Error(`missing read: ${label}`);
-  return hit.result;
-}
-
-function bigRead(label: string): bigint {
-  const v = readResult(label);
-  if (typeof v !== "string") throw new Error(`read ${label} is not a decimal string`);
-  return BigInt(v);
-}
-
 // AaveProtocolDataProvider.getReserveData tuple layout (scripts/protocol-reads.mjs):
 // [5] liquidityRate · [6] variableBorrowRate · [9] liquidityIndex ·
 // [10] variableBorrowIndex · [11] lastUpdateTimestamp
 function reserveAccrual(sym: "WETH" | "weETH") {
-  const rd = readResult(`${sym}.getReserveData`);
-  if (!Array.isArray(rd)) throw new Error(`${sym}.getReserveData is not a tuple`);
-  const at = (i: number): bigint => {
-    const v: unknown = rd[i];
-    if (typeof v !== "string" && typeof v !== "number") throw new Error(`unexpected field ${i}`);
-    return BigInt(v);
-  };
+  const label = `${sym}.getReserveData`;
   return {
-    liquidityRate: at(5),
-    variableBorrowRate: at(6),
-    liquidityIndex: at(9),
-    variableBorrowIndex: at(10),
-    lastUpdateTimestamp: at(11),
+    liquidityRate: tupleBig(label, 5),
+    variableBorrowRate: tupleBig(label, 6),
+    liquidityIndex: tupleBig(label, 9),
+    variableBorrowIndex: tupleBig(label, 10),
+    lastUpdateTimestamp: tupleBig(label, 11),
   };
 }
 
-const PINNED_TS = BigInt(READS.meta.pinned_block.timestamp);
 const HALF_RAY = RAY / 2n;
 
 describe("aave v3.7 ray roundings (WadRayMath)", () => {
