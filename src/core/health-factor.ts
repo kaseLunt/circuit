@@ -19,12 +19,6 @@ export { HF_NO_DEBT };
 export const HF_WARN_WAD = (150n * WAD) / 100n; // 1.50, named constant (SPEC §7)
 
 const PERCENTAGE_FACTOR = 10_000n;
-const HALF_PERCENTAGE_FACTOR = 5_000n;
-
-/** Aave percentMul: (value · pctBps + 0.5·1e4) / 1e4, half-up. */
-export function percentMul(value: bigint, pctBps: bigint): bigint {
-  return (value * pctBps + HALF_PERCENTAGE_FACTOR) / PERCENTAGE_FACTOR;
-}
 
 /** Aave wadDiv: (a · WAD + b/2) / b, half-up. Throws on zero denominator. */
 export function wadDiv(a: bigint, b: bigint): bigint {
@@ -53,11 +47,17 @@ export type HealthFactor =
 export type RiskState = "ok" | "warning" | "unknown";
 
 /**
- * Health factor via the exact Aave v3.7 GenericLogic sequence:
- *   avgLT   = floor(Σ base_i·lt_i / Σ base_i)              (bps)
- *   adjusted = percentMul(Σ base_i, avgLT)                 (half-up)
- *   hf       = wadDiv(adjusted, totalDebtBase)             (half-up, WAD)
- * debt == 0 → no-debt; any null input → unknown (never silently "safe").
+ * Health factor, matching Aave v3.7 GenericLogic EXACTLY (verified against
+ * aave-v3-origin GenericLogic.sol, calculateUserAccountData):
+ *
+ *   weighted     = Σ base_i · lt_i                          (base8 · bps)
+ *   healthFactor = wadDiv(weighted, totalDebtBase) / 10000  (WAD, half-up wadDiv)
+ *
+ * Note: on-chain, `avgLiquidationThreshold` is only divided by total collateral
+ * AFTER the HF line, for the returned average — it does NOT feed HF. HF uses the
+ * un-averaged weighted sum directly. (A prior revision used percentMul over the
+ * averaged LT; that was wrong at boundaries and is corrected here.) debt == 0 →
+ * no-debt; any null input → unknown (never silently "safe").
  */
 export function computeHealthFactor(
   collateral: readonly CollateralEntry[] | null,
@@ -68,18 +68,14 @@ export function computeHealthFactor(
   }
   if (totalDebtBase === 0n) return { status: "no-debt" };
 
-  let totalColl = 0n;
   let weighted = 0n; // Σ base·ltBps
   for (const c of collateral) {
     if (c.ltBps < 0 || c.ltBps > 10_000) {
       return { status: "unknown", reason: `ltBps ${c.ltBps} out of range` };
     }
-    totalColl += c.base;
     weighted += c.base * BigInt(c.ltBps);
   }
-  const avgLtBps = totalColl === 0n ? 0n : weighted / totalColl; // floor, as on-chain
-  const adjusted = percentMul(totalColl, avgLtBps);
-  return { status: "healthy", hfWad: wadDiv(adjusted, totalDebtBase) };
+  return { status: "healthy", hfWad: wadDiv(weighted, totalDebtBase) / PERCENTAGE_FACTOR };
 }
 
 /** Numeric HF for comparisons; no-debt → sentinel, unknown → null. */

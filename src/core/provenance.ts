@@ -68,18 +68,17 @@ export function observationMinter(block: bigint, fetchedAt: number): Observation
     block,
     fetchedAt,
     observe(value, source) {
-      return { kind: "observed", value, source, block, fetchedAt };
+      return observed(value, source, block, fetchedAt);
     },
   };
 }
 
-/** Low-level Observed constructor. Prefer `observationMinter(...).observe`. */
-export function observed<T>(
-  value: T,
-  source: string,
-  block: bigint,
-  fetchedAt: number,
-): Observed<T> {
+// Intentionally NOT exported: the only public way to mint an Observed is through
+// `observationMinter`, which server/chain creates from a real block-pinned
+// snapshot. Keeping this internal removes casual literal-labeling in core and
+// keeps observation creation at the chain-snapshot boundary (D-004 finding 6).
+// A lint rule additionally forbids `{ kind: "observed" }` object literals in core.
+function observed<T>(value: T, source: string, block: bigint, fetchedAt: number): Observed<T> {
   return { kind: "observed", value, source, block, fetchedAt };
 }
 

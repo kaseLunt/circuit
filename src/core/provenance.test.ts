@@ -1,6 +1,5 @@
 import { describe, it, expect } from "vitest";
 import {
-  observed,
   derived,
   entered,
   configured,
@@ -9,17 +8,19 @@ import {
   observationMinter,
 } from "./provenance";
 
+const m = observationMinter(25_592_678n, 1_753_240_451);
+
 describe("provenance constructors", () => {
-  it("observed carries source, block, fetchedAt", () => {
-    const p = observed(100n, "AaveOracle.getAssetPrice(WETH)", 25592678n, 1_753_240_451);
+  it("observe carries source, block, fetchedAt", () => {
+    const p = m.observe(100n, "AaveOracle.getAssetPrice(WETH)");
     expect(p.kind).toBe("observed");
     expect(valueOf(p)).toBe(100n);
     expect(p.source).toContain("AaveOracle");
-    expect(p.block).toBe(25592678n);
+    expect(p.block).toBe(25_592_678n);
   });
 
   it("derived records the expression and its inputs", () => {
-    const a = observed(3n, "x", 1n, 0);
+    const a = m.observe(3n, "x");
     const b = entered(4n);
     const p = derived(12n, "a * b", [a, b]);
     expect(p.kind).toBe("derived");
@@ -37,9 +38,7 @@ describe("provenance constructors", () => {
 
 describe("observationMinter — snapshot-bound observations", () => {
   it("stamps every observation with the snapshot's block", () => {
-    const m = observationMinter(25_592_678n, 1_753_240_451);
     const p = m.observe(211_593_732_385n, "AaveOracle.getAssetPrice(weETH)");
-    expect(p.kind).toBe("observed");
     expect(p.block).toBe(25_592_678n);
     expect(p.fetchedAt).toBe(1_753_240_451);
   });
@@ -50,25 +49,24 @@ describe("observationMinter — snapshot-bound observations", () => {
 
 describe("derived — same-block enforcement", () => {
   it("allows a derivation whose observations share a block", () => {
-    const m = observationMinter(100n, 0);
     const a = m.observe(3n, "a");
     const b = m.observe(4n, "b");
     expect(() => derived(12n, "a*b", [a, b])).not.toThrow();
   });
   it("throws when observations come from different blocks", () => {
-    const a = observed(3n, "a", 100n, 0);
-    const b = observed(4n, "b", 101n, 0);
+    const a = observationMinter(100n, 0).observe(3n, "a");
+    const b = observationMinter(101n, 0).observe(4n, "b");
     expect(() => derived(12n, "a*b", [a, b])).toThrow(/multiple blocks/);
   });
   it("allows mixing observed with entered/configured (no extra block)", () => {
-    const a = observed(3n, "a", 100n, 0);
+    const a = m.observe(3n, "a");
     expect(() => derived(9n, "a*3", [a, entered(3n)])).not.toThrow();
   });
 });
 
 describe("provenanceTrail", () => {
   it("renders a nested derivation chain", () => {
-    const price = observed(192386686200n, "AaveOracle.getAssetPrice(WETH)", 25592678n, 0);
+    const price = m.observe(192386686200n, "AaveOracle.getAssetPrice(WETH)");
     const alloc = entered(7000n);
     const borrow = derived(1n, "collateralBase * b_bps / 1e4 (floor)", [price, alloc]);
     const trail = provenanceTrail(borrow);
@@ -78,7 +76,7 @@ describe("provenanceTrail", () => {
   });
 
   it("renders each leaf kind", () => {
-    expect(provenanceTrail(observed(1n, "s", 2n, 0))[0]).toContain("@ block 2");
+    expect(provenanceTrail(m.observe(1n, "s"))[0]).toContain("@ block 25592678");
     expect(provenanceTrail(configured(1, "N", "f.ts"))[0]).toContain("configured N");
     expect(provenanceTrail(entered(1))[0]).toContain("entered by user");
   });

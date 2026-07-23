@@ -18,9 +18,9 @@ export function outgoingBps(edges: readonly Edge[], sourceId: string): number {
 /**
  * Split `amount` across `edges` (all sharing one source) by allocation bps.
  * Returns `[edgeId, amount]` pairs. Each share is floored; the rounding
- * remainder is assigned to the edge with the LARGEST allocation (ties → lowest
- * index) — a canonical, order-independent recipient, so the dust always lands on
- * the most significant edge rather than wherever it happens to sit in the array.
+ * remainder is assigned to the edge with the LARGEST allocation, ties broken by
+ * the lexicographically smallest edge id — a fully order-independent recipient,
+ * so reordering equal-allocation edges never changes where the dust lands.
  *
  * Zero-allocation edges are rejected (a 0-bps edge has no place in a plan).
  * `edges` must total ≤ 10000 bps (validated upstream). If they total < 10000,
@@ -51,7 +51,11 @@ export function splitAmount(
   if (remainder > 0n) {
     let maxIdx = 0;
     for (let i = 1; i < edges.length; i += 1) {
-      if (edges[i]!.allocationBps > edges[maxIdx]!.allocationBps) maxIdx = i;
+      const cur = edges[i]!;
+      const best = edges[maxIdx]!;
+      // Larger allocation wins; equal allocation breaks by smallest edge id.
+      if (cur.allocationBps > best.allocationBps) maxIdx = i;
+      else if (cur.allocationBps === best.allocationBps && cur.id < best.id) maxIdx = i;
     }
     out[maxIdx] = { edgeId: out[maxIdx]!.edgeId, amount: out[maxIdx]!.amount + remainder };
   }

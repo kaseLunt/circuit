@@ -2,7 +2,6 @@ import { describe, it, expect } from "vitest";
 import { WAD } from "./format";
 import {
   usdBase,
-  percentMul,
   wadDiv,
   computeHealthFactor,
   hfWadValue,
@@ -18,13 +17,9 @@ const PRICE_WEETH = 211_593_732_385n;
 const PRICE_WETH = 192_386_686_200n;
 const EMODE_LT_BPS = 9500;
 
-describe("percentMul / wadDiv (Aave half-up)", () => {
-  it("percentMul rounds half-up", () => {
-    expect(percentMul(1n, 9999n)).toBe(1n); // (9999+5000)/10000 = 1.4999 → 1
-    expect(percentMul(1n, 5000n)).toBe(1n); // (5000+5000)/10000 = 1.0 → 1
-  });
-  it("wadDiv rounds half-up and rejects zero", () => {
-    expect(wadDiv(1n, 2n)).toBe(WAD / 2n + 0n); // (1e18 + 1)/2 → 5e17
+describe("wadDiv (Aave half-up)", () => {
+  it("rounds half-up and rejects zero", () => {
+    expect(wadDiv(1n, 2n)).toBe(WAD / 2n); // (1e18 + 1)/2 → 5e17
     expect(() => wadDiv(1n, 0n)).toThrow(RangeError);
   });
 });
@@ -50,10 +45,10 @@ describe("computeHealthFactor — replicates Aave GenericLogic", () => {
     expect(computeHealthFactor([{ base: 1n, ltBps: 10_001 }], 1n).status).toBe("unknown");
   });
 
-  it("regression: {base:1, ltBps:9999}, debt:1 → 1e18 (was 0 before the fix)", () => {
-    // avgLT=9999, percentMul(1,9999)=1, wadDiv(1,1)=1e18
+  it("boundary {base:1, ltBps:9999}, debt:1 → 0.9999e18 (matches on-chain GenericLogic)", () => {
+    // weighted=9999; wadDiv(9999,1)/10000 = 9999e18/10000 = 0.9999e18
     const hf = computeHealthFactor([{ base: 1n, ltBps: 9999 }], 1n);
-    expect(hfWadValue(hf)).toBe(WAD);
+    expect(hfWadValue(hf)).toBe((9999n * WAD) / 10_000n);
   });
 
   it("zero collateral with debt → HF 0 (liquidatable, not unknown)", () => {

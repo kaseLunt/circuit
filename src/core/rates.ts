@@ -33,7 +33,11 @@ export function rayRateToWad(rateRay: bigint): bigint {
  * APY (WAD fraction) from a RAY per-annum APR, using Aave's third-order
  * compounded-interest expansion over one year:
  *   apy ≈ apr + apr²/2 + apr³/6
- * (t/SECONDS_PER_YEAR = 1 for a full year). Matches on-chain accrual truncation.
+ * (t/SECONDS_PER_YEAR = 1 for a full year). This is a current-rate projection
+ * shaped like Aave's on-chain debt-index compounding; it is NOT the exact
+ * realized supplier APY (Aave's liquidity index accrues linearly). The cubic is
+ * within <1bp of continuous compounding at the rates in play — below the 2-dp
+ * display.
  */
 export function rayAprToApyWad(aprRay: bigint): bigint {
   const apr = rayRateToWad(aprRay); // WAD

@@ -4,8 +4,15 @@
  * A graph arriving from the untrusted share-URL passes zod shape validation
  * first (elsewhere), then THIS module's structural validation before any plan is
  * built: unique ids, edge referential integrity, DAG acyclicity, per-source
- * allocation conservation, bounded size, and supported block/asset combinations.
- * Calldata is only ever derived from a graph that passed both gates.
+ * allocation conservation, bounded size, single-producer flow, reachability, and
+ * per-block parameter/enum checks. Calldata is only ever derived from a graph
+ * that passed both gates.
+ *
+ * Boundary note: *asset-flow* compatibility across edges (does producer output
+ * feed a consumer that accepts it, and where must a wrap be inserted) is NOT
+ * validated here — an edge is not always an asset transfer (e.g. supply→borrow
+ * is a dependency, not a token flow). Asset flow is computed and validated in
+ * `plan.ts`, where each block's token semantics and the route optimizer live.
  */
 
 export type BlockType = "input" | "stake" | "wrap" | "unwrap" | "lend" | "borrow";
@@ -45,10 +52,13 @@ const BORROW_ASSETS = new Set<string>(["WETH"]);
 const WRAP_PAIRS = new Set<string>(["eETH>weETH", "stETH>wstETH", "ETH>WETH"]);
 const UNWRAP_PAIRS = new Set<string>(["weETH>eETH", "wstETH>stETH", "WETH>ETH"]);
 
+/** Max plausible ETH input — a finite upper bound so absurd/overflowing amounts
+ * (e.g. a 100-digit string parsing to Infinity) are rejected, not accepted. */
+const MAX_INPUT_ETH = 1_000_000_000; // 1e9 ETH
+
 function isPositiveAmount(v: unknown): boolean {
-  if (typeof v === "number") return Number.isFinite(v) && v > 0;
-  if (typeof v === "string") return /^\d+(\.\d+)?$/.test(v) && Number(v) > 0;
-  return false;
+  const n = typeof v === "number" ? v : typeof v === "string" && /^\d+(\.\d+)?$/.test(v) ? Number(v) : NaN;
+  return Number.isFinite(n) && n > 0 && n <= MAX_INPUT_ETH;
 }
 
 /** Per-block parameter/semantic checks (SPEC §5.6). Pushes into `errors`. */
@@ -130,8 +140,10 @@ export function validateGraph(g: StrategyGraph): GraphValidation {
     if (!blockIds.has(e.source)) errors.push(`edge ${e.id} source ${e.source} is not a block`);
     if (!blockIds.has(e.target)) errors.push(`edge ${e.id} target ${e.target} is not a block`);
     if (e.source === e.target) errors.push(`edge ${e.id} is a self-loop`);
-    if (e.allocationBps < 0 || e.allocationBps > 10_000) {
-      errors.push(`edge ${e.id} allocationBps ${e.allocationBps} out of [0,10000]`);
+    // Positive integer bps in [1,10000] — aligns with splitAmount, which rejects
+    // zero/fractional allocations (they cannot be represented as bigint shares).
+    if (!Number.isInteger(e.allocationBps) || e.allocationBps < 1 || e.allocationBps > 10_000) {
+      errors.push(`edge ${e.id} allocationBps ${e.allocationBps} must be an integer in [1,10000]`);
     }
   }
 
