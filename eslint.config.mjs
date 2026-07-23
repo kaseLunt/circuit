@@ -5,9 +5,11 @@ const eslintConfig = [
   ...nextCoreWebVitals,
   ...nextTypescript,
   {
-    ignores: [".next/**", "node_modules/**", "roadmap/**", "spikes/**"],
+    ignores: [".next/**", "node_modules/**", "roadmap/**", "spikes/**", "scripts/**"],
   },
   {
+    // Application code is console-free; a `log` util gates any debug output.
+    files: ["src/**/*.{ts,tsx}"],
     rules: {
       "no-console": "error",
     },
