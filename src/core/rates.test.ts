@@ -79,6 +79,30 @@ describe("variableBorrowAprRay (matrix WETH strategy)", () => {
   });
 });
 
+describe("variableBorrowAprRay — degenerate strategy params", () => {
+  it("optimalUsageRatio 0 → base only below/at optimal path", () => {
+    const s: RateStrategyBps = {
+      optimalUsageRatio: 0,
+      baseVariableBorrowRate: 100,
+      variableRateSlope1: 235,
+      variableRateSlope2: 600,
+    };
+    // U=0 <= uOpt=0 → base (guards the uOpt===0 branch)
+    expect(rayRateToWad(variableBorrowAprRay(s, 0n))).toBe(bpsToWad(100));
+  });
+  it("optimalUsageRatio 100% → excess denom guard at full utilization", () => {
+    const s: RateStrategyBps = {
+      optimalUsageRatio: 10_000,
+      baseVariableBorrowRate: 0,
+      variableRateSlope1: 235,
+      variableRateSlope2: 600,
+    };
+    // U at optimal (=100%) takes the <=uOpt branch, denom guard unused; U slightly
+    // above is impossible at 100%. Exercise the boundary.
+    expect(rayRateToWad(variableBorrowAprRay(s, WAD))).toBe(bpsToWad(235));
+  });
+});
+
 describe("netApyWad (§5.2 leveraged-restake)", () => {
   it("unlevered (b=0) equals collateral compound", () => {
     const net = netApyWad(0n, pctWad(3), pctWad(2), pctWad(2.5));

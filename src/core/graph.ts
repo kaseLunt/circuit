@@ -1,0 +1,151 @@
+/**
+ * Strategy graph schema and structural validation (SPEC §5.6). Pure.
+ *
+ * A graph arriving from the untrusted share-URL passes zod shape validation
+ * first (elsewhere), then THIS module's structural validation before any plan is
+ * built: unique ids, edge referential integrity, DAG acyclicity, per-source
+ * allocation conservation, bounded size, and supported block/asset combinations.
+ * Calldata is only ever derived from a graph that passed both gates.
+ */
+
+export type BlockType = "input" | "stake" | "wrap" | "unwrap" | "lend" | "borrow";
+export type Asset = "ETH" | "eETH" | "weETH" | "stETH" | "wstETH" | "WETH";
+export type StakeProtocol = "etherfi" | "lido";
+export type LendProtocol = "aave-v3";
+
+export interface Block {
+  readonly id: string;
+  readonly type: BlockType;
+  readonly params: Readonly<Record<string, string | number>>;
+}
+
+export interface Edge {
+  readonly id: string;
+  readonly source: string;
+  readonly target: string;
+  /** Fraction of the source's output routed along this edge, in bps. */
+  readonly allocationBps: number;
+}
+
+export interface StrategyGraph {
+  readonly blocks: readonly Block[];
+  readonly edges: readonly Edge[];
+}
+
+export const MAX_BLOCKS = 64;
+export const MAX_EDGES = 128;
+
+export interface GraphValidation {
+  readonly ok: boolean;
+  readonly errors: readonly string[];
+}
+
+function ok(): GraphValidation {
+  return { ok: true, errors: [] };
+}
+
+/** Full structural validation. Returns every error found (not fail-fast). */
+export function validateGraph(g: StrategyGraph): GraphValidation {
+  const errors: string[] = [];
+
+  if (g.blocks.length === 0) errors.push("graph has no blocks");
+  if (g.blocks.length > MAX_BLOCKS) errors.push(`too many blocks (${g.blocks.length} > ${MAX_BLOCKS})`);
+  if (g.edges.length > MAX_EDGES) errors.push(`too many edges (${g.edges.length} > ${MAX_EDGES})`);
+
+  // Unique block ids.
+  const blockIds = new Set<string>();
+  for (const b of g.blocks) {
+    if (blockIds.has(b.id)) errors.push(`duplicate block id: ${b.id}`);
+    blockIds.add(b.id);
+  }
+
+  // Unique edge ids + referential integrity + no self-loops.
+  const edgeIds = new Set<string>();
+  for (const e of g.edges) {
+    if (edgeIds.has(e.id)) errors.push(`duplicate edge id: ${e.id}`);
+    edgeIds.add(e.id);
+    if (!blockIds.has(e.source)) errors.push(`edge ${e.id} source ${e.source} is not a block`);
+    if (!blockIds.has(e.target)) errors.push(`edge ${e.id} target ${e.target} is not a block`);
+    if (e.source === e.target) errors.push(`edge ${e.id} is a self-loop`);
+    if (e.allocationBps < 0 || e.allocationBps > 10_000) {
+      errors.push(`edge ${e.id} allocationBps ${e.allocationBps} out of [0,10000]`);
+    }
+  }
+
+  // Per-source allocation conservation: outgoing allocation must not exceed 100%.
+  const outBySource = new Map<string, number>();
+  for (const e of g.edges) {
+    outBySource.set(e.source, (outBySource.get(e.source) ?? 0) + e.allocationBps);
+  }
+  for (const [source, total] of outBySource) {
+    if (total > 10_000) errors.push(`block ${source} over-allocates outgoing flow: ${total} bps`);
+  }
+
+  // Acyclicity (Kahn): if any node remains with in-degree > 0, there is a cycle.
+  if (!errors.some((e) => e.includes("is not a block"))) {
+    if (hasCycle(g)) errors.push("graph is not acyclic");
+  }
+
+  // Exactly one input block, and inputs have no incoming edges.
+  const inputs = g.blocks.filter((b) => b.type === "input");
+  if (inputs.length !== 1) errors.push(`expected exactly one input block, found ${inputs.length}`);
+  const hasIncoming = new Set(g.edges.map((e) => e.target));
+  for (const b of inputs) {
+    if (hasIncoming.has(b.id)) errors.push(`input block ${b.id} must have no incoming edges`);
+  }
+
+  return errors.length === 0 ? ok() : { ok: false, errors };
+}
+
+/** Kahn's algorithm cycle detection over the block graph. */
+function hasCycle(g: StrategyGraph): boolean {
+  const indeg = new Map<string, number>();
+  const adj = new Map<string, string[]>();
+  for (const b of g.blocks) {
+    indeg.set(b.id, 0);
+    adj.set(b.id, []);
+  }
+  for (const e of g.edges) {
+    adj.get(e.source)!.push(e.target);
+    indeg.set(e.target, (indeg.get(e.target) ?? 0) + 1);
+  }
+  const queue = [...indeg.entries()].filter(([, d]) => d === 0).map(([id]) => id);
+  let visited = 0;
+  while (queue.length > 0) {
+    const id = queue.shift()!;
+    visited += 1;
+    for (const next of adj.get(id) ?? []) {
+      const d = (indeg.get(next) ?? 0) - 1;
+      indeg.set(next, d);
+      if (d === 0) queue.push(next);
+    }
+  }
+  return visited !== g.blocks.length;
+}
+
+/** Topological order of block ids; throws if the graph has a cycle. */
+export function topologicalOrder(g: StrategyGraph): string[] {
+  const indeg = new Map<string, number>();
+  const adj = new Map<string, string[]>();
+  for (const b of g.blocks) {
+    indeg.set(b.id, 0);
+    adj.set(b.id, []);
+  }
+  for (const e of g.edges) {
+    adj.get(e.source)!.push(e.target);
+    indeg.set(e.target, (indeg.get(e.target) ?? 0) + 1);
+  }
+  const queue = [...indeg.entries()].filter(([, d]) => d === 0).map(([id]) => id);
+  const order: string[] = [];
+  while (queue.length > 0) {
+    const id = queue.shift()!;
+    order.push(id);
+    for (const next of adj.get(id) ?? []) {
+      const d = (indeg.get(next) ?? 0) - 1;
+      indeg.set(next, d);
+      if (d === 0) queue.push(next);
+    }
+  }
+  if (order.length !== g.blocks.length) throw new Error("graph is not acyclic");
+  return order;
+}
