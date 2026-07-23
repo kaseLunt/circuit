@@ -72,8 +72,10 @@ verbatim in this repo's task history):
 
 ## Acceptance
 
-- `node scripts/protocol-reads.mjs` reproduces `docs/protocol-matrix-reads.json` at the pinned
-  block with zero failed reads; the matrix cites only values present in that log.
+- `RPC_URL=<archive> node scripts/protocol-reads.mjs` reproduces `docs/protocol-matrix-reads.json`
+  at the hard-pinned, hash-verified block with **zero unexpected failures** (the single
+  documented expected revert, `getRevision`, is itself recorded evidence); reruns are
+  byte-identical; the matrix cites only values present in that log.
 - Revision claim backed by implementation-address mapping evidence, not inference.
 - W03 amended per above; doctor green.
 - Proof output shows a genuine failed connection attempt from a non-loopback address.
@@ -88,7 +90,7 @@ verbatim in this repo's task history):
 ## Canonical commands
 
 ```text
-node scripts/protocol-reads.mjs
+RPC_URL=<archive> node scripts/protocol-reads.mjs
 ANVIL_PATH=<foundry> node spikes/sandbox-proof/proof.mjs
 npm run build && npm run typecheck && npm run lint && npm test
 python roadmap/tools/doctor.py
@@ -97,7 +99,7 @@ python roadmap/tools/doctor.py
 ## Evidence
 
 No attained evidence yet; the receipt records the re-review verdict, the pinned block, and the
-zero-failed-reads log.
+reads log (76 successes, one documented expected revert, zero unexpected failures).
 
 ## Handoff
 

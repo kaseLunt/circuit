@@ -106,31 +106,48 @@ Every `TransactionStep` amount is exactly one of:
 ## No-sweep invariants (share-based, integer bounds)
 
 The fork suite seeds pre-existing balances (eETH, weETH, WETH) on the strategy wallet and
-induces a rebase between steps (mutating `totalPooledEther` via the sanctioned test mutation —
-anvil `setStorageAt` on the LiquidityPool accounting slot, documented in the test). Invariants:
+induces a rebase between steps via this exact, fully-specified mutation contract:
+1. locate the `totalPooledEther` storage word empirically — scan the LiquidityPool proxy's
+   first 256 slots at the fork block for the unique word equal to `getTotalPooledEther()`;
+   assert exactly one match (test fails on zero or multiple);
+2. compute `newValue = floor(oldValue * 10100 / 10000)` (+1.0000%, bit-preserving for the
+   word's other bits if the field shares a slot — assert the field occupies the full word,
+   else fail);
+3. `anvil_setStorageAt(slot, newValue)`; assert `getTotalPooledEther()` returns exactly
+   `newValue`, assert slots `slot-1` and `slot+1` are byte-identical to their pre-mutation
+   values, and assert `eETH.totalShares()` is unchanged;
+4. re-read `LP.amountForShare(1e18)` and assert it equals
+   `floor(1e18 * newValue / totalShares)`; all subsequent expected-value math uses the
+   re-read rate. The recorded slot id and pre/post words go into the test output.
+Invariants:
 
 - Pre-existing **eETH shares** (`eETH.shares(wallet)` attributable to the seed): exact integer
   equality before/after — a rebase changes `balanceOf`, never seeded shares.
 - Pre-existing **weETH and WETH token amounts**: exact equality (non-rebasing).
 - Strategy-consumed amounts are attributed per §Amount-provenance; residual dust bounds are
-  **named constants**: `EETH_DUST_SHARES_MAX = 2n` per eETH conversion step (floor mulDiv
-  loses < 1 share per conversion; the flagship has two), `WETH_RESIDUAL_MAX = 0n`,
+  **named constants**: `EETH_DUST_SHARES_MAX = 1n` per wrap round-trip (floor mulDiv loses at most 1 integer
+  share per conversion at rate > 1; the flagship has two wraps, so the aggregate bound is `2n`), `WETH_RESIDUAL_MAX = 0n`,
   `WEETH_RESIDUAL_MAX = 0n`. Exceeding any bound fails the suite.
 
 ## Acceptance
 
 - **Fork gate:** `npm run test:fork` executes all 13 enumerated SPEC §2 steps against the
   pinned fixture **in CI**, asserting after every risk-changing step (supply, borrow, e-mode
-  set, resupply) that `core/health-factor.ts` agrees with `Pool.getUserAccountData()` within
-  **1 part in 10^8** (relative, on the RAY-scaled HF), and the final-state assertion list
-  below passes.
+  set, resupply) that `core/health-factor.ts` agrees with `Pool.getUserAccountData()`'s
+  **WAD-scaled (1e18)** healthFactor within **1 part in 10^8 relative** — HF comparisons
+  apply only while debt exists; before any debt, both sides must equal the no-debt sentinel
+  `type(uint256).max` exactly. The final-state assertion list below must pass.
 - **Final-state assertions (each exact or with the named bound):** user e-mode category == 1;
-  weETH `usageAsCollateralEnabledOnUser` == true; aToken(weETH) balance == attributed supplied
-  total within **2 wei** (index rounding, ≤1 wei per supply, two supplies); variableDebt(WETH)
-  == the `derived` borrow amount within **1 wei**; minimum-HF and final-HF each within the HF
+  weETH `usageAsCollateralEnabledOnUser` == true; **scaled** balances are the primary, index-independent assertions:
+  `aToken(weETH).scaledBalanceOf(wallet)` equals the sum of per-supply scaled amounts (each
+  computed from the attributed supplied amount and that supply's `nextLiquidityIndex` with
+  aToken rounding, <=1 wei per supply, bound **2 wei** scaled); WETH
+  `variableDebt.scaledBalanceOf(wallet)` equals the borrow's scaled amount within **1 wei**
+  scaled; display-level balances are then recomputed from the final block's indices and
+  asserted against on-chain `balanceOf` within **1 wei**; minimum-HF and final-HF each within the HF
   bound above; residuals: wallet weETH == seed exactly, WETH == seed exactly, eETH shares
-  within `EETH_DUST_SHARES_MAX × 2` of seed+attributed, native ETH == seed − gas actually
-  paid; post-action `liquidityRate`/`variableBorrowRate` from `getReserveData` == the
+  within the aggregate `2n` share bound of seed+attributed, native ETH: `final == initial − inputLiteral − gasActuallyPaid` (the
+  borrow→unwrap→restake leg nets to zero by construction); post-action `liquidityRate`/`variableBorrowRate` from `getReserveData` == the
   §5.1 predicted rates within **1e-6 relative** (same strategy params, same formula).
 - **No-sweep proof:** the invariants above, including the induced rebase.
 - **Unit suite (behavioral, enumerated):** rates (RAY conversions, trailing-APR derivation,
@@ -145,8 +162,10 @@ anvil `setStorageAt` on the LiquidityPool accounting slot, documented in the tes
 - **Malicious-graph suite:** schema-valid-but-structurally-invalid graphs and the
   attacker-address payload are rejected by `core/graph.ts` before any plan is built (§5.6).
 - **Validation matrix:** plan validation implements the recorded constraint set of matrix §4
-  (active/frozen/paused, borrowing-enabled, supply+borrow caps with headroom, available
-  virtual liquidity, e-mode membership bitmaps, siloed/isolation, user collateral-enable) and
+  (active/frozen/paused, borrowing-enabled, supply+borrow caps via the **exact v3.7 formulas recorded in matrix §4** (scaled supply +
+  accruedToTreasury indexed by nextLiquidityIndex; scaled debt by nextVariableBorrowIndex),
+  available virtual liquidity, e-mode membership + isolated-category flag + LTV-zero bitmap,
+  user collateral-enable) and
   rejects violating plans naming the offending block; cap boundary tested at the fixture's
   real weETH headroom.
 - **No silent fallbacks:** numeric-literal `??` lint ban active in `core/`; `Provenanced<T>`
@@ -162,9 +181,9 @@ anvil `setStorageAt` on the LiquidityPool accounting slot, documented in the tes
   (`ANVIL_PATH` env, default `anvil`) with
   `--fork-url $FORK_RPC_URL --fork-block-number 25592678 --host 127.0.0.1`, polls readiness,
   and tears the process down (kill + wait) on completion or failure.
-- CI: `foundry-toolchain` action pinned to anvil v1.7.1; `FORK_RPC_URL` from a repository
-  variable defaulting to the public RPC in the matrix header (no secret required; a paid
-  archive RPC may be added as a secret later without contract change).
+- CI: `foundry-toolchain` action pinned to anvil v1.7.1; **`FORK_RPC_URL` is a required
+  repository secret and must be archive-capable** — the pinned block has aged out of public
+  nodes' recent-state windows (verified), so no public fallback exists.
 
 ## Non-goals
 
