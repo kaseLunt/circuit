@@ -12,9 +12,14 @@ updated: 2026-07-24
 
 ## Context
 
-`capture:parallel-uuid-ids` in `roadmap/tools/selftest.py` failed once and passed on an
-immediate re-run of the same commit, with no intervening change. Observed 2026-07-24 while
-landing D-008; the D-008 edits do not touch `new.py` or any capture path.
+`capture:parallel-uuid-ids` in `roadmap/tools/selftest.py` fails intermittently — roughly 2 of
+4 runs on `main` at 283ec2a — and passes on an immediate re-run of the same commit with no
+intervening change. Observed 2026-07-24 while landing D-008.
+
+**Pre-existing, not introduced by D-008 (verified, not assumed):** reproduced in a clean
+throwaway worktree at `66e7273` (the commit before D-008), failing 1 of 3 runs there. The D-008
+edits touch `validate_lease` and the `check_expiry` plumbing; they do not touch `new.py`,
+`safe_worktree_path`, or `normalize_repo_path`.
 
 ## Evidence
 
