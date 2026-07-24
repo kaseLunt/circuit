@@ -189,7 +189,17 @@ Invariants:
   and tears the process down (kill + wait) on completion or failure.
 - CI: `foundry-toolchain` action pinned to anvil v1.7.1; **`FORK_RPC_URL` is a required
   repository secret and must be archive-capable** — the pinned block has aged out of public
-  nodes' recent-state windows (verified), so no public fallback exists.
+  nodes' recent-state windows (verified), so no public fallback exists. The secret exists
+  (`gh secret list`: set 2026-07-23T05:16:10Z) and is write-only, so it cannot serve a local run.
+- Local fork runs (2026-07-24): anvil is **not** installed system-wide and Foundry has no
+  supported Windows `foundryup`. The pinned binary is kept out of the repo and off `PATH` at
+  `C:/Users/kasel/tools/foundry-v1.7.1/anvil.exe` (release asset
+  `foundry_v1.7.1_win32_amd64.zip`, sha256 `6d41121b4bbb809845821c903619cfee75ed364f2bdc58a6787c9b0454114537`
+  verified against the published checksum; reports `anvil Version: 1.7.1`, commit
+  `4072e48705af9d93e3c0f6e29e93b5e9a40caed8`). Point the suite at it with `ANVIL_PATH`.
+  A missing `FORK_RPC_URL` or absent anvil fails the suite closed; note that vitest runs
+  `globalSetup` **before** collection, so either failure surfaces as a misleading
+  "No test files found" alongside the real error.
 
 ## Non-goals
 
