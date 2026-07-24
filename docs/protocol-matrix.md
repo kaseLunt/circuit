@@ -78,6 +78,7 @@ compatibility stubs, recorded as such.
 | **Available liquidity (virtual accounting)** | ≈334,699.17 WETH | `WETH.getVirtualUnderlyingBalance` (cross-check `WETH.underlying.balanceOf(aToken)` ≈334,699.33 — delta = untracked donations) |
 | Rate strategy params | optimal 92.00%, base 0, slope1 2.35%, slope2 6.00% | `WETH.strategy.getInterestRateDataBps` |
 | Current rates + indices | recorded | `WETH.getReserveData` |
+| **Reserve deficit (v3.7 `unbacked`)** | `52964453911883321543567` (≈52,964.45 WETH) | `WETH.getReserveDeficit` |
 
 ### weETH `0xCd5fE23C85820F7B72D0926FC9b05b43E359b7ee`
 
@@ -92,6 +93,7 @@ compatibility stubs, recorded as such.
 | Borrow cap | 1 (borrowing effectively disabled; legacy debt ≈50.8) | `weETH.getReserveCaps`, `weETH.variableDebtToken.totalSupply` |
 | Available liquidity (virtual) | ≈1,056,884.98 (== `balanceOf(aToken)` exactly) | `weETH.getVirtualUnderlyingBalance` |
 | Rate strategy params | optimal 30.00%, base 1.00%, slope1 7.00%, slope2 300.00% | `weETH.strategy.getInterestRateDataBps` |
+| Reserve deficit (v3.7 `unbacked`) | `0` | `weETH.getReserveDeficit` |
 
 **Exact cap formulas (v3.7 `ValidationLogic`,
 https://github.com/aave-dao/aave-v3-origin/blob/main/src/contracts/protocol/libraries/logic/ValidationLogic.sol):**
@@ -198,12 +200,16 @@ phase does.
    fork suite.
 2. Numeric `Pool.getRevision()` — not externally readable (recorded expected revert); revision
    claim rests on the implementation mapping + changelog (§2).
-3. **WETH `reserve.deficit` is not recorded.** v3.7 feeds `reserve.deficit` into the rate
-   strategy as its `unbacked` param (ReserveLogic `updateInterestRatesAndVirtualBalance`,
-   read verbatim from main — no v3.7 tag exists), and it enters only the supply-usage
-   denominator. The recorded WETH `variableBorrowRate` reproduces **exactly** from recorded
-   state; the recorded `liquidityRate` does not reproduce with deficit 0 (weETH does),
-   implying a nonzero WETH deficit. Resolution: add `getReserveDeficit` reads to
-   `scripts/protocol-reads.mjs` and regenerate this log at the pinned block (archive RPC
-   required); the P1 fork suite reads the same getter live from the fork. No value is
-   asserted here until read on-chain.
+3. ~~**WETH `reserve.deficit` is not recorded.**~~ **RESOLVED 2026-07-24.** v3.7 feeds
+   `reserve.deficit` into the rate strategy as its `unbacked` param (ReserveLogic
+   `updateInterestRatesAndVirtualBalance`, read verbatim from main — no v3.7 tag exists), and
+   it enters only the supply-usage denominator. The rate inversion predicted a nonzero WETH
+   deficit before it could be read: the recorded `variableBorrowRate` reproduced exactly while
+   the recorded `liquidityRate` would not reproduce with deficit 0 (weETH's did). Adding
+   `getReserveDeficit` to `scripts/protocol-reads.mjs` and regenerating the log at the pinned
+   block confirmed the inference — WETH `52964453911883321543567` (≈52,964.45), weETH `0`,
+   now recorded in §4. `rates.test.ts` reproduces **both** reserves' `liquidityRate` exactly at
+   those deficits, and asserts WETH does **not** reproduce at deficit 0 so the dependency
+   cannot silently disappear. The P1 fork suite reads the same getter live from the fork.
+   Regeneration was purely additive: every pre-existing read reproduced byte-identically at the
+   pinned block, which is independent evidence of fixture determinism.

@@ -354,6 +354,15 @@
    "result": "334699166617546040881916"
   },
   {
+   "label": "WETH.getReserveDeficit",
+   "to": "0x87870Bca3F3fD6335C3F4ce8392D69350B4fA4E2",
+   "fn": "getReserveDeficit",
+   "args": [
+    "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2"
+   ],
+   "result": "52964453911883321543567"
+  },
+  {
    "label": "WETH.getInterestRateStrategyAddress",
    "to": "0x0a16f2FCC0D44FaE41cc54e079281D84A363bECD",
    "fn": "getInterestRateStrategyAddress",
@@ -515,6 +524,15 @@
     "0xCd5fE23C85820F7B72D0926FC9b05b43E359b7ee"
    ],
    "result": "1056884977265602133191225"
+  },
+  {
+   "label": "weETH.getReserveDeficit",
+   "to": "0x87870Bca3F3fD6335C3F4ce8392D69350B4fA4E2",
+   "fn": "getReserveDeficit",
+   "args": [
+    "0xCd5fE23C85820F7B72D0926FC9b05b43E359b7ee"
+   ],
+   "result": "0"
   },
   {
    "label": "weETH.getInterestRateStrategyAddress",

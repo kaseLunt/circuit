@@ -70,6 +70,7 @@ const abis = {
     "function getEModeCategoryCollateralBitmap(uint8) view returns (uint128)",
     "function getEModeCategoryBorrowableBitmap(uint8) view returns (uint128)",
     "function getRevision() view returns (uint256)",
+    "function getReserveDeficit(address) view returns (uint256)",
   ]),
   data: parseAbi([
     "function getReserveConfigurationData(address) view returns (uint256 decimals, uint256 ltv, uint256 liquidationThreshold, uint256 liquidationBonus, uint256 reserveFactor, bool usageAsCollateralEnabled, bool borrowingEnabled, bool stableBorrowRateEnabled, bool isActive, bool isFrozen)",
@@ -209,6 +210,9 @@ for (const [sym, asset] of Object.entries({ WETH: A.WETH, weETH: A.weETH })) {
   await read(`${sym}.variableDebtToken.scaledTotalSupply`, { address: tokens[2], abi: abis.atoken, functionName: "scaledTotalSupply", blockNumber: B });
   await read(`${sym}.underlying.balanceOf(aToken)`, { address: asset, abi: abis.erc20, functionName: "balanceOf", args: [tokens[0]], blockNumber: B });
   await read(`${sym}.getVirtualUnderlyingBalance`, { address: DATA, abi: abis.data, functionName: "getVirtualUnderlyingBalance", args: [asset], blockNumber: B });
+  // v3.7 feeds reserve.deficit to the strategy as `unbacked`, entering only the
+  // supply-usage denominator (ReserveLogic.updateInterestRatesAndVirtualBalance).
+  await read(`${sym}.getReserveDeficit`, { address: POOL, abi: abis.pool, functionName: "getReserveDeficit", args: [asset], blockNumber: B });
   const strat = await read(`${sym}.getInterestRateStrategyAddress`, { address: DATA, abi: abis.data, functionName: "getInterestRateStrategyAddress", args: [asset], blockNumber: B });
   await read(`${sym}.strategy.getInterestRateDataBps`, { address: strat, abi: abis.strategy, functionName: "getInterestRateDataBps", args: [asset], blockNumber: B });
 }

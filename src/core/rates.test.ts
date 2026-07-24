@@ -303,12 +303,22 @@ describe("v3.7 interest-rate strategy reproduces the recorded current rates", ()
     expect(reproduction("weETH", 0n).variableBorrowRateRay).toBe(weeth.variableBorrowRate);
   });
 
-  it("weETH liquidity rate reproduces exactly with a zero deficit", () => {
-    // WETH's liquidity rate additionally requires WETH's reserve deficit, which
-    // the committed log does not yet record (matrix §4 OPEN item) — its exact
-    // reproduction lands with the regenerated log.
+  it("liquidity rates reproduce exactly for both reserves at the recorded deficits", () => {
+    const weth = reserveAccrual("WETH");
     const weeth = reserveAccrual("weETH");
-    expect(reproduction("weETH", 0n).liquidityRateRay).toBe(weeth.liquidityRate);
+    const wethDeficit = bigRead("WETH.getReserveDeficit");
+    const weethDeficit = bigRead("weETH.getReserveDeficit");
+    expect(wethDeficit).toBeGreaterThan(0n);
+    expect(weethDeficit).toBe(0n);
+    expect(reproduction("WETH", wethDeficit).liquidityRateRay).toBe(weth.liquidityRate);
+    expect(reproduction("weETH", weethDeficit).liquidityRateRay).toBe(weeth.liquidityRate);
+  });
+
+  it("the WETH liquidity rate does not reproduce with a zero deficit", () => {
+    // The inversion that predicted a nonzero WETH deficit before it was read.
+    // If this ever reproduces, the deficit stopped entering supplyU's denominator.
+    const weth = reserveAccrual("WETH");
+    expect(reproduction("WETH", 0n).liquidityRateRay).not.toBe(weth.liquidityRate);
   });
 
   it("a zero-debt reserve earns nothing and borrows at the base rate", () => {
