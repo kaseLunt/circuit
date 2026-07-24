@@ -2,8 +2,9 @@
 id: D-008
 type: decision
 title: Claim leases are recorded, not enforced
-status: proposed
+status: accepted
 date: 2026-07-24
+approved_by: Kase Lunt (owner)
 supersedes: []
 updated: 2026-07-24
 ---

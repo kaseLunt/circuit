@@ -215,10 +215,13 @@ D-004 review outcome in the receipt; stamp per RULES.md.
 ## Handoff
 
 - next: the D-007 Codex review of the full W03 surface, then push for the CI fork run, then
-  stamp the receipt citing run IDs + fixture identity + the review verdict. **The CI fork job
-  cannot pass until `FORK_RPC_URL` is set as an archive-capable repository secret** — it is
-  unset today, so the job will fail on a missing secret, not on the money-math. Locally the
-  suite needs `RPC_URL` (an Alchemy mainnet key reaches the pinned block; verified 2026-07-24).
+  stamp the receipt citing run IDs + fixture identity + the review verdict. `FORK_RPC_URL` is
+  already a repository secret (`gh secret list`: set 2026-07-23T05:16:10Z) and is write-only —
+  CI injects it; it cannot be read back for a local run. For a **local** fork run, build the URL
+  from the old repo's key without writing it to disk (the suite reads `process.env` directly and
+  neither node nor vitest auto-loads a `.env`):
+  `export FORK_RPC_URL="https://eth-mainnet.g.alchemy.com/v2/$(grep '^ALCHEMY_API_KEY=' /c/Users/kasel/source/repos/defi-portfolio-tracker/.env | cut -d'"' -f2)"`.
+  Never commit the URL (post-incident policy).
   Done since the last handoff: getReserveDeficit reads added and the log regenerated (purely
   additive — every prior read byte-identical), deficit rows recorded in matrix §4, §9 item 3
   resolved, and both reserves' liquidityRate now reproduce exactly in rates.test.ts.
