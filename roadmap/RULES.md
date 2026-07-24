@@ -15,8 +15,9 @@
 4. **Keep one active phase and one committing task in serial mode.** Starting another committing
    task requires completing, parking, or superseding the current one in a coherent transition.
    The activation transition also creates exactly one explicit integrator claim bound to that
-   task, branch, worktree, full base SHA, lease, and scope hash; it is accountability metadata,
-   not a distributed lock.
+   task, branch, worktree, full base SHA, and scope hash; it is accountability metadata, not a
+   distributed lock. The claim also records a lease, but per D-008 lease liveness is never an
+   authority condition: a lapsed lease is a staleness signal for a human, not a machine veto.
 5. **Do not enable concurrent writers by editing `STATUS.md`.** Require an accepted Decision and
    verified atomic allocation, isolated worktrees, disjoint ownership, protected integration,
    exact merge-candidate checks, and recovery/fencing behavior.
@@ -75,7 +76,8 @@
 ## Enforcement honesty
 
 21. **Fail closed on a precondition the executor does not own.** Report a dirty or contradictory
-    state, failing gate, expired authority, or out-of-scope path. Agents do not bypass hooks or
+    state, failing gate, mismatched authority (scope, branch, or worktree binding), or an
+    out-of-scope path. Agents do not bypass hooks or
     permission gates; any human override is explicit and auditable.
 22. **Hooks and candidate jobs are feedback, not remote authority.** `pull_request` jobs execute
     mutable candidate code. The base/trust-ref `pull_request_target` audit becomes authoritative
