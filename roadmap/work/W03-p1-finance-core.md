@@ -214,11 +214,14 @@ D-004 review outcome in the receipt; stamp per RULES.md.
 
 ## Handoff
 
-- next: regenerate the reads log with the getReserveDeficit reads (scripts/** now in scope;
-  archive RPC required), record the deficit rows in matrix §4 and resolve §9 item 3, add the
-  WETH liquidity-rate exact reproduction to rates.test.ts; then the D-007 Codex review of the
-  full W03 surface, push for the CI fork run, and stamp the receipt citing run IDs + fixture
-  identity + the review verdict.
+- next: the D-007 Codex review of the full W03 surface, then push for the CI fork run, then
+  stamp the receipt citing run IDs + fixture identity + the review verdict. **The CI fork job
+  cannot pass until `FORK_RPC_URL` is set as an archive-capable repository secret** — it is
+  unset today, so the job will fail on a missing secret, not on the money-math. Locally the
+  suite needs `RPC_URL` (an Alchemy mainnet key reaches the pinned block; verified 2026-07-24).
+  Done since the last handoff: getReserveDeficit reads added and the log regenerated (purely
+  additive — every prior read byte-identical), deficit rows recorded in matrix §4, §9 item 3
+  resolved, and both reserves' liquidityRate now reproduce exactly in rates.test.ts.
 - read_first: SPEC §2 (13 steps, e-mode policy), §4, §5, §8; docs/protocol-matrix.md §4
   (source-verified v3.7 rounding/accrual semantics + cap formulas) and §7 deposit semantics;
   src/core/plan.ts module header; tests/fork/flagship-plan.test.ts header.
