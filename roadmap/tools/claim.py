@@ -358,7 +358,6 @@ def renew_claim(args: argparse.Namespace) -> int:
         now,
         check_local_binding=True,
         descendant="HEAD",
-        check_expiry=True,
     )
     data["lease_expires"] = iso(now + dt.timedelta(hours=args.hours))
     data["updated_at"] = iso(now)
@@ -382,7 +381,6 @@ def rescope_claim(args: argparse.Namespace) -> int:
         now,
         check_local_binding=True,
         descendant="HEAD",
-        check_expiry=True,
     )
     task = scalar(data, "task", relative, required=True)
     scopes = requested_scopes(Snapshot(REPO, "worktree"), task, args.path)
@@ -426,7 +424,6 @@ def rebind_claim(args: argparse.Namespace) -> int:
         now,
         check_local_binding=False,
         descendant="HEAD",
-        check_expiry=False,
     )
     branch = current_branch(REPO)
     worktree = local_worktree_id(REPO)
@@ -475,7 +472,6 @@ def release_claim(args: argparse.Namespace) -> int:
         now,
         check_local_binding=True,
         descendant="HEAD",
-        check_expiry=False,
     )
     data["status"] = args.status
     data["updated_at"] = iso(now)

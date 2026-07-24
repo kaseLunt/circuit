@@ -65,7 +65,6 @@ def arguments() -> argparse.Namespace:
     parser.add_argument("head")
     parser.add_argument("--agent")
     parser.add_argument("--branch")
-    parser.add_argument("--check-live-lease", action="store_true")
     parser.add_argument("--now", help="strict UTC clock override for deterministic tests")
     parser.add_argument("--allow-initial", action="store_true")
     parser.add_argument("--pull-request-number", default="")
@@ -253,7 +252,6 @@ def validate_claim_change(
             now,
             check_local_binding=False,
             descendant=commit.source,
-            check_expiry=False,
         )
         return "rebind" if binding_changed else "rotation"
 
@@ -268,7 +266,6 @@ def validate_claim_change(
         claim_path,
         now,
         active=after_status == "active",
-        check_live=False,
     )
     return None
 
@@ -310,7 +307,6 @@ def validate_reopen(
         now,
         check_local_binding=False,
         descendant=commit.source,
-        check_expiry=False,
     )
     return binding_changed
 
@@ -418,7 +414,6 @@ def evaluate_commit(
                 now,
                 check_local_binding=False,
                 descendant=commit.source,
-                check_expiry=False,
             )
         )
         scopes.append(parse_scope("roadmap/**"))
@@ -466,7 +461,6 @@ def evaluate_commit(
                 now,
                 check_local_binding=False,
                 descendant=commit.source,
-                check_expiry=False,
             )
             label = "claim bootstrap"
             selected_claim = path
@@ -505,27 +499,6 @@ def evaluate_commit(
     if approval:
         warnings.append(approval)
     return warnings
-
-
-def validate_live_head(head: Snapshot, args: argparse.Namespace, now: dt.datetime) -> None:
-    if not args.check_live_lease or not head.exists("roadmap/STATUS.md"):
-        return
-    claims = active_claims(head)
-    if not claims:
-        return
-    if len(claims) > 1:
-        raise ControlPlaneError("head contains multiple active claims")
-    path, claim = claims[0]
-    validate_claim(
-        REPO,
-        head,
-        path,
-        claim,
-        now,
-        check_local_binding=False,
-        descendant=head.source,
-        check_expiry=True,
-    )
 
 
 def review_range(
@@ -587,7 +560,6 @@ def main() -> int:
             "scope-diff: EXPLICIT INITIAL-HISTORY BOOTSTRAP -- owner review required; "
             "the independent commit-snapshot doctor remains authoritative"
         )
-        validate_live_head(Snapshot(REPO, args.head), args, now)
         return 0
     if not commit_exists(REPO, args.base):
         raise ControlPlaneError(f"base commit '{args.base}' is unavailable")
@@ -605,7 +577,6 @@ def main() -> int:
     warnings, reviewed, merges = review_range(
         args.resolved_base, args.resolved_head, args, now
     )
-    validate_live_head(Snapshot(REPO, args.head), args, now)
     for warning in warnings:
         print(f"::warning::{warning}")
     print(

@@ -2,7 +2,7 @@
 """Validate the repo-native control plane from one coherent repository snapshot.
 
 Usage:
-  python roadmap/tools/doctor.py [--snapshot worktree|index|<commit>] [--check-live-leases]
+  python roadmap/tools/doctor.py [--snapshot worktree|index|<commit>]
   python roadmap/tools/doctor.py --stamp <work-id>
 """
 
@@ -79,7 +79,6 @@ UUID_RE = re.compile(
 def arguments() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--snapshot", default="worktree")
-    parser.add_argument("--check-live-leases", action="store_true")
     parser.add_argument("--now", help="fixed strict-UTC clock for deterministic tests")
     parser.add_argument("--stamp", metavar="WORK_ID")
     parser.add_argument("--receipt-basis", metavar="WORK_ID")
@@ -919,7 +918,6 @@ def main() -> int:
                 path,
                 now,
                 active=claim_status == "active",
-                check_live=args.check_live_leases,
             )
             if not FULL_SHA_RE.fullmatch(base):
                 errors.append(f"{path}: base_commit must be a full 40-character lowercase SHA")

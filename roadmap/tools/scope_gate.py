@@ -111,7 +111,6 @@ class Authority:
     scopes: tuple[Scope, ...]
     integrator: bool
     bootstrap: bool = False
-    expired: bool = False
     binding_mismatch: bool = False
 
 
@@ -514,7 +513,6 @@ def validate_claim(
     *,
     check_local_binding: bool,
     descendant: str,
-    check_expiry: bool = True,
 ) -> tuple[Scope, ...]:
     agent = scalar(claim, "agent", path, required=True)
     if not AGENT_RE.fullmatch(agent):
@@ -530,9 +528,7 @@ def validate_claim(
     integrator = scalar(claim, "integrator", path, required=True)
     if integrator not in ("true", "false"):
         raise ControlPlaneError(f"{path}: integrator must be true or false")
-    validate_lease(
-        claim, path, now, active=True, check_live=check_expiry
-    )
+    validate_lease(claim, path, now, active=True)
     base = scalar(claim, "base_commit", path, required=True)
     if not FULL_SHA_RE.fullmatch(base) or not commit_exists(repo, base):
         raise ControlPlaneError(f"{path}: base_commit must name an existing full SHA")
@@ -595,7 +591,6 @@ def valid_rotation(
             after,
             now,
             check_local_binding=True,
-            check_expiry=True,
             descendant=expected_base,
         )
     except ControlPlaneError:
@@ -655,7 +650,6 @@ def validate_staged_claim_transition(
         authority.claim_path,
         now,
         active=after_status == "active",
-        check_live=after_status == "active",
     )
 
 
@@ -704,7 +698,6 @@ def validate_reopened_claim(
         now,
         check_local_binding=True,
         descendant=expected_base,
-        check_expiry=True,
     )
 
 
@@ -786,17 +779,12 @@ def resolve_authority(
             now,
             check_local_binding=False,
             descendant=base_commit,
-            check_expiry=False,
         )
         integrator = scalar(claim, "integrator", path, required=True) == "true"
         if not integrator:
             raise ControlPlaneError(
                 "the bundled serial runtime requires an explicit integrator claim"
             )
-        expires = parse_utc(
-            scalar(claim, "lease_expires", path, required=True),
-            f"{path}:lease_expires",
-        )
         binding_mismatch = (
             scalar(claim, "branch", path, required=True) != current_branch(repo)
             or scalar(claim, "worktree_id", path, required=True) != local_worktree_id(repo)
@@ -807,7 +795,6 @@ def resolve_authority(
             claim,
             scopes,
             integrator,
-            expired=expires <= now,
             binding_mismatch=binding_mismatch,
         )
 
@@ -830,7 +817,6 @@ def resolve_authority(
             claim,
             now,
             check_local_binding=True,
-            check_expiry=True,
             descendant=base_commit,
         )
         if scalar(claim, "base_commit", path, required=True) != base_commit:
@@ -960,22 +946,6 @@ def main() -> int:
             base.commit,
             allow_rebind=authority.binding_mismatch,
         )
-        if authority.expired and not authority.binding_mismatch:
-            if any(not path.startswith("roadmap/") for path in paths):
-                raise ControlPlaneError(
-                    "expired claim may only perform an isolated roadmap cleanup transition"
-                )
-            if not staged.exists(authority.claim_path):
-                raise ControlPlaneError("expired claim record may not be deleted")
-            expired_after = parse_frontmatter(
-                staged.read_text(authority.claim_path), authority.claim_path, required=True
-            )
-            if scalar(
-                expired_after, "status", authority.claim_path, required=True
-            ) not in TERMINAL_CLAIM_STATUSES:
-                raise ControlPlaneError(
-                    "expired claim must transition to released, failed, or abandoned"
-                )
 
     if protected_acknowledged and protected:
         allowed = tuple(list(allowed) + [parse_scope(value) for value in PROTECTED_SCOPES])

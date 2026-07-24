@@ -18,7 +18,7 @@ for tool in roadmap/tools/_control_plane.py roadmap/tools/doctor.py roadmap/tool
   fi
 done
 
-"$PY" roadmap/tools/doctor.py --snapshot index --check-live-leases || {
+"$PY" roadmap/tools/doctor.py --snapshot index || {
   echo "pre-commit: BLOCKED -- staged control-plane snapshot is invalid" >&2
   exit 1
 }

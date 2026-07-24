@@ -223,9 +223,9 @@ def validate_lease(
     now: dt.datetime,
     *,
     active: bool,
-    check_live: bool,
     max_hours: int = 24,
 ) -> tuple[dt.datetime, dt.datetime, dt.datetime]:
+    """Validate lease shape only. Liveness is recorded, never enforced (D-008)."""
     issued = parse_utc(scalar(data, "issued_at", path, required=True), f"{path}:issued_at")
     updated = parse_utc(scalar(data, "updated_at", path, required=True), f"{path}:updated_at")
     expires = parse_utc(
@@ -241,11 +241,8 @@ def validate_lease(
         raise ControlPlaneError(
             f"{path}: lease window exceeds {max_hours} hours from updated_at"
         )
-    if active:
-        if expires <= updated:
-            raise ControlPlaneError(f"{path}: active lease_expires must follow updated_at")
-        if check_live and expires <= now:
-            raise ControlPlaneError(f"{path}: active lease expired at {expires.isoformat()}")
+    if active and expires <= updated:
+        raise ControlPlaneError(f"{path}: active lease_expires must follow updated_at")
     return issued, updated, expires
 
 

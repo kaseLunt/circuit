@@ -443,7 +443,7 @@ def test_doctor_and_gate(root: Path) -> None:
     print("Doctor and staged-index gate")
     repo = root / "doctor-gate"
     _, active = build_active(repo)
-    result = tool(repo, "doctor.py", "--snapshot", "index", "--check-live-leases")
+    result = tool(repo, "doctor.py", "--snapshot", "index")
     check("doctor:synthetic-baseline", result.returncode == 0, output(result))
 
     write(repo / "src" / "allowed.txt", "frozen-index change\n")
@@ -546,27 +546,22 @@ def test_doctor_and_gate(root: Path) -> None:
         expires="2000-01-01T08:00:00Z",
     )
     write(claim_path, claim)
-    expired_head = commit_all(repo, "synthetic expired lease")
-    write(repo / "src" / "allowed.txt", "expired writer output\n")
-    must(git(repo, "add", "src/allowed.txt"), "stage expired output")
-    blocked = tool(repo, "scope_gate.py")
-    reset(repo, expired_head)
+    lapsed_head = commit_all(repo, "synthetic lapsed lease")
+    write(repo / "src" / "allowed.txt", "lapsed writer output\n")
+    must(git(repo, "add", "src/allowed.txt"), "stage lapsed output")
+    # D-008: a lapsed lease is recorded, not enforced. Assert the GATE authorizes
+    # in-scope output and that renew recovers in place. Asserting claim.py alone
+    # is what let an earlier claim.py-only patch pass while the gate still refused.
+    gated = tool(repo, "scope_gate.py")
+    diagnosed = tool(repo, "doctor.py", "--snapshot", "index")
+    reset(repo, lapsed_head)
     renewal = tool(repo, "claim.py", "renew", "synthetic")
-    released = tool(repo, "claim.py", "release", "synthetic")
-    set_work_state(repo, "candidate", ["src/**"])
-    must(git(repo, "add", "roadmap"), "stage expired cleanup")
-    cleanup = tool(
-        repo,
-        "scope_gate.py",
-        env={"CONTROL_PLANE_OWNER_REVIEWED": "1"},
-    )
     check(
-        "lease:expired-output-blocked-cleanup-allowed",
-        blocked.returncode == 1
-        and renewal.returncode == 1
-        and released.returncode == 0
-        and cleanup.returncode == 0,
-        "\n".join(map(output, (blocked, renewal, released, cleanup))),
+        "lease:lapsed-recorded-not-enforced",
+        gated.returncode == 0
+        and diagnosed.returncode == 0
+        and renewal.returncode == 0,
+        "\n".join(map(output, (gated, diagnosed, renewal))),
     )
     reset(repo, active)
 
@@ -1144,7 +1139,7 @@ def test_claim_lifecycle(root: Path) -> None:
         "scope_gate.py",
         env={"CONTROL_PLANE_OWNER_REVIEWED": "1"},
     )
-    doctor = tool(repo, "doctor.py", "--snapshot", "index", "--check-live-leases")
+    doctor = tool(repo, "doctor.py", "--snapshot", "index")
     check(
         "claim:bootstrap-metadata-only-valid",
         gate.returncode == 0 and doctor.returncode == 0,
