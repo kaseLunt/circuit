@@ -11,8 +11,8 @@ Phases mirror SPEC.md §11; the SPEC's gate column is the review gate for each b
 | ID | Phase | Goal | State |
 | --- | --- | --- | --- |
 | P0 | Bootstrap + spikes | Scaffold + CI green; sandbox provider proven executable; protocol matrix, name, display face pinned | Done |
-| P1 | Finance core on a fork | core/ + server/chain complete; 13-step flagship plan executes green on pinned anvil fork in CI | **In progress** |
-| P2 | Canvas on proven core | Composer transplanted + reskinned on P1's model; §3 steps 1–3, 8 pass | Planned |
+| P1 | Finance core on a fork | core/ + server/chain complete; 13-step flagship plan executes green on pinned anvil fork in CI | Done |
+| P2 | Canvas on proven core | Composer transplanted + reskinned on P1's model; §3 steps 1–3, 8 pass | **In progress** |
 | P3 | Execution | Sandbox execution (provider, session registry, §6 security contract) + full tx UX family, both recovery machines, a11y, live gating; §3 steps 4–7 pass. SPEC splits this internally into P3a/P3b | Planned |
 | P4 | Launch polish | Landing, OG/meta, README GIF, scheduled prod smoke; full §3 green on production | Planned — **MVP line** |
 | P5 | Enhancements | Swap+aggregator, position import, SSE/Pyth, light theme, Base | Parked |

@@ -55,7 +55,7 @@ invalidated_by:
   - vitest.fork.config.ts
   - eslint.config.mjs
   - package.json
-review_when: phase:P1:exit
+review_when: event:invalidated-by-change
 updated: 2026-07-25
 evidence_fingerprint: sha256:2537d7fbee7bd4d75e116afa62824cd22afea14f28582766b63f46ddbfcace24
 ---

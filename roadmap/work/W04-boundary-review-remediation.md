@@ -29,14 +29,14 @@ deliverables:
   - spikes/sandbox-proof/proof.mjs
   - spikes/sandbox-proof/proof-output.txt
 evidence_receipts:
-  - roadmap/evidence/E-W04-boundary-remediation.md
+  - roadmap/evidence/E-W04-boundary-remediation-r2.md
 invalidated_by:
   - docs/protocol-matrix.md
   - docs/protocol-matrix-reads.json
   - scripts/**
-review_when: phase:P0:exit
-updated: 2026-07-23
-evidence_fingerprint: sha256:0942417f19df1ebc61d1f220f32ca585e7358d6b64fcb4f289b6a6f6ca573e01
+review_when: event:invalidated-by-change
+updated: 2026-07-25
+evidence_fingerprint: sha256:3be2fe9a53da72413630f87fb6dda2166b89fc6647153c6cd92e9f3d848a0f9b
 ---
 
 # W04 — Disposition the P0→P1 boundary review

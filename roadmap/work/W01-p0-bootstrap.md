@@ -39,15 +39,15 @@ deliverables:
   - spikes/sandbox-proof/proof.mjs
   - spikes/sandbox-proof/proof-output.txt
 evidence_receipts:
-  - roadmap/evidence/E-W01-p0-bootstrap-r2.md
+  - roadmap/evidence/E-W01-p0-bootstrap-r3.md
 invalidated_by:
   - SPEC.md
   - TRANSPLANT.md
   - package.json
   - .github/workflows/**
-review_when: phase:P0:exit
-updated: 2026-07-22
-evidence_fingerprint: sha256:a9618fc2aec22d37497d9fc7e456cba61fd365129f1a7defdac69075e9cbad01
+review_when: event:invalidated-by-change
+updated: 2026-07-25
+evidence_fingerprint: sha256:c3ecc64197e5793fe7d1a9a000ebf75bdd4f78586a9d5e8c4280db4873076fe3
 ---
 
 # W01 — P0 bootstrap: scaffold, CI, spikes, and pinned decisions

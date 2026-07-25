@@ -1,5 +1,5 @@
 ---
-active_phase: P1
+active_phase: P2
 active_task: none
 project_state: active
 writer_mode: serial

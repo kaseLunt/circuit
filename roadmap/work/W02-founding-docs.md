@@ -21,8 +21,8 @@ evidence_receipts:
 invalidated_by:
   - SPEC.md
   - TRANSPLANT.md
-review_when: phase:P0:exit
-updated: 2026-07-22
+review_when: event:invalidated-by-change
+updated: 2026-07-25
 evidence_fingerprint: sha256:0a8b0077488dedb23f820cb15d5708a0f60a986fef4e23b807766f5597f2cb52
 ---
 
