@@ -3,7 +3,7 @@ id: W03
 type: work
 title: P1 finance core — 13-step plan green on a pinned fork, headless
 phase: P1
-status: active
+status: achieved
 evidence_target: thirteen-step-plan-green-on-pinned-fork-in-ci
 priority: 1
 depends_on: [W04]
@@ -39,7 +39,8 @@ deliverables:
   - vitest.fork.config.ts
   - package.json
   - .github/workflows/ci.yml
-evidence_receipts: []
+evidence_receipts:
+  - roadmap/evidence/E-W03-p1-finance-core.md
 invalidated_by:
   - SPEC.md
   - TRANSPLANT.md
@@ -55,7 +56,8 @@ invalidated_by:
   - eslint.config.mjs
   - package.json
 review_when: phase:P1:exit
-updated: 2026-07-23
+updated: 2026-07-25
+evidence_fingerprint: sha256:5c51364f4e5d52ba6118a0631451ac938defe79bf7154021f299d00e876d7104
 ---
 
 # W03 — P1 finance core on a fork, headless
