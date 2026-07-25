@@ -18,6 +18,10 @@ jobs:
       - run: npm run build
       - run: npm run typecheck
       - run: npm run lint
+      # ESLint parses scripts/ but does not reject a duplicate top-level declaration that
+      # Node refuses to load, so the evidence-regeneration script gets an explicit parse gate.
+      # Observed 2026-07-25: lint exit 0 on bytes Node rejected with SyntaxError.
+      - run: npm run check:scripts
       - run: npm test
 
   fork:
