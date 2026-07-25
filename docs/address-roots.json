@@ -1,0 +1,57 @@
+{
+  "meta": {
+    "purpose": "Pinned address roots for the protocol matrix. These are the ONLY addresses in the fixture pipeline that do not come from an on-chain read. Every other address is derived from these at the pinned block (see derived_on_chain). Sourced mechanically from an immutable upstream artifact and re-verifiable with: node scripts/protocol-reads.mjs --verify-roots",
+    "upstream": {
+      "repo": "https://github.com/bgd-labs/aave-address-book",
+      "path": "src/AaveV3Ethereum.sol",
+      "commit": "ad35d3403b02ff0b4ce27acc23b92781b44f78f4",
+      "url": "https://raw.githubusercontent.com/bgd-labs/aave-address-book/ad35d3403b02ff0b4ce27acc23b92781b44f78f4/src/AaveV3Ethereum.sol",
+      "bytes": 79914,
+      "sha256": "1a862b7389de3d59ee77680a8edb451a29e630a07813a0c5becdce65d730a22a",
+      "verified_at": "2026-07-25T00:00:00Z",
+      "note": "Same address-book commit already cited by matrix section 2 for the Pool implementation mapping. The commit pin makes the source immutable; the sha256 makes the pin self-verifying, so a silently retargeted commit or a mutated raw endpoint fails closed rather than substituting a different address."
+    },
+    "market": "Aave v3 Ethereum Core"
+  },
+  "roots": {
+    "ADDRESSES_PROVIDER": {
+      "address": "0x2f39d218133AFaB8F2B819B1066c7E434Ad94E9e",
+      "upstream_symbol": "POOL_ADDRESSES_PROVIDER",
+      "role": "The single Aave root. Pool, AaveProtocolDataProvider, AaveOracle and ACLManager are all read from it, and the Pool round-trips ADDRESSES_PROVIDER() back to this value."
+    },
+    "WETH": {
+      "address": "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2",
+      "upstream_symbol": "WETH_UNDERLYING",
+      "role": "Flagship borrow asset. Independently confirmed on-chain: present in Pool.getReservesList() and symbol() == WETH."
+    },
+    "weETH": {
+      "address": "0xCd5fE23C85820F7B72D0926FC9b05b43E359b7ee",
+      "upstream_symbol": "weETH_UNDERLYING",
+      "role": "Flagship collateral asset, and the EtherFi root: eETH and the EtherFi LiquidityPool are read from it. Independently confirmed on-chain: present in Pool.getReservesList() and symbol() == weETH."
+    },
+    "wstETH": {
+      "address": "0x7f39C581F595B53c5cb19bD0b3f8dA6c935E2Ca0",
+      "upstream_symbol": "wstETH_UNDERLYING",
+      "role": "Lido root (reference only; Lido execution is out of P1 scope per SPEC section 8). stETH is read from it. Independently confirmed on-chain: present in Pool.getReservesList() and symbol() == wstETH."
+    }
+  },
+  "derived_on_chain": {
+    "POOL": "AP.getPool()",
+    "DATA_PROVIDER": "AP.getPoolDataProvider()",
+    "ORACLE": "AP.getPriceOracle()",
+    "ACL_MANAGER": "AP.getACLManager()",
+    "POOL_IMPL": "eth_getStorageAt(POOL, EIP-1967 implementation slot)",
+    "eETH": "weETH.eETH()",
+    "ETHERFI_LP": "weETH.liquidityPool()",
+    "stETH": "wstETH.stETH()"
+  },
+  "assertions": {
+    "note": "Secondary, on-chain checks applied on every run of scripts/protocol-reads.mjs. Any mismatch aborts before a fixture is written.",
+    "checks": [
+      "Pool.ADDRESSES_PROVIDER() == roots.ADDRESSES_PROVIDER (closes the provider->pool->provider loop)",
+      "symbol() equals the labelled symbol for WETH, eETH, weETH, stETH, wstETH — catches a wrong-but-callable address that a bytecode-only check would miss",
+      "WETH, weETH and wstETH are members of Pool.getReservesList() at the pinned block",
+      "LP.eETH() == weETH.eETH() (two independent paths to the same eETH)"
+    ]
+  }
+}

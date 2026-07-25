@@ -15,7 +15,8 @@
  *
  * Run:  node scripts/protocol-reads.mjs            (RPC_URL env to override)
  */
-import { writeFileSync } from "node:fs";
+import { readFileSync, writeFileSync } from "node:fs";
+import { createHash } from "node:crypto";
 import { createPublicClient, http, parseAbi, getAddress, keccak256 } from "viem";
 import { mainnet } from "viem/chains";
 
@@ -62,19 +63,57 @@ const PIN = {
 };
 const REPIN = process.argv.includes("--repin");
 
-// Anchors. Sources: bgd-labs/aave-address-book src/AaveV3Ethereum.sol
-// (POOL_ADDRESSES_PROVIDER, *_UNDERLYING), Lido deployed-contracts docs,
-// EtherFi deployment JSONs — all previously round-trip-verified; re-verified
-// in this run at the pinned block (see the roundtrip reads below).
+const VERIFY_ROOTS = process.argv.includes("--verify-roots");
+
+/**
+ * Address roots. Only these four are not on-chain reads; every other address in the fixture is
+ * derived from them at the pinned block. They are loaded from docs/address-roots.json, which
+ * records the upstream address-book file, its commit, and its sha256 — so the provenance is a
+ * committed artifact rather than a literal typed into this script. `--verify-roots` re-fetches
+ * that file, re-checks the hash, and re-extracts each address.
+ */
+const ROOTS_PATH = new URL("../docs/address-roots.json", import.meta.url);
+const rootsDoc = JSON.parse(readFileSync(ROOTS_PATH, "utf8"));
 const A = {
-  ADDRESSES_PROVIDER: getAddress("0x2f39d218133AFaB8F2B819B1066c7E434Ad94E9e"),
-  WETH: getAddress("0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2"),
-  eETH: getAddress("0x35fA164735182de50811E8e2E824cFb9B6118ac2"),
-  weETH: getAddress("0xCd5fE23C85820F7B72D0926FC9b05b43E359b7ee"),
-  stETH: getAddress("0xae7ab96520DE3A18E5e111B5EaAb095312D7fE84"),
-  wstETH: getAddress("0x7f39C581F595B53c5cb19bD0b3f8dA6c935E2Ca0"),
-  ETHERFI_LP: getAddress("0x308861A430be4cce5502d0A12724771Fc6DaF216"),
+  ADDRESSES_PROVIDER: getAddress(rootsDoc.roots.ADDRESSES_PROVIDER.address),
+  WETH: getAddress(rootsDoc.roots.WETH.address),
+  weETH: getAddress(rootsDoc.roots.weETH.address),
+  wstETH: getAddress(rootsDoc.roots.wstETH.address),
+  // eETH, ETHERFI_LP and stETH are DERIVED on-chain below, never pinned.
 };
+
+async function verifyRootsAgainstUpstream() {
+  const up = rootsDoc.meta.upstream;
+  const res = await fetch(up.url);
+  if (!res.ok) {
+    fail(`FATAL: upstream root artifact fetch failed: HTTP ${res.status} ${up.url}`);
+    process.exit(1);
+  }
+  const buf = Buffer.from(await res.arrayBuffer());
+  const sha = createHash("sha256").update(buf).digest("hex");
+  if (buf.length !== up.bytes || sha !== up.sha256) {
+    fail(
+      `FATAL: upstream artifact does not match its pin\n` +
+        `  expected ${up.bytes} bytes sha256 ${up.sha256}\n` +
+        `  actual   ${buf.length} bytes sha256 ${sha}`,
+    );
+    process.exit(1);
+  }
+  const text = buf.toString("utf8");
+  for (const [name, root] of Object.entries(rootsDoc.roots)) {
+    const m = text.match(new RegExp(`${root.upstream_symbol}[^;]*?(0x[0-9a-fA-F]{40})`, "s"));
+    if (m === null) {
+      fail(`FATAL: ${root.upstream_symbol} not found in the pinned upstream artifact`);
+      process.exit(1);
+    }
+    assertAnchor(`upstream ${name} (${root.upstream_symbol})`, m[1], root.address);
+  }
+  emit(
+    `roots verified against ${up.repo}@${up.commit.slice(0, 12)} ${up.path} ` +
+      `(${buf.length} bytes, sha256 ${sha.slice(0, 16)}…): ` +
+      `${Object.keys(rootsDoc.roots).length} roots match`,
+  );
+}
 
 const EIP1967_IMPL_SLOT =
   "0x360894a13ba1a3210667c828492db98dca3e2076cc3735a920a3ca505d382bbc";
@@ -202,6 +241,7 @@ if (REPIN) {
 }
 const B = pinned.number;
 emit(`pinned block ${B} (${pinned.hash}) @ ${new Date(Number(pinned.timestamp) * 1000).toISOString()}`);
+if (VERIFY_ROOTS) await verifyRootsAgainstUpstream();
 
 // ---- anchor round-trips ------------------------------------------------------
 const POOL = await read("AP.getPool", { address: A.ADDRESSES_PROVIDER, abi: abis.provider, functionName: "getPool", blockNumber: B });
@@ -217,30 +257,31 @@ assertAnchor(
 const POOL_IMPL = await implSlot("Pool implementation (EIP-1967)", POOL, B);
 await read("Pool.getRevision (internal in v3.x — expected revert)", { address: POOL, abi: abis.pool, functionName: "getRevision", blockNumber: B, exploratory: true });
 
+// eETH, the EtherFi LiquidityPool and stETH are DERIVED from the pinned roots rather than
+// pinned themselves: weETH is the EtherFi root, wstETH the Lido root. These reads must precede
+// the symbol() checks below, which is why the round-trips come first.
+A.eETH = getAddress(
+  await read("weETH.eETH (round-trip)", { address: A.weETH, abi: abis.weeth, functionName: "eETH", blockNumber: B }),
+);
+A.ETHERFI_LP = getAddress(
+  await read("weETH.liquidityPool (round-trip)", { address: A.weETH, abi: abis.weeth, functionName: "liquidityPool", blockNumber: B }),
+);
+A.stETH = getAddress(
+  await read("wstETH.stETH (round-trip)", { address: A.wstETH, abi: abis.wsteth, functionName: "stETH", blockNumber: B }),
+);
+
+// symbol() is the check that catches a wrong-but-callable address: a typo is usually
+// uncallable and fails loudly, so the dangerous case is one that happens to be a live token.
 for (const [sym, addr] of Object.entries({ WETH: A.WETH, eETH: A.eETH, weETH: A.weETH, stETH: A.stETH, wstETH: A.wstETH })) {
   assertSymbol(await read(`${sym}.symbol`, { address: addr, abi: abis.erc20, functionName: "symbol", blockNumber: B }), sym);
 }
-assertAnchor(
-  "weETH.eETH",
-  await read("weETH.eETH (round-trip)", { address: A.weETH, abi: abis.weeth, functionName: "eETH", blockNumber: B }),
-  A.eETH,
-);
-assertAnchor(
-  "weETH.liquidityPool",
-  await read("weETH.liquidityPool (round-trip)", { address: A.weETH, abi: abis.weeth, functionName: "liquidityPool", blockNumber: B }),
-  A.ETHERFI_LP,
-);
-assertAnchor(
-  "wstETH.stETH",
-  await read("wstETH.stETH (round-trip)", { address: A.wstETH, abi: abis.wsteth, functionName: "stETH", blockNumber: B }),
-  A.stETH,
-);
 
 // ---- reserves ---------------------------------------------------------------
 const reservesList = await read("Pool.getReservesList", { address: POOL, abi: abis.pool, functionName: "getReservesList", blockNumber: B });
-// Anchor the two reserves this fixture depends on to the pool's own list, so a mistyped
-// underlying cannot silently become a "reserve" the matrix then describes.
-for (const [sym, asset] of Object.entries({ WETH: A.WETH, weETH: A.weETH })) {
+// Anchor every pinned token root to the pool's own reserve list. The market itself is the
+// authority on which address is "the WETH reserve here", so this is an independent confirmation
+// of the address-book pin rather than a restatement of it.
+for (const [sym, asset] of Object.entries({ WETH: A.WETH, weETH: A.weETH, wstETH: A.wstETH })) {
   const member = Array.isArray(reservesList)
     && reservesList.some((a) => getAddress(String(a)) === getAddress(asset));
   if (!member) {

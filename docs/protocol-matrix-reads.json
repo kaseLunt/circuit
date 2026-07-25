@@ -11,11 +11,11 @@
   "anchors": {
    "ADDRESSES_PROVIDER": "0x2f39d218133AFaB8F2B819B1066c7E434Ad94E9e",
    "WETH": "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2",
-   "eETH": "0x35fA164735182de50811E8e2E824cFb9B6118ac2",
    "weETH": "0xCd5fE23C85820F7B72D0926FC9b05b43E359b7ee",
-   "stETH": "0xae7ab96520DE3A18E5e111B5EaAb095312D7fE84",
    "wstETH": "0x7f39C581F595B53c5cb19bD0b3f8dA6c935E2Ca0",
-   "ETHERFI_LP": "0x308861A430be4cce5502d0A12724771Fc6DaF216"
+   "eETH": "0x35fA164735182de50811E8e2E824cFb9B6118ac2",
+   "ETHERFI_LP": "0x308861A430be4cce5502d0A12724771Fc6DaF216",
+   "stETH": "0xae7ab96520DE3A18E5e111B5EaAb095312D7fE84"
   },
   "pool": "0x87870Bca3F3fD6335C3F4ce8392D69350B4fA4E2",
   "pool_data_provider": "0x0a16f2FCC0D44FaE41cc54e079281D84A363bECD",
@@ -83,6 +83,27 @@
    "revert": "The contract function \"getRevision\" reverted."
   },
   {
+   "label": "weETH.eETH (round-trip)",
+   "to": "0xCd5fE23C85820F7B72D0926FC9b05b43E359b7ee",
+   "fn": "eETH",
+   "args": [],
+   "result": "0x35fA164735182de50811E8e2E824cFb9B6118ac2"
+  },
+  {
+   "label": "weETH.liquidityPool (round-trip)",
+   "to": "0xCd5fE23C85820F7B72D0926FC9b05b43E359b7ee",
+   "fn": "liquidityPool",
+   "args": [],
+   "result": "0x308861A430be4cce5502d0A12724771Fc6DaF216"
+  },
+  {
+   "label": "wstETH.stETH (round-trip)",
+   "to": "0x7f39C581F595B53c5cb19bD0b3f8dA6c935E2Ca0",
+   "fn": "stETH",
+   "args": [],
+   "result": "0xae7ab96520DE3A18E5e111B5EaAb095312D7fE84"
+  },
+  {
    "label": "WETH.symbol",
    "to": "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2",
    "fn": "symbol",
@@ -116,27 +137,6 @@
    "fn": "symbol",
    "args": [],
    "result": "wstETH"
-  },
-  {
-   "label": "weETH.eETH (round-trip)",
-   "to": "0xCd5fE23C85820F7B72D0926FC9b05b43E359b7ee",
-   "fn": "eETH",
-   "args": [],
-   "result": "0x35fA164735182de50811E8e2E824cFb9B6118ac2"
-  },
-  {
-   "label": "weETH.liquidityPool (round-trip)",
-   "to": "0xCd5fE23C85820F7B72D0926FC9b05b43E359b7ee",
-   "fn": "liquidityPool",
-   "args": [],
-   "result": "0x308861A430be4cce5502d0A12724771Fc6DaF216"
-  },
-  {
-   "label": "wstETH.stETH (round-trip)",
-   "to": "0x7f39C581F595B53c5cb19bD0b3f8dA6c935E2Ca0",
-   "fn": "stETH",
-   "args": [],
-   "result": "0xae7ab96520DE3A18E5e111B5EaAb095312D7fE84"
   },
   {
    "label": "Pool.getReservesList",

@@ -6,12 +6,31 @@ regenerated reproducibly by `node scripts/protocol-reads.mjs` — the script is 
 the fixture block (hash-verified; `--repin` is an explicit separate mode), and reruns are
 byte-identical (the RPC endpoint is serialized as a redacted provider label only).
 79 reads: 78 successes + 1 documented expected revert (`getRevision`, internal getter), zero
-unexpected failures. Every address anchor is asserted against an independent on-chain source
-(provider round-trip, `weETH.eETH`/`liquidityPool`, `wstETH.stETH`, `LP.eETH`, `symbol()`, and
-`getReservesList` membership); a mismatch aborts the run rather than writing a fixture. An archive-capable RPC (`RPC_URL`) is required —
-the block has aged out of public nodes' recent-state windows.** Claims that are not on-chain reads cite a URL. Nothing is hand-typed
-from memory. Scope: the Aave v3 Ethereum **Core** market (not the separate EtherFi/Lido/
-Horizon Aave markets), plus EtherFi and Lido staking tokens.
+unexpected failures.
+
+**Address provenance.** Exactly **four** addresses in this pipeline are not on-chain reads —
+`PoolAddressesProvider`, `WETH`, `weETH`, `wstETH` — and none of them is typed into a script.
+They are loaded from `docs/address-roots.json`, which pins them to
+`bgd-labs/aave-address-book` `src/AaveV3Ethereum.sol` at commit
+`ad35d3403b02ff0b4ce27acc23b92781b44f78f4` (79,914 bytes, sha256
+`1a862b7389de3d59ee77680a8edb451a29e630a07813a0c5becdce65d730a22a`). The commit makes the source
+immutable; the hash makes the pin self-verifying, so a retargeted commit or mutated endpoint
+fails closed instead of substituting an address. Re-verify with
+`node scripts/protocol-reads.mjs --verify-roots`, which re-fetches, re-hashes, and re-extracts
+each root by its upstream symbol name.
+
+Everything else is **derived**: Pool / DataProvider / Oracle / ACLManager from the provider;
+`eETH` and the EtherFi LiquidityPool from `weETH`; `stETH` from `wstETH`. Each derivation is
+also independently confirmed on-chain — the Pool round-trips `ADDRESSES_PROVIDER()`, `LP.eETH()`
+agrees with `weETH.eETH()`, all three token roots are members of `Pool.getReservesList()`, and
+every token's `symbol()` must match its label (the check that catches a wrong-but-*callable*
+address, which a typo usually is not). Any mismatch aborts before a fixture is written. An archive-capable RPC (`RPC_URL`) is required —
+the block has aged out of public nodes' recent-state windows.** Claims that are not on-chain
+reads cite a URL. No address or protocol constant is written from memory: the four roots come
+from the hashed upstream artifact above, everything else is read on-chain, and protocol
+semantics are recorded here with verbatim source quotes. Scope: the Aave v3 Ethereum **Core**
+market (not the separate EtherFi/Lido/Horizon Aave markets), plus EtherFi and Lido staking
+tokens.
 
 - **Pinned block:** `25,592,678` · hash `0x7f1f53176578a6df42c94948c10623f002cca61398208c888edce99eaedbf0de` · 2026-07-23T03:14:11Z
 - **RPC:** archive-capable endpoint via `RPC_URL` (original generation: publicnode while the
@@ -24,9 +43,10 @@ Horizon Aave markets), plus EtherFi and Lido staking tokens.
 
 ## 1. Aave v3 Ethereum Core — market contracts
 
-Anchor: `PoolAddressesProvider 0x2f39d218133AFaB8F2B819B1066c7E434Ad94E9e` (bgd-labs
-address-book `AaveV3Ethereum.POOL_ADDRESSES_PROVIDER`). Everything below is **derived on-chain
-from the anchor in the committed run**:
+Anchor: `PoolAddressesProvider 0x2f39d218133AFaB8F2B819B1066c7E434Ad94E9e` — the single Aave
+root, pinned via `docs/address-roots.json` to the hashed address-book artifact
+(`AaveV3Ethereum.POOL_ADDRESSES_PROVIDER`), not typed into a script. Everything below is
+**derived on-chain from the anchor in the committed run**:
 
 | Contract | Address | Read label |
 |---|---|---|
