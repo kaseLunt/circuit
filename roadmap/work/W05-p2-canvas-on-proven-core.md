@@ -14,6 +14,7 @@ allowed_paths:
   - tests/**
   - e2e/**
   - docs/**
+  - .github/**
   - package.json
   - package-lock.json
   - playwright.config.ts
@@ -27,13 +28,14 @@ deliverables:
   - src/app/store/composer-store.ts
   - src/lib/strategy/templates.ts
   - src/components/canvas/canvas.tsx
-  - src/components/canvas/blocks/
-  - src/components/canvas/edges/
+  - src/components/canvas/blocks/**
+  - src/components/canvas/edges/**
   - src/components/composer/sidebar.tsx
   - src/components/composer/simulation-panel.tsx
   - src/lib/share/encode.ts
   - e2e/demo-script.spec.ts
   - playwright.config.ts
+  - .github/workflows/ci.yml
 evidence_receipts: []
 invalidated_by:
   - SPEC.md
