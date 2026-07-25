@@ -15,6 +15,7 @@ allowed_paths:
   - .github/**
   - docs/**
   - spikes/**
+  - scripts/**
   - package.json
   - package-lock.json
   - vitest.config.ts
@@ -213,13 +214,21 @@ D-004 review outcome in the receipt; stamp per RULES.md.
 
 ## Handoff
 
-- next: activates only after the W04 re-review confirms blockers cleared; activation flips
-  P0→Done / P1→In progress in the same transition.
-- read_first: SPEC §2 (13 steps, e-mode policy), §4, §5, §8; docs/protocol-matrix.md
-  (including §3 OPEN item on v3.7 e-mode semantics — resolve before setUserEMode logic lands,
-  and §7 deposit semantics); TRANSPLANT.md P2 rows (rpc.ts, rate-limiter, etherfi-contracts,
-  liquidation.ts as rebuild-reference for HF algebra).
+- next: regenerate the reads log with the getReserveDeficit reads (scripts/** now in scope;
+  archive RPC required), record the deficit rows in matrix §4 and resolve §9 item 3, add the
+  WETH liquidity-rate exact reproduction to rates.test.ts; then the D-007 Codex review of the
+  full W03 surface, push for the CI fork run, and stamp the receipt citing run IDs + fixture
+  identity + the review verdict.
+- read_first: SPEC §2 (13 steps, e-mode policy), §4, §5, §8; docs/protocol-matrix.md §4
+  (source-verified v3.7 rounding/accrual semantics + cap formulas) and §7 deposit semantics;
+  src/core/plan.ts module header; tests/fork/flagship-plan.test.ts header.
 - hazards: weETH supply-cap headroom (~43k at the fixture block) is real but thin — cap
   validation is tested at that boundary; the fixture block guarantees determinism, mainnet
   does not. eETH moves by shares — use the share-based invariants, never balanceOf equality.
   v3.7 "Liquid eMode" membership is per-reserve-index bitmaps — use the matrix decode.
+  Fork-execution traps (all encoded in the suite): anvil's public-key dev accounts carry
+  EIP-7702 delegations on mainnet whose fallbacks OOG WETH9's 2300-gas ETH push — use a
+  fresh code-free EOA; gas estimation understates Aave txs (accrual SSTOREs become value
+  writes in the mined block) — send explicit limits; a reused external anvil MUST anvil_reset
+  per run or state pollution masquerades as bugs. v3.7 feeds reserve.deficit into liquidity
+  rates (WETH deficit ≈ 52.96k at the pin, confirmed by live read + rate inversion).
