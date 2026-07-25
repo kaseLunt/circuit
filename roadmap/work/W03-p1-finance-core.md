@@ -201,12 +201,18 @@ Invariants:
   A missing `FORK_RPC_URL` or absent anvil fails the suite closed; note that vitest runs
   `globalSetup` **before** collection, so either failure surfaces as a misleading
   "No test files found" alongside the real error.
-- **Provider rate limits are a real failure mode.** The fork suite replays a lot of archive
-  storage through anvil's backend; running it back-to-back with `scripts/protocol-reads.mjs` on
-  a free-tier key produces `HTTP error 429 — Max retries exceeded` inside `captureFootprint`,
-  which fails the whole suite with all tests reported **skipped** (observed 2026-07-24). That is
-  an environment failure, not a money-math failure — distinguish it before debugging, and space
-  runs out or use a paid key.
+- **Provider rate limits were a real failure mode, now mitigated at the root.** anvil assumes
+  330 compute units/second (Alchemy's paid tier) and bursts past a free-tier endpoint, which
+  answers `429`; anvil retries, gives up, and the suite dies with `Max retries exceeded` inside
+  `captureFootprint`, reporting every test **skipped**. The global setup now passes
+  `--compute-units-per-second` (`ANVIL_CUPS`, default `100`) so anvil self-throttles. Verified
+  2026-07-25: 9/9 green with no cooldown in a window where unthrottled runs were failing, at the
+  cost of runtime (~72s → ~129s). Raise `ANVIL_CUPS` when pointing at a higher-budget endpoint.
+- **Diagnosing a fork-job failure:** `N skipped` + **zero** assertion failures + all setup steps
+  green is the rate-limit signature, not a money-math regression — check that before reading
+  logs. Note the two consumers are **not independent**: heavy local runs can exhaust the same
+  quota the CI job needs, so a local debugging spree can cause a CI failure (observed
+  2026-07-25). A dedicated CI endpoint would decouple them.
 
 ## Non-goals
 

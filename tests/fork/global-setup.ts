@@ -54,6 +54,12 @@ export default async function globalSetup(): Promise<() => Promise<void>> {
   }
   const anvilBin = process.env.ANVIL_PATH ?? "anvil";
   const port = new URL(ANVIL_URL).port;
+  // anvil assumes 330 compute units/second (Alchemy's paid tier) and bursts past a free-tier
+  // provider, which answers HTTP 429. Because anvil retries and then gives up, that surfaces as
+  // "Max retries exceeded" mid-suite and vitest reports every test SKIPPED — an environment
+  // failure wearing the costume of a total suite failure. Self-throttling trades wall-clock for
+  // determinism. Override with ANVIL_CUPS when pointing at an endpoint with a higher budget.
+  const cups = process.env.ANVIL_CUPS ?? "100";
   const child = spawn(
     anvilBin,
     [
@@ -61,6 +67,8 @@ export default async function globalSetup(): Promise<() => Promise<void>> {
       forkUrl,
       "--fork-block-number",
       PINNED_BLOCK.toString(),
+      "--compute-units-per-second",
+      cups,
       "--host",
       "127.0.0.1",
       "--port",
