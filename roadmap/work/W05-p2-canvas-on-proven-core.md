@@ -21,6 +21,7 @@ allowed_paths:
   - vitest.config.ts
   - tsconfig.json
   - eslint.config.mjs
+  - .gitignore
   - roadmap/work/W05-p2-canvas-on-proven-core.md
 deliverables:
   - src/lib/strategy/types.ts
