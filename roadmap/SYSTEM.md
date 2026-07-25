@@ -46,6 +46,11 @@ but normal branches cannot act as an atomic lock registry.
 - The bundled active claim is a checked task/scope binding for that integrator, not a concurrency
   lock. Activate the work item and STATUS in the working tree, open exactly one claim, then stage
   and commit the transition together before implementation files may use its scope.
+- The claim's authority is **spatial, not temporal** (D-008): scope, branch/worktree binding, and
+  `base_commit` ancestry gate every commit, while the recorded lease is audit metadata whose
+  liveness is never enforced. A lapsed lease is a staleness signal for a human to act on, not a
+  machine veto. Reviving leases as a fence for a concurrent-writer mode is explicitly out of
+  scope — that requires the external atomic allocator described below.
 - Keep the governed branch up to date and preserve its commit chain. Integration supports a
   fast-forward or a normal two-parent no-FF merge whose first parent is an ancestor of the second
   and whose tree exactly equals the second-parent tree. Squash merges, history-rewriting rebases
