@@ -142,6 +142,13 @@ async function captureReserve(
       config[5],
       `${sym}.getReserveConfigurationData.usageAsCollateralEnabled`,
     ),
+    // Reserve-level fallbacks the protocol uses when an active e-mode category does not
+    // supply LTV/LT (matrix §3 four-branch rule).
+    ltvBps: mint.observe(Number(config[1]), `${sym}.getReserveConfigurationData.ltv`),
+    liquidationThresholdBps: mint.observe(
+      Number(config[2]),
+      `${sym}.getReserveConfigurationData.liquidationThreshold`,
+    ),
     borrowCap: mint.observe(caps[0], `${sym}.getReserveCaps.borrowCap`),
     supplyCap: mint.observe(caps[1], `${sym}.getReserveCaps.supplyCap`),
     aTokenScaledTotalSupply: mint.observe(aScaled, `${sym}.aToken.scaledTotalSupply`),

@@ -30,6 +30,7 @@ import { mainnet } from "viem/chains";
 import { captureChainSnapshot } from "../../src/server/chain/snapshot";
 import {
   buildPlan,
+  effectiveLiquidationThresholdBps,
   encodeStep,
   type ChainSnapshot,
   type PlanSuccess,
@@ -319,7 +320,24 @@ async function ourHealthFactor(): Promise<ReturnType<typeof computeHealthFactor>
     const priceWETH = await read<bigint>({ address: oracle, abi: ABI.oracle, functionName: "getAssetPrice", fnArgs: [WETH] });
     debtBase = (rayMulCeil(debtScaled, normDebtNow) * priceWETH) / 10n ** 18n;
   }
-  const ltBps = seeded.eModeCategories[0]!.liquidationThresholdBps.value;
+  // Matrix §3 (GenericLogic.calculateUserAccountData): the CATEGORY threshold applies only to
+  // collateral-bitmap members, otherwise the reserve's own. Read the category LIVE — `seeded`
+  // was captured before the plan's setUserEMode step ran, so its user category is still 0 and
+  // using it would silently fall back to the reserve threshold mid-sequence.
+  const liveCategoryId = Number(
+    await read<bigint>({ address: seeded.pool, abi: ABI.pool, functionName: "getUserEMode", fnArgs: [wallet] }),
+  );
+  let activeCategory = null;
+  if (liveCategoryId !== 0) {
+    const found = seeded.eModeCategories.find((c) => c.id === liveCategoryId);
+    // Never fall back to the reserve threshold for an undescribed category: that would quietly
+    // weaken the assertion instead of surfacing a fixture gap.
+    if (found === undefined) {
+      throw new Error(`live e-mode category ${liveCategoryId} is absent from the snapshot`);
+    }
+    activeCategory = found;
+  }
+  const ltBps = effectiveLiquidationThresholdBps(seeded.reserves.weETH, activeCategory);
   const entries: CollateralEntry[] = collateralBase > 0n ? [{ base: collateralBase, ltBps }] : [];
   return computeHealthFactor(entries, debtBase);
 }

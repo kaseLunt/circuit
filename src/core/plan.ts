@@ -54,6 +54,14 @@ export interface ReserveSnapshot {
   readonly paused: Observed<boolean>;
   readonly borrowingEnabled: Observed<boolean>;
   readonly usageAsCollateralAllowed: Observed<boolean>;
+  /**
+   * Reserve-level LTV / liquidation threshold in bps. These are the FALLBACKS the protocol
+   * applies when an active e-mode category does not supply them — see matrix §3: collateral
+   * outside a non-isolated category's bitmap uses reserve LTV, and the liquidation threshold
+   * is the reserve's whenever the reserve is not a collateral-bitmap member.
+   */
+  readonly ltvBps: Observed<number>;
+  readonly liquidationThresholdBps: Observed<number>;
   /** Whole tokens; 0 means uncapped (v3.7 ValidationLogic). */
   readonly supplyCap: Observed<bigint>;
   readonly borrowCap: Observed<bigint>;
@@ -400,6 +408,40 @@ function bitSet(bitmap: bigint, index: number): boolean {
   return ((bitmap >> BigInt(index)) & 1n) === 1n;
 }
 
+/**
+ * Effective LTV in bps for one reserve under a category, per matrix §3
+ * (ValidationLogic.getUserReserveLtv, read verbatim). `null` category means no active e-mode.
+ */
+function effectiveLtvBps(
+  reserve: ReserveSnapshot,
+  cat: EModeCategorySnapshot | null,
+): number {
+  if (cat === null) return reserve.ltvBps.value;
+  const i = reserve.reserveIndex.value;
+  if (bitSet(cat.collateralBitmap.value, i)) {
+    return bitSet(cat.ltvZeroBitmap.value, i) ? 0 : cat.ltvBps.value;
+  }
+  // Outside the collateral bitmap: only an ISOLATED category zeroes it; otherwise the
+  // reserve's own LTV applies, so such a plan can still be perfectly valid.
+  return cat.isIsolated.value ? 0 : reserve.ltvBps.value;
+}
+
+/**
+ * Effective liquidation threshold in bps, per matrix §3
+ * (GenericLogic.calculateUserAccountData). Note the asymmetry with LTV: this depends ONLY on
+ * collateral-bitmap membership — not on the LTV-zero bitmap and not on `isolated`. A member of
+ * both bitmaps therefore has LTV 0 but the full category threshold.
+ */
+export function effectiveLiquidationThresholdBps(
+  reserve: ReserveSnapshot,
+  cat: EModeCategorySnapshot | null,
+): number {
+  if (cat === null) return reserve.liquidationThresholdBps.value;
+  return bitSet(cat.collateralBitmap.value, reserve.reserveIndex.value)
+    ? cat.liquidationThresholdBps.value
+    : reserve.liquidationThresholdBps.value;
+}
+
 function categoryAdmits(
   cat: EModeCategorySnapshot,
   collateralIndices: readonly number[],
@@ -513,16 +555,29 @@ export function buildPlan(graph: StrategyGraph, snapshot: ChainSnapshot): PlanRe
           constraint: "emode-unknown-category",
           detail: `wallet is in e-mode category ${currentCategoryId}, which the snapshot does not describe`,
         });
-      } else if (!categoryAdmits(current, collateralIndices, borrowIndices)) {
-        // v1 never transitions a live category (P5), so a category that assigns the plan's
-        // collateral zero LTV (outside its collateral bitmap, or in its LTV-zero bitmap) or
-        // cannot borrow the requested asset makes the plan unexecutable. A fresh wallet can
-        // fall back to no e-mode; a parked wallet cannot, so this is an error, not a fallback.
+      } else if (!borrowIndices.every((i) => bitSet(current.borrowableBitmap.value, i))) {
+        // v1 never transitions a live category (P5), so the plan must run under it: an asset the
+        // category cannot borrow is unreachable, not merely suboptimal.
         emodeErrors.push({
           kind: "constraint",
           blockId: borrowBlocks[0]!.id,
           constraint: "emode-active-category-rejects-plan",
-          detail: `wallet is in e-mode category ${currentCategoryId} ("${current.label.value}"), which does not admit this plan's collateral/borrow pair; supplying under it would leave the collateral unusable and the borrow would revert`,
+          detail: `wallet is in e-mode category ${currentCategoryId} ("${current.label.value}"), whose borrowable set excludes this plan's borrow asset`,
+        });
+      } else if (
+        lendBlocks.every(
+          (b) => effectiveLtvBps(snapshot.reserves[reserveOf(String(b.params["asset"]))], current) === 0,
+        )
+      ) {
+        // Every collateral gets zero effective LTV under this category (matrix §3), so there is
+        // no borrowing power and the borrow would revert. Collateral merely OUTSIDE a
+        // non-isolated category's bitmap is NOT zero — it falls back to the reserve LTV — so
+        // this is deliberately an effective-LTV test, not a bitmap-membership test.
+        emodeErrors.push({
+          kind: "constraint",
+          blockId: borrowBlocks[0]!.id,
+          constraint: "emode-active-category-rejects-plan",
+          detail: `wallet is in e-mode category ${currentCategoryId} ("${current.label.value}"), which assigns every supplied collateral an effective LTV of 0; the borrow would revert`,
         });
       } else {
         targetCategory = current;

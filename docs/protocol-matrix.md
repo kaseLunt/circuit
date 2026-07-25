@@ -57,8 +57,55 @@ from the anchor in the committed run**:
 | **Isolated category (v3.7)** | **false** | `eMode1.isIsolated (v3.7)` |
 | **LTV-zero bitmap (v3.7)** | **0** (no members) | `eMode1.ltvZeroBitmap (v3.7)` |
 
+### Effective per-reserve LTV and liquidation threshold under e-mode (source-verified 2026-07-25)
+
+Read verbatim from `ValidationLogic.getUserReserveLtv`
+(https://github.com/aave-dao/aave-v3-origin/blob/main/src/contracts/protocol/libraries/logic/ValidationLogic.sol).
+Field names on-chain are `collateralBitmap`, `ltvzeroBitmap`, and `isolated`:
+
+```solidity
+if (categoryId != 0 && isReserveEnabledOnBitmap(eModeCategoryData.collateralBitmap, reserveData.id)) {
+  if (isReserveEnabledOnBitmap(eModeCategoryData.ltvzeroBitmap, reserveData.id)) { return 0; }
+  else { return eModeCategoryData.ltv; }
+}
+// If eMode is isolated and asset is NOT in collateralBitmap, return 0
+if (categoryId != 0 && eModeCategoryData.isolated) { return 0; }
+return reserveData.configuration.getLtv();
+```
+
+| Active category | In collateral bitmap | In LTV-zero bitmap | Category isolated | **Effective LTV** |
+|---|---|---|---|---|
+| none (`categoryId == 0`) | — | — | — | reserve LTV |
+| set | yes | yes | — | **0** |
+| set | yes | no | — | category LTV |
+| set | **no** | — | **yes** | **0** |
+| set | **no** | — | **no** | **reserve LTV** |
+
+The liquidation threshold is chosen separately, in
+`GenericLogic.calculateUserAccountData`
+(https://github.com/aave-dao/aave-v3-origin/blob/main/src/contracts/protocol/libraries/logic/GenericLogic.sol),
+and depends **only** on collateral-bitmap membership — not on the LTV-zero bitmap and not on
+`isolated`:
+
+```solidity
+if (params.userEModeCategory != 0 && isReserveEnabledOnBitmap(vars.eModeCollateralBitmap, vars.i)) {
+  vars.liquidationThreshold = vars.eModeLiqThreshold;
+} else {
+  vars.liquidationThreshold = vars.configurationCache.getLiquidationThreshold();
+}
+```
+
+> **Consequences that are easy to get wrong.** (1) Collateral outside the bitmap of a
+> **non-isolated** category is *not* unusable — it falls back to the **reserve's** LTV, so a plan
+> using it can be perfectly valid; only an **isolated** category zeroes it. (2) A reserve that is
+> in the collateral bitmap *and* in the LTV-zero bitmap gets **LTV 0 but the full category
+> liquidation threshold** — no borrowing power, yet counted at the category LT for liquidation.
+> (3) Reserve LTV/LT fallbacks at the pinned block come from `getReserveConfigurationData`
+> (§4): WETH **8050 / 8300**, weETH **7750 / 8000**.
+
 v3.7's category getters are now read directly: category 1 is **not isolated** and has an
-**empty LTV-zero bitmap**. Note: v3.7 **removed legacy reserve-level siloed-borrowing and
+**empty LTV-zero bitmap**, so at the pinned block the flagship's weETH collateral (index 28, a
+bitmap member) takes the **category** LTV/LT (9300 / 9500) by the first branch above. Note: v3.7 **removed legacy reserve-level siloed-borrowing and
 isolation-mode features** (verified absence in the current `IPool` interface,
 https://github.com/aave-dao/aave-v3-origin/blob/main/src/contracts/interfaces/IPool.sol); the
 DataProvider's legacy `getSiloedBorrowing`/`getDebtCeiling` getters answering false/0 are

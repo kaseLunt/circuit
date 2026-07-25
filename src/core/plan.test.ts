@@ -73,6 +73,8 @@ interface RawReserve {
   paused: boolean;
   borrowingEnabled: boolean;
   usageAsCollateralAllowed: boolean;
+  reserveLtvBps: number;
+  reserveLiquidationThresholdBps: number;
   supplyCap: bigint;
   borrowCap: bigint;
   aTokenScaledTotalSupply: bigint;
@@ -130,6 +132,8 @@ function rawReserve(sym: "WETH" | "weETH"): RawReserve {
     reserveIndex,
     decimals: Number(tupleBig(cfg, 0)),
     usageAsCollateralAllowed: tupleBool(cfg, 5),
+    reserveLtvBps: Number(tupleBig(cfg, 1)),
+    reserveLiquidationThresholdBps: Number(tupleBig(cfg, 2)),
     borrowingEnabled: tupleBool(cfg, 6),
     active: tupleBool(cfg, 8),
     frozen: tupleBool(cfg, 9),
@@ -204,6 +208,11 @@ function snapshotFrom(raw: RawFixture): ChainSnapshot {
     usageAsCollateralAllowed: mint.observe(
       r.usageAsCollateralAllowed,
       `${sym}.getReserveConfigurationData.usageAsCollateralEnabled`,
+    ),
+    ltvBps: mint.observe(r.reserveLtvBps, `${sym}.getReserveConfigurationData.ltv`),
+    liquidationThresholdBps: mint.observe(
+      r.reserveLiquidationThresholdBps,
+      `${sym}.getReserveConfigurationData.liquidationThreshold`,
     ),
     supplyCap: mint.observe(r.supplyCap, `${sym}.getReserveCaps.supplyCap`),
     borrowCap: mint.observe(r.borrowCap, `${sym}.getReserveCaps.borrowCap`),
@@ -516,12 +525,27 @@ describe("e-mode policy (SPEC §5.4, matrix §3)", () => {
     expect(hits[0]!.blockId).toBe("borrow");
   });
 
-  // An active category cannot be exited in v1 (the plan runs under it), so collateral the
-  // category assigns zero LTV is unusable and the borrow would revert on-chain. These states
-  // must fail the plan, never build a "successful" plan that reverts at step 11.
-  it("rejects an active category whose collateral bitmap excludes the supplied asset", () => {
+  // Active-category semantics per matrix §3, source-verified from
+  // ValidationLogic.getUserReserveLtv. An active category cannot be exited in v1, so the plan
+  // runs under it — but only an effective LTV of 0 makes the plan unexecutable.
+  it("ACCEPTS out-of-bitmap collateral under a NON-isolated active category (reserve LTV applies)", () => {
+    // The branch a bitmap-membership test gets wrong: outside the collateral bitmap with
+    // isolated == false falls through to `reserveData.configuration.getLtv()` (weETH 7750),
+    // so the flagship borrow remains valid and must NOT be rejected.
     const snapshot = fixtureSnapshot((raw) => {
       raw.user.eModeCategoryId = raw.eModes[0]!.id;
+      raw.eModes[0]!.isIsolated = false;
+      raw.eModes[0]!.collateralBitmap &= ~(1n << BigInt(raw.weETH.reserveIndex));
+    });
+    const result = buildPlan(flagshipGraph(), snapshot);
+    expectOk(result);
+    expect(result.targetEModeCategoryId).toBe(1);
+  });
+
+  it("rejects out-of-bitmap collateral under an ISOLATED active category (LTV 0)", () => {
+    const snapshot = fixtureSnapshot((raw) => {
+      raw.user.eModeCategoryId = raw.eModes[0]!.id;
+      raw.eModes[0]!.isIsolated = true;
       raw.eModes[0]!.collateralBitmap &= ~(1n << BigInt(raw.weETH.reserveIndex));
     });
     const result = buildPlan(flagshipGraph(), snapshot);
@@ -533,17 +557,18 @@ describe("e-mode policy (SPEC §5.4, matrix §3)", () => {
     expect(hits[0]!.blockId).toBe("borrow");
   });
 
-  it("rejects an active category that marks the supplied asset LTV-zero", () => {
+  it("rejects in-bitmap collateral that the active category marks LTV-zero", () => {
     const snapshot = fixtureSnapshot((raw) => {
       raw.user.eModeCategoryId = raw.eModes[0]!.id;
       raw.eModes[0]!.ltvZeroBitmap |= 1n << BigInt(raw.weETH.reserveIndex);
     });
     const result = buildPlan(flagshipGraph(), snapshot);
     expectFail(result);
-    const hits = constraintErrors(result.errors).filter(
-      (e) => e.constraint === "emode-active-category-rejects-plan",
-    );
-    expect(hits).toHaveLength(1);
+    expect(
+      constraintErrors(result.errors).filter(
+        (e) => e.constraint === "emode-active-category-rejects-plan",
+      ),
+    ).toHaveLength(1);
   });
 
   it("rejects an active category that cannot borrow the requested asset", () => {
@@ -553,10 +578,11 @@ describe("e-mode policy (SPEC §5.4, matrix §3)", () => {
     });
     const result = buildPlan(flagshipGraph(), snapshot);
     expectFail(result);
-    const hits = constraintErrors(result.errors).filter(
-      (e) => e.constraint === "emode-active-category-rejects-plan",
-    );
-    expect(hits).toHaveLength(1);
+    expect(
+      constraintErrors(result.errors).filter(
+        (e) => e.constraint === "emode-active-category-rejects-plan",
+      ),
+    ).toHaveLength(1);
   });
 
   it("builds without e-mode when no category admits the pair (borrowable bitmap)", () => {
