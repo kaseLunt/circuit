@@ -24,7 +24,8 @@
     "react-dom": "19.2.3",
     "tailwind-merge": "^3.4.0",
     "viem": "^2.55.8",
-    "zod": "^4.3.5"
+    "zod": "^4.3.5",
+    "zustand": "^5.0.14"
   },
   "devDependencies": {
     "@tailwindcss/postcss": "^4",
