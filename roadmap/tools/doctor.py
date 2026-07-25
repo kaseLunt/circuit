@@ -836,6 +836,40 @@ def main() -> int:
                     else:
                         due = edge == "entry" and phase_name == active_phase
                         due = due or (edge == "exit" and phase_index[active_phase] > phase_index[phase_name])
+                elif review_when == "event:invalidated-by-change":
+                    # A serviced phase-exit review is retargeted here so it surfaces
+                    # again only when an invalidating input actually changes (a
+                    # phase:exit trigger stays permanently due once the phase
+                    # advances). D-006 scopes the ERROR-level currency checks to the
+                    # active phase, so without this probe a historical achieved item
+                    # has no mechanical drift signal at all. INFO-level by design:
+                    # drift on a completed phase is a review trigger, not an
+                    # attainment failure.
+                    in_active_phase = (not active_phase) or (phase == active_phase)
+                    if object_type == "work" and object_status == "achieved" and not in_active_phase:
+                        # Drift is a property of durable state, and worktree bytes
+                        # are CRLF-skewed on autocrlf checkouts (R-a8123b85), which
+                        # would flag every item on every bare run — so the worktree
+                        # snapshot probes the object store instead.
+                        basis = (
+                            Snapshot(REPO, "HEAD")
+                            if snapshot.source == "worktree"
+                            else snapshot
+                        )
+                        current = verification_input_fingerprint(basis, path, data)
+                        for receipt in string_list(data, "evidence_receipts", path):
+                            if not snapshot.exists(receipt):
+                                continue
+                            recorded = scalar(
+                                parse_frontmatter(
+                                    snapshot.read_text(receipt), receipt, required=True
+                                ),
+                                "input_fingerprint",
+                                receipt,
+                            )
+                            if recorded and recorded != current:
+                                due = True
+                                break
                 elif re.fullmatch(r"event:[a-z0-9-]+", review_when):
                     pass
                 else:

@@ -816,6 +816,63 @@ def test_evidence_round_trip(root: Path) -> None:
     )
 
 
+def test_historical_drift_review(root: Path) -> None:
+    print("Historical achieved drift review (event:invalidated-by-change)")
+    repo = root / "historical-drift"
+    baseline = build_candidate(repo)
+    set_work_state(repo, "achieved", ["src/**"])
+    receipt = "roadmap/evidence/E-SYNTHETIC.md"
+    work_path = repo / "roadmap" / "work" / "W0.md"
+    write(
+        work_path,
+        read(work_path).replace(
+            "evidence_receipts: []", f"evidence_receipts:\n  - {receipt}"
+        ),
+    )
+    write(repo / receipt, evidence_text(baseline, *receipt_basis(repo, baseline)))
+    must(git(repo, "add", "roadmap"), "stage achieved contract and receipt")
+    must(
+        tool(repo, "doctor.py", "--stamp", "W0", "--now", "2030-01-02T00:00:00Z"),
+        "stamp synthetic achieved work",
+    )
+    # Advance the world past W0's phase and retarget its review trigger. W0 is
+    # now a historical achieved item, which D-006 excludes from the ERROR-level
+    # currency checks — the event trigger is its only mechanical drift signal.
+    write(
+        repo / "roadmap" / "ROADMAP.md",
+        read(repo / "roadmap" / "ROADMAP.md").replace(
+            "| P0 | Synthetic | Test | **In progress** |",
+            "| P0 | Synthetic | Test | Done |\n| P1 | Later | Test | **In progress** |",
+        ),
+    )
+    write(
+        repo / "roadmap" / "STATUS.md",
+        read(repo / "roadmap" / "STATUS.md").replace(
+            "active_phase: P0", "active_phase: P1"
+        ),
+    )
+    write(
+        work_path,
+        read(work_path).replace(
+            "updated: 2030-01-01",
+            "review_when: event:invalidated-by-change\nupdated: 2030-01-01",
+        ),
+    )
+    commit_all(repo, "synthetic phase advance")
+    fresh = tool(repo, "doctor.py", "--now", "2030-01-02T00:00:00Z")
+    write(repo / "src" / "allowed.txt", "drifted beyond the receipt\n")
+    commit_all(repo, "synthetic input drift")
+    drifted = tool(repo, "doctor.py", "--now", "2030-01-02T00:00:00Z")
+    check(
+        "review:historical-drift-flagged-not-errored",
+        fresh.returncode == 0
+        and "REVIEW-DUE" not in output(fresh)
+        and drifted.returncode == 0
+        and "REVIEW-DUE: W0 (event:invalidated-by-change)" in output(drifted),
+        "\n".join(map(output, (fresh, drifted))),
+    )
+
+
 def test_enforcement_posture(root: Path) -> None:
     print("Evidence-backed enforcement posture")
     repo = root / "enforcement-posture"
@@ -1670,6 +1727,7 @@ def main() -> int:
         test_doctor_and_gate(root)
         test_reviewer_core_rules(root)
         test_evidence_round_trip(root)
+        test_historical_drift_review(root)
         test_enforcement_posture(root)
         test_project_completion(root)
         test_owner_semantics_and_immutability(root)
