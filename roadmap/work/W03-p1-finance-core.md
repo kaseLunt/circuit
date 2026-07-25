@@ -33,6 +33,7 @@ deliverables:
   - src/core/errors.ts
   - src/core/format.ts
   - src/server/chain/snapshot.ts
+  - docs/address-roots.json
   - src/core/plan.test.ts
   - tests/fork/flagship-plan.test.ts
   - vitest.fork.config.ts
@@ -44,6 +45,7 @@ invalidated_by:
   - TRANSPLANT.md
   - docs/protocol-matrix.md
   - docs/protocol-matrix-reads.json
+  - docs/address-roots.json
   - scripts/**
   - src/core/**
   - src/server/**
@@ -176,6 +178,13 @@ Invariants:
   real weETH headroom.
 - **No silent fallbacks:** numeric-literal `??` lint ban active in `core/`; `Provenanced<T>`
   (src/core/provenance.ts) carries every chain-derived value out of `server/chain/`.
+- **Address provenance is a verification input, not a doc.** `docs/address-roots.json` holds the
+  only four addresses that are not on-chain reads, pinned to a hashed upstream artifact. It is
+  listed in both `deliverables` and `invalidated_by` **deliberately**: `doctor.py` fingerprints
+  exactly those lists plus receipts, so if this file were omitted, editing the upstream commit,
+  the sha256, or a root address would leave an existing receipt mechanically "current" while the
+  fixture's identity authority had silently changed. Re-run
+  `node scripts/protocol-reads.mjs --verify-roots` whenever it changes.
 - **Codex final approval (D-007, supersedes D-004):** an explicit Codex APPROVAL verdict is a
   hard gate before this item may be marked `achieved` or P1 may exit; verdict and
   disposition recorded in the receipt.
