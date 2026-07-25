@@ -516,6 +516,49 @@ describe("e-mode policy (SPEC §5.4, matrix §3)", () => {
     expect(hits[0]!.blockId).toBe("borrow");
   });
 
+  // An active category cannot be exited in v1 (the plan runs under it), so collateral the
+  // category assigns zero LTV is unusable and the borrow would revert on-chain. These states
+  // must fail the plan, never build a "successful" plan that reverts at step 11.
+  it("rejects an active category whose collateral bitmap excludes the supplied asset", () => {
+    const snapshot = fixtureSnapshot((raw) => {
+      raw.user.eModeCategoryId = raw.eModes[0]!.id;
+      raw.eModes[0]!.collateralBitmap &= ~(1n << BigInt(raw.weETH.reserveIndex));
+    });
+    const result = buildPlan(flagshipGraph(), snapshot);
+    expectFail(result);
+    const hits = constraintErrors(result.errors).filter(
+      (e) => e.constraint === "emode-active-category-rejects-plan",
+    );
+    expect(hits).toHaveLength(1);
+    expect(hits[0]!.blockId).toBe("borrow");
+  });
+
+  it("rejects an active category that marks the supplied asset LTV-zero", () => {
+    const snapshot = fixtureSnapshot((raw) => {
+      raw.user.eModeCategoryId = raw.eModes[0]!.id;
+      raw.eModes[0]!.ltvZeroBitmap |= 1n << BigInt(raw.weETH.reserveIndex);
+    });
+    const result = buildPlan(flagshipGraph(), snapshot);
+    expectFail(result);
+    const hits = constraintErrors(result.errors).filter(
+      (e) => e.constraint === "emode-active-category-rejects-plan",
+    );
+    expect(hits).toHaveLength(1);
+  });
+
+  it("rejects an active category that cannot borrow the requested asset", () => {
+    const snapshot = fixtureSnapshot((raw) => {
+      raw.user.eModeCategoryId = raw.eModes[0]!.id;
+      raw.eModes[0]!.borrowableBitmap = 0n;
+    });
+    const result = buildPlan(flagshipGraph(), snapshot);
+    expectFail(result);
+    const hits = constraintErrors(result.errors).filter(
+      (e) => e.constraint === "emode-active-category-rejects-plan",
+    );
+    expect(hits).toHaveLength(1);
+  });
+
   it("builds without e-mode when no category admits the pair (borrowable bitmap)", () => {
     const snapshot = fixtureSnapshot((raw) => {
       raw.eModes[0]!.borrowableBitmap = 0n;

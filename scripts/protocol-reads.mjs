@@ -19,9 +19,35 @@ import { writeFileSync } from "node:fs";
 import { createPublicClient, http, parseAbi, getAddress, keccak256 } from "viem";
 import { mainnet } from "viem/chains";
 
+// CLI output channel. This is a command-line tool, so progress and fatal diagnostics are its
+// product -- routed through stdout/stderr directly so `no-console` stays an error repo-wide.
+const emit = (line) => process.stdout.write(`${line}\n`);
+const fail = (line) => process.stderr.write(`${line}\n`);
+
+/**
+ * Anchor verification. A hand-typed address that happens to be callable could otherwise
+ * produce an internally consistent fixture under a misleading symbol, and the exact-rate
+ * reproductions would validate that mislabeled address. Every anchor below is therefore
+ * checked against an independent on-chain source before any fixture value is written.
+ */
+const assertAnchor = (label, actual, expected) => {
+  const got = getAddress(String(actual));
+  const want = getAddress(String(expected));
+  if (got !== want) {
+    fail(`FATAL: anchor mismatch ${label}: on-chain ${got} != anchor ${want}`);
+    process.exit(1);
+  }
+};
+const assertSymbol = (actual, expected) => {
+  if (String(actual) !== expected) {
+    fail(`FATAL: symbol mismatch: address labelled ${expected} reports "${actual}"`);
+    process.exit(1);
+  }
+};
+
 const RPC = process.env.RPC_URL;
 if (!RPC) {
-  console.error("FATAL: RPC_URL is required (archive-capable; the pinned block is historical). Never commit the URL.");
+  fail("FATAL: RPC_URL is required (archive-capable; the pinned block is historical). Never commit the URL.");
   process.exit(1);
 }
 // Only a redacted provider label is ever serialized -- credentials must not enter the repo.
@@ -166,35 +192,62 @@ let pinned;
 if (REPIN) {
   const latest = await client.getBlock();
   pinned = await client.getBlock({ blockNumber: latest.number - 64n });
-  console.log(`REPIN MODE: new fixture block ${pinned.number} hash ${pinned.hash} — update PIN in this script and regenerate everything in one commit`);
+  emit(`REPIN MODE: new fixture block ${pinned.number} hash ${pinned.hash} — update PIN in this script and regenerate everything in one commit`);
 } else {
   pinned = await client.getBlock({ blockNumber: PIN.number });
   if (pinned.hash !== PIN.hash) {
-    console.error(`FATAL: block ${PIN.number} hash ${pinned.hash} != pinned ${PIN.hash}`);
+    fail(`FATAL: block ${PIN.number} hash ${pinned.hash} != pinned ${PIN.hash}`);
     process.exit(1);
   }
 }
 const B = pinned.number;
-console.log(`pinned block ${B} (${pinned.hash}) @ ${new Date(Number(pinned.timestamp) * 1000).toISOString()}`);
+emit(`pinned block ${B} (${pinned.hash}) @ ${new Date(Number(pinned.timestamp) * 1000).toISOString()}`);
 
 // ---- anchor round-trips ------------------------------------------------------
 const POOL = await read("AP.getPool", { address: A.ADDRESSES_PROVIDER, abi: abis.provider, functionName: "getPool", blockNumber: B });
 const DATA = await read("AP.getPoolDataProvider", { address: A.ADDRESSES_PROVIDER, abi: abis.provider, functionName: "getPoolDataProvider", blockNumber: B });
 const ORACLE = await read("AP.getPriceOracle", { address: A.ADDRESSES_PROVIDER, abi: abis.provider, functionName: "getPriceOracle", blockNumber: B });
 await read("AP.getACLManager", { address: A.ADDRESSES_PROVIDER, abi: abis.provider, functionName: "getACLManager", blockNumber: B });
-await read("Pool.ADDRESSES_PROVIDER (round-trip)", { address: POOL, abi: abis.pool, functionName: "ADDRESSES_PROVIDER", blockNumber: B });
+// POOL was derived FROM the provider, so this closes the loop both ways.
+assertAnchor(
+  "Pool.ADDRESSES_PROVIDER",
+  await read("Pool.ADDRESSES_PROVIDER (round-trip)", { address: POOL, abi: abis.pool, functionName: "ADDRESSES_PROVIDER", blockNumber: B }),
+  A.ADDRESSES_PROVIDER,
+);
 const POOL_IMPL = await implSlot("Pool implementation (EIP-1967)", POOL, B);
 await read("Pool.getRevision (internal in v3.x — expected revert)", { address: POOL, abi: abis.pool, functionName: "getRevision", blockNumber: B, exploratory: true });
 
 for (const [sym, addr] of Object.entries({ WETH: A.WETH, eETH: A.eETH, weETH: A.weETH, stETH: A.stETH, wstETH: A.wstETH })) {
-  await read(`${sym}.symbol`, { address: addr, abi: abis.erc20, functionName: "symbol", blockNumber: B });
+  assertSymbol(await read(`${sym}.symbol`, { address: addr, abi: abis.erc20, functionName: "symbol", blockNumber: B }), sym);
 }
-await read("weETH.eETH (round-trip)", { address: A.weETH, abi: abis.weeth, functionName: "eETH", blockNumber: B });
-await read("weETH.liquidityPool (round-trip)", { address: A.weETH, abi: abis.weeth, functionName: "liquidityPool", blockNumber: B });
-await read("wstETH.stETH (round-trip)", { address: A.wstETH, abi: abis.wsteth, functionName: "stETH", blockNumber: B });
+assertAnchor(
+  "weETH.eETH",
+  await read("weETH.eETH (round-trip)", { address: A.weETH, abi: abis.weeth, functionName: "eETH", blockNumber: B }),
+  A.eETH,
+);
+assertAnchor(
+  "weETH.liquidityPool",
+  await read("weETH.liquidityPool (round-trip)", { address: A.weETH, abi: abis.weeth, functionName: "liquidityPool", blockNumber: B }),
+  A.ETHERFI_LP,
+);
+assertAnchor(
+  "wstETH.stETH",
+  await read("wstETH.stETH (round-trip)", { address: A.wstETH, abi: abis.wsteth, functionName: "stETH", blockNumber: B }),
+  A.stETH,
+);
 
 // ---- reserves ---------------------------------------------------------------
 const reservesList = await read("Pool.getReservesList", { address: POOL, abi: abis.pool, functionName: "getReservesList", blockNumber: B });
+// Anchor the two reserves this fixture depends on to the pool's own list, so a mistyped
+// underlying cannot silently become a "reserve" the matrix then describes.
+for (const [sym, asset] of Object.entries({ WETH: A.WETH, weETH: A.weETH })) {
+  const member = Array.isArray(reservesList)
+    && reservesList.some((a) => getAddress(String(a)) === getAddress(asset));
+  if (!member) {
+    fail(`FATAL: ${sym} ${asset} is not in Pool.getReservesList at block ${B}`);
+    process.exit(1);
+  }
+}
 
 for (const [sym, asset] of Object.entries({ WETH: A.WETH, weETH: A.weETH })) {
   await read(`${sym}.getReserveConfigurationData`, { address: DATA, abi: abis.data, functionName: "getReserveConfigurationData", args: [asset], blockNumber: B });
@@ -240,7 +293,11 @@ await implSlot("EtherFi LiquidityPool implementation (EIP-1967)", A.ETHERFI_LP, 
 await implSlot("eETH implementation (EIP-1967)", A.eETH, B);
 await implSlot("weETH implementation (EIP-1967)", A.weETH, B);
 await read("weETH.getRate", { address: A.weETH, abi: abis.weeth, functionName: "getRate", blockNumber: B });
-await read("LP.eETH (round-trip)", { address: A.ETHERFI_LP, abi: abis.lp, functionName: "eETH", blockNumber: B });
+assertAnchor(
+  "LP.eETH",
+  await read("LP.eETH (round-trip)", { address: A.ETHERFI_LP, abi: abis.lp, functionName: "eETH", blockNumber: B }),
+  A.eETH,
+);
 await read("LP.getTotalPooledEther", { address: A.ETHERFI_LP, abi: abis.lp, functionName: "getTotalPooledEther", blockNumber: B });
 await read("eETH.totalShares", { address: A.eETH, abi: abis.eeth, functionName: "totalShares", blockNumber: B });
 await read("LP.amountForShare(1e18)", { address: A.ETHERFI_LP, abi: abis.lp, functionName: "amountForShare", args: [10n ** 18n], blockNumber: B });
@@ -267,5 +324,5 @@ const out = {
 };
 out.meta.unexpected_failures = unexpectedFailures;
 writeFileSync("docs/protocol-matrix-reads.json", JSON.stringify(out, null, 1));
-console.log(`wrote docs/protocol-matrix-reads.json: ${reads.length} reads, ${unexpectedFailures} unexpected failure(s)`);
+emit(`wrote docs/protocol-matrix-reads.json: ${reads.length} reads, ${unexpectedFailures} unexpected failure(s)`);
 process.exit(unexpectedFailures === 0 ? 0 : 1);

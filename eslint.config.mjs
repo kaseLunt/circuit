@@ -29,14 +29,17 @@ const eslintConfig = [
       "node_modules/**",
       "roadmap/**",
       "spikes/**",
-      "scripts/**",
       "coverage/**",
       ".remember/**",
     ],
   },
   {
-    // Application code is console-free; a `log` util gates any debug output.
-    files: ["src/**/*.{ts,tsx}"],
+    // Console-free everywhere, not just in src/: the fork suite and the reads script are
+    // evidence-bearing, so their output goes through explicit stdout/stderr writers
+    // (tests/fork/harness.ts `record`, scripts/protocol-reads.mjs `out`/`fail`). Linting
+    // scripts/** and tests/** at all is the point — ignoring them reported "lint clean"
+    // over exactly the paths that produce W03's evidence.
+    files: ["src/**/*.{ts,tsx}", "tests/**/*.ts", "scripts/**/*.mjs"],
     rules: {
       "no-console": "error",
     },

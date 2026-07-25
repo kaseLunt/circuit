@@ -41,6 +41,15 @@ export async function rpc<T>(method: string, params: readonly unknown[] = []): P
   return body.result as T;
 }
 
+/**
+ * Evidence output channel. W03's mutation contract requires the rebase slot id and pre/post
+ * words to reach the test output, so this is contractual, not debug logging — it goes through
+ * stdout directly so `no-console` can stay an error across the whole repository.
+ */
+export function record(line: string): void {
+  process.stdout.write(`${line}\n`);
+}
+
 export const hexQuantity = (v: bigint): Hex => `0x${v.toString(16)}` as Hex;
 export const hexWord = (v: bigint): Hex => `0x${v.toString(16).padStart(64, "0")}` as Hex;
 

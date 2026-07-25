@@ -40,7 +40,7 @@ import { currentRatesRay, rayDivCeil, rayDivFloor, rayMulCeil, rayMulFloor } fro
 import type { Block, StrategyGraph } from "../../src/core/graph";
 import { PINNED_BLOCK, PINNED_TS, bigRead, readsMeta } from "../helpers/protocol-reads";
 import { ANVIL_URL } from "./anvil";
-import { TxRevertedError, getStorageWord, nativeBalance, replayRevert, rpc, sendTx, setStorageWord, hexQuantity, type Receipt } from "./harness";
+import { TxRevertedError, getStorageWord, nativeBalance, record, replayRevert, rpc, sendTx, setStorageWord, hexQuantity, type Receipt } from "./harness";
 import { decodeRevert } from "../../src/core/errors";
 
 // ————————————————————————— constants (named per W03) —————————————————————————
@@ -502,7 +502,7 @@ describe("W03 fork gate — SPEC §2 flagship on the pinned fork", () => {
     const rate = await read<bigint>({ address: lp, abi: ABI.lp, functionName: "amountForShare", fnArgs: [10n ** 18n] });
     expect(rate).toBe((10n ** 18n * totalAfter) / sharesAfter);
     // Recorded per the W03 mutation contract: slot id + pre/post words.
-    console.log(
+    record(
       `rebase: slot ${slot} word ${word.toString(16)} -> ${(word + delta).toString(16)} (delta ${delta})`,
     );
   });
@@ -567,15 +567,19 @@ describe("W03 fork gate — SPEC §2 flagship on the pinned fork", () => {
     // Display-level recomputation from the final block's indices vs balanceOf.
     const normNow = await read<bigint>({ address: seeded.pool, abi: ABI.pool, functionName: "getReserveNormalizedIncome", fnArgs: [weETH.underlying] });
     const aBal = await read<bigint>({ address: weETH.aToken, abi: ABI.erc20, functionName: "balanceOf", fnArgs: [wallet] });
-    const aDisplay = rayMulFloor(expectedScaledCollateral, normNow);
+    // Recompute from the CHAIN's scaled balance, not the expected one: the scaled amounts are
+    // already asserted against expectation above with their own bounds, so recomputing from
+    // expectation here would sum both error sources and slacken this to 3 wei. Driving it from
+    // chain scaled isolates display-index rounding, which is what W03 bounds at 1 wei.
+    const aDisplay = rayMulFloor(chainScaledCollateral, normNow);
     const aDiff = aBal > aDisplay ? aBal - aDisplay : aDisplay - aBal;
-    expect(aDiff <= DISPLAY_BOUND + SCALED_SUPPLY_BOUND, `aToken display diff ${aDiff}`).toBe(true);
+    expect(aDiff <= DISPLAY_BOUND, `aToken display diff ${aDiff}`).toBe(true);
 
     const normDebtNow = await read<bigint>({ address: seeded.pool, abi: ABI.pool, functionName: "getReserveNormalizedVariableDebt", fnArgs: [WETH.underlying] });
     const vBal = await read<bigint>({ address: WETH.variableDebtToken, abi: ABI.erc20, functionName: "balanceOf", fnArgs: [wallet] });
-    const vDisplay = rayMulCeil(expectedScaledDebt, normDebtNow);
+    const vDisplay = rayMulCeil(chainScaledDebt, normDebtNow);
     const vDiff = vBal > vDisplay ? vBal - vDisplay : vDisplay - vBal;
-    expect(vDiff <= DISPLAY_BOUND + SCALED_DEBT_BOUND, `debt display diff ${vDiff}`).toBe(true);
+    expect(vDiff <= DISPLAY_BOUND, `debt display diff ${vDiff}`).toBe(true);
   });
 
   it("no-sweep residuals and exact native accounting", async () => {
@@ -648,7 +652,7 @@ describe("W03 fork gate — SPEC §2 flagship on the pinned fork", () => {
         liquidityTakenWei: 0n,
         deficitWei: deficit,
       });
-      console.log(`${key}: reserve deficit (live read) = ${deficit}`);
+      record(`${key}: reserve deficit (live read) = ${deficit}`);
       expect(
         relWithin(predicted.variableBorrowRateRay, rd[6], RATE_REL_POW),
         `${key} variable rate: predicted ${predicted.variableBorrowRateRay} vs stored ${rd[6]}`,

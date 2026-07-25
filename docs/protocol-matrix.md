@@ -5,8 +5,10 @@ mechanics. **Every on-chain value cites a read label in `docs/protocol-matrix-re
 regenerated reproducibly by `node scripts/protocol-reads.mjs` — the script is hard-pinned to
 the fixture block (hash-verified; `--repin` is an explicit separate mode), and reruns are
 byte-identical (the RPC endpoint is serialized as a redacted provider label only).
-77 reads: 76 successes + 1 documented expected revert (`getRevision`, internal getter), zero
-unexpected failures. An archive-capable RPC (`RPC_URL`) is required —
+79 reads: 78 successes + 1 documented expected revert (`getRevision`, internal getter), zero
+unexpected failures. Every address anchor is asserted against an independent on-chain source
+(provider round-trip, `weETH.eETH`/`liquidityPool`, `wstETH.stETH`, `LP.eETH`, `symbol()`, and
+`getReservesList` membership); a mismatch aborts the run rather than writing a fixture. An archive-capable RPC (`RPC_URL`) is required —
 the block has aged out of public nodes' recent-state windows.** Claims that are not on-chain reads cite a URL. Nothing is hand-typed
 from memory. Scope: the Aave v3 Ethereum **Core** market (not the separate EtherFi/Lido/
 Horizon Aave markets), plus EtherFi and Lido staking tokens.

@@ -176,7 +176,8 @@ Invariants:
   real weETH headroom.
 - **No silent fallbacks:** numeric-literal `??` lint ban active in `core/`; `Provenanced<T>`
   (src/core/provenance.ts) carries every chain-derived value out of `server/chain/`.
-- **Senior review (D-004):** Codex reviews `core/` before the phase-exit receipt; verdict and
+- **Codex final approval (D-007, supersedes D-004):** an explicit Codex APPROVAL verdict is a
+  hard gate before this item may be marked `achieved` or P1 may exit; verdict and
   disposition recorded in the receipt.
 
 ## Fork-test wiring contract
@@ -200,6 +201,12 @@ Invariants:
   A missing `FORK_RPC_URL` or absent anvil fails the suite closed; note that vitest runs
   `globalSetup` **before** collection, so either failure surfaces as a misleading
   "No test files found" alongside the real error.
+- **Provider rate limits are a real failure mode.** The fork suite replays a lot of archive
+  storage through anvil's backend; running it back-to-back with `scripts/protocol-reads.mjs` on
+  a free-tier key produces `HTTP error 429 — Max retries exceeded` inside `captureFootprint`,
+  which fails the whole suite with all tests reported **skipped** (observed 2026-07-24). That is
+  an environment failure, not a money-math failure — distinguish it before debugging, and space
+  runs out or use a paid key.
 
 ## Non-goals
 
@@ -220,7 +227,7 @@ python roadmap/tools/doctor.py
 ## Evidence
 
 No attained evidence yet. Record fork-suite CI run IDs, the pinned fixture identity, and the
-D-004 review outcome in the receipt; stamp per RULES.md.
+D-007 Codex approval verdict in the receipt; stamp per RULES.md.
 
 ## Handoff
 

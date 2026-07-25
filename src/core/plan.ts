@@ -153,6 +153,7 @@ export type PlanConstraint =
   | "insufficient-liquidity"
   | "emode-not-borrowable"
   | "emode-unknown-category"
+  | "emode-active-category-rejects-plan"
   | "collateral-not-allowed"
   | "existing-footprint"
   | "input-amount";
@@ -512,8 +513,18 @@ export function buildPlan(graph: StrategyGraph, snapshot: ChainSnapshot): PlanRe
           constraint: "emode-unknown-category",
           detail: `wallet is in e-mode category ${currentCategoryId}, which the snapshot does not describe`,
         });
+      } else if (!categoryAdmits(current, collateralIndices, borrowIndices)) {
+        // v1 never transitions a live category (P5), so a category that assigns the plan's
+        // collateral zero LTV (outside its collateral bitmap, or in its LTV-zero bitmap) or
+        // cannot borrow the requested asset makes the plan unexecutable. A fresh wallet can
+        // fall back to no e-mode; a parked wallet cannot, so this is an error, not a fallback.
+        emodeErrors.push({
+          kind: "constraint",
+          blockId: borrowBlocks[0]!.id,
+          constraint: "emode-active-category-rejects-plan",
+          detail: `wallet is in e-mode category ${currentCategoryId} ("${current.label.value}"), which does not admit this plan's collateral/borrow pair; supplying under it would leave the collateral unusable and the borrow would revert`,
+        });
       } else {
-        // v1 never transitions a live category (P5); the plan runs under it.
         targetCategory = current;
       }
     } else {
