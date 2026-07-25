@@ -19,3 +19,22 @@ jobs:
       - run: npm run typecheck
       - run: npm run lint
       - run: npm test
+
+  fork:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      # Anvil pinned to the W03 fixture toolchain version.
+      - uses: foundry-rs/foundry-toolchain@v1
+        with:
+          version: v1.7.1
+      - run: npm ci
+      # FORK_RPC_URL is a REQUIRED repository secret and must be archive-capable —
+      # the pinned block has aged out of public nodes' recent-state windows (W03).
+      - run: npm run test:fork
+        env:
+          FORK_RPC_URL: ${{ secrets.FORK_RPC_URL }}
