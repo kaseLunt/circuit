@@ -28,7 +28,7 @@ claim the gate is automated unless a validator actually enforces it.
 | W02 | Land founding product docs — spec and transplant manifest | P0 | — | docs-landed-and-compliant-with-vision-antigoals | achieved |
 | W03 | P1 finance core — 13-step plan green on a pinned fork, headless | P1 | W04 | thirteen-step-plan-green-on-pinned-fork-in-ci | achieved |
 | W04 | Disposition the P0→P1 boundary review findings | P0 | — | boundary-review-blockers-cleared-and-reconfirmed | achieved |
-| W05 | P2 canvas on the proven core — composer transplanted, reskinned, share-URL round-trip | P2 | W03 | spec-3-steps-1-3-and-8-green-in-playwright-on-mock-reads | candidate |
+| W05 | P2 canvas on the proven core — composer transplanted, reskinned, share-URL round-trip | P2 | W03 | spec-3-steps-1-3-and-8-green-in-playwright-on-mock-reads | active |
 
 The rows above project `work/W01-p0-bootstrap.md`, `work/W02-founding-docs.md`, and
 `work/W03-p1-finance-core.md`, `work/W04-boundary-review-remediation.md`, and

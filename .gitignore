@@ -20,3 +20,6 @@ coverage/
 # misc
 .DS_Store
 npm-debug.log*
+
+# Serena LSP index (machine-local)
+.serena/

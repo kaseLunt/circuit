@@ -1,6 +1,6 @@
 ---
 active_phase: P2
-active_task: none
+active_task: W05
 project_state: active
 writer_mode: serial
 parallel_readers: allowed
