@@ -3,7 +3,7 @@ id: W05
 type: work
 title: P2 canvas on the proven core — composer transplanted, reskinned, share-URL round-trip
 phase: P2
-status: candidate
+status: active
 evidence_target: spec-3-steps-1-3-and-8-green-in-playwright-on-mock-reads
 priority: 1
 depends_on: [W03]
@@ -29,8 +29,6 @@ deliverables:
   - src/app/store/composer-store.ts
   - src/lib/strategy/templates.ts
   - src/components/canvas/canvas.tsx
-  - src/components/canvas/blocks/**
-  - src/components/canvas/edges/**
   - src/components/composer/sidebar.tsx
   - src/components/composer/simulation-panel.tsx
   - src/lib/share/encode.ts
@@ -70,6 +68,12 @@ The porting order is fixed by the manifest: `strategy/types.ts` → `route-optim
 (**rebuild**) → templates (**rebuild**) → canvas + blocks + edges + sidebar. One module per port
 commit with provenance in the message; `port-with-edits` files land with **every** listed edit in
 the same commit. Anything absent from the manifest does not exist.
+
+Block and edge components land under `src/components/canvas/blocks/` and `edges/` (in scope via
+`src/**`) but are deliberately not enumerated in `deliverables` yet: doctor requires achieved
+deliverables to be concrete existing files (globs and directories are rejected,
+`doctor.py:760`), and the port fixes their names. Amend `deliverables` with the concrete files
+in the commit that lands them — a contract amendment, so it is owner-gated by design.
 
 ## Acceptance
 
