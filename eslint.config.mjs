@@ -44,6 +44,15 @@ const eslintConfig = [
       "no-console": "error",
     },
   },
+  {
+    // The single sanctioned console writer. The browser has no stderr, so client-side
+    // warn/error reach the host console from here and nowhere else. Every other
+    // src/** file remains no-console: error.
+    files: ["src/lib/log.ts"],
+    rules: {
+      "no-console": "off",
+    },
+  },
   // Two structural bans below. ESLint flat config REPLACES (not merges) a rule's
   // options across matching blocks, so each file group lists its full selector set:
   //   forge ban   (D-004): only provenance.ts may construct the Observed shape.
