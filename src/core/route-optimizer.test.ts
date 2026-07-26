@@ -149,6 +149,20 @@ function reserveSnapshot(sym: "weETH" | "WETH", mint: ObservationMinter): Reserv
       `${sym}.getVirtualUnderlyingBalance`,
     ),
     priceBase: mint.observe(bigRead(`Oracle.getAssetPrice(${sym})`), `Oracle.getAssetPrice(${sym})`),
+    rateStrategy: mint.observe(rateStrategy(sym), `${sym}.strategy.getInterestRateDataBps`),
+    reserveFactorBps: mint.observe(Number(tupleBig(cfg, 4)), `${cfg}.reserveFactor`),
+    deficit: mint.observe(bigRead(`${sym}.getReserveDeficit`), `${sym}.getReserveDeficit`),
+  };
+}
+
+function rateStrategy(sym: "weETH" | "WETH") {
+  const label = `${sym}.strategy.getInterestRateDataBps`;
+  const raw = readResult(label);
+  return {
+    optimalUsageRatio: numericField(raw, "optimalUsageRatio", label),
+    baseVariableBorrowRate: numericField(raw, "baseVariableBorrowRate", label),
+    variableRateSlope1: numericField(raw, "variableRateSlope1", label),
+    variableRateSlope2: numericField(raw, "variableRateSlope2", label),
   };
 }
 

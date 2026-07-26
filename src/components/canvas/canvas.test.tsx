@@ -21,6 +21,7 @@ import {
   makeIsValidConnection,
   pasteClipboard,
   rejectionFromConnectionEnd,
+  runtimeRiskFields,
   selectionBarPosition,
 } from "./canvas";
 import { CanvasEmptyState } from "./canvas-empty-state";
@@ -28,8 +29,12 @@ import { BLOCK_COMPONENTS } from "./blocks";
 import { ComposerStoreProvider } from "../../app/store/composer-provider";
 import { connectRejection, createComposerStore } from "../../app/store/composer-store";
 import { FLAGSHIP_TEMPLATE_ID, STRATEGY_TEMPLATES } from "../../lib/strategy/templates";
+import { valueOf } from "../../core/provenance";
+import { simulate } from "../../core/risk";
 import type { ConnectRejection } from "../../app/store/composer-store";
 import type { StrategyGraph } from "../../core/graph";
+import { flagshipGraph } from "../../../tests/helpers/graphs";
+import { fixtureSnapshot } from "../../../tests/helpers/chain-snapshot";
 
 afterEach(cleanup);
 
@@ -295,6 +300,48 @@ describe("the doc → view-model mapping", () => {
       expect(labels[block.id]).toBe(blockDataOf(doc, block, undefined).label);
     }
     expect(Object.values(labels)).toContain("Supply");
+  });
+});
+
+describe("the simulation → block-runtime seam (taste finding S-1)", () => {
+  const graph = flagshipGraph("10", 7000);
+
+  it("hands the block family the health factor core derived, wrapper intact", () => {
+    const result = simulate(graph, fixtureSnapshot());
+    const fields = runtimeRiskFields(result);
+    // The SAME wrapper, not a copy and not a re-mint: the adapter observes nothing, so the
+    // only honest thing it can do is pass core's object through.
+    expect(fields.minHealthFactor).toBe(result.minHealthFactor);
+    expect(fields.liquidationRatioWad).toBe(result.liquidationRatioWad);
+    expect(fields.blockValues).toBe(result.blockValues);
+    expect(valueOf(fields.minHealthFactor!).status).toBe("healthy");
+    expect(Object.keys(fields.blockValues)).toContain("borrow");
+  });
+
+  it("passes no simulation through as an absence — never as an empty reading", () => {
+    const fields = runtimeRiskFields(null);
+    expect(fields.minHealthFactor).toBeNull();
+    expect(fields.liquidationRatioWad).toBeNull();
+    expect(fields.blockValues).toEqual({});
+  });
+
+  it("keeps an unresolved quantity distinct from an absent simulation", () => {
+    const noPrice = fixtureSnapshot((raw) => {
+      raw.weETH.priceBase = 0n;
+    });
+    const fields = runtimeRiskFields(simulate(graph, noPrice));
+    // A result exists, so the wrapper is present; its VALUE is what says the read failed.
+    // Collapsing the two into one null is exactly what S-1 was about.
+    expect(fields.minHealthFactor).not.toBeNull();
+    expect(valueOf(fields.minHealthFactor!).status).toBe("unknown");
+    // The unknown checkpoint dominates the minimum, and that checkpoint is the first supply
+    // — which carries no debt — so there is no pair to quote a liquidation ratio for. The
+    // block renders its authored unavailable sentence rather than a ratio beside an
+    // unknown health factor.
+    expect(fields.liquidationRatioWad).toBeNull();
+    // Amounts are unaffected: only the VALUES they price went away.
+    expect(fields.blockValues["supply1"]!.inputAmountWei).not.toBeNull();
+    expect(fields.blockValues["supply1"]!.inputValueBase).toBeNull();
   });
 });
 

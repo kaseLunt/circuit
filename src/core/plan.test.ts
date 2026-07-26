@@ -204,6 +204,155 @@ describe("buildPlan — flagship 13-step canonical fixture (SPEC §2)", () => {
   });
 });
 
+describe("plan.flows — a recording of the pass that already ran, not a second derivation", () => {
+  const snapshot = fixtureSnapshot();
+
+  /**
+   * The matrix §7 share model, recomputed here from the snapshot's own observations. These
+   * are the intermediate values `tests/helpers/graphs.ts` documents above EXPECTED_BORROW_WEI;
+   * deriving them rather than retyping them is what makes this an independent check.
+   */
+  function shareModel(inputWei: bigint) {
+    const pooled = snapshot.etherfi.totalPooledEther.value;
+    const shares = snapshot.etherfi.totalShares.value;
+    const s1 = (inputWei * shares) / pooled;
+    const pooledAfter = pooled + inputWei;
+    const sharesAfter = shares + s1;
+    const b1 = (s1 * pooledAfter) / sharesAfter;
+    const w1 = (b1 * sharesAfter) / pooledAfter;
+    return { s1, b1, w1 };
+  }
+
+  it("carries one flow per block in topological order, with the landed asset semantics", () => {
+    const result = buildPlan(flagshipGraph(), snapshot);
+    expectOk(result);
+    expect(result.flows.map((f) => f.blockId)).toEqual([
+      "in",
+      "stake1",
+      "wrap1",
+      "supply1",
+      "borrow",
+      "unwrap",
+      "stake2",
+      "wrap2",
+      "supply2",
+    ]);
+    const byId = new Map(result.flows.map((f) => [f.blockId, f] as const));
+    const shape = (id: string) => {
+      const f = byId.get(id)!;
+      return [f.inputAsset, f.outputAsset, f.reserve];
+    };
+    // An input consumes nothing; a supply produces no consumable token; a borrow's producer
+    // edge is a collateral dependency, not a token flow.
+    expect(shape("in")).toEqual([null, "ETH", null]);
+    expect(shape("stake1")).toEqual(["ETH", "eETH", null]);
+    expect(shape("wrap1")).toEqual(["eETH", "weETH", null]);
+    expect(shape("supply1")).toEqual(["weETH", null, "weETH"]);
+    expect(shape("borrow")).toEqual([null, "WETH", "WETH"]);
+    expect(shape("unwrap")).toEqual(["WETH", "ETH", null]);
+  });
+
+  it("reproduces the documented derivation chain exactly", () => {
+    const result = buildPlan(flagshipGraph(), snapshot);
+    expectOk(result);
+    const byId = new Map(result.flows.map((f) => [f.blockId, f] as const));
+    const { b1, w1 } = shareModel(10n * WAD_WEI);
+
+    expect(byId.get("in")!.outputWei!.value).toBe(10n * WAD_WEI);
+    expect(byId.get("in")!.outputWei!.kind).toBe("entered");
+    expect(byId.get("stake1")!.inputWei!.value).toBe(10n * WAD_WEI);
+    expect(byId.get("stake1")!.outputWei!.value).toBe(b1);
+    expect(byId.get("wrap1")!.inputWei!.value).toBe(b1);
+    expect(byId.get("wrap1")!.outputWei!.value).toBe(w1);
+    expect(byId.get("supply1")!.inputWei!.value).toBe(w1);
+    expect(byId.get("supply1")!.outputWei).toBeNull();
+    expect(byId.get("borrow")!.inputWei).toBeNull();
+    expect(byId.get("borrow")!.outputWei!.value).toBe(EXPECTED_BORROW_WEI);
+    // WETH→ETH is 1:1, so the unwrap hands its input straight on.
+    expect(byId.get("unwrap")!.inputWei!.value).toBe(EXPECTED_BORROW_WEI);
+    expect(byId.get("unwrap")!.outputWei!.value).toBe(EXPECTED_BORROW_WEI);
+  });
+
+  it("hands out the SAME wrapper the step carries — one object, so the two cannot drift", () => {
+    const result = buildPlan(flagshipGraph(), snapshot);
+    expectOk(result);
+    const borrowStep = stepById(result.steps, "borrow:borrow");
+    if (borrowStep.amount.kind !== "derived") throw new Error("borrow amount must be derived");
+    const borrowFlow = result.flows.find((f) => f.blockId === "borrow")!;
+    // Reference identity, not value equality: this is what proves the flow is a RECORDING
+    // of the calldata's own derivation rather than a parallel computation of the same number.
+    expect(borrowFlow.outputWei).toBe(borrowStep.amount.amount);
+    const unwrapFlow = result.flows.find((f) => f.blockId === "unwrap")!;
+    expect(unwrapFlow.outputWei).toBe(unwrapFlow.inputWei);
+  });
+
+  /**
+   * The input-funded step is the one place calldata could still be minted from a SECOND
+   * computation: the amount is fixed at plan time, so nothing forces it through the
+   * attribution path. It must carry the recorded wrapper by reference, at every allocation.
+   */
+  it("emits the first deposit from the recorded wrapper at FULL input allocation", () => {
+    const result = buildPlan(flagshipGraph(), snapshot);
+    expectOk(result);
+    const deposit = stepById(result.steps, "stake1:deposit");
+    const flow = result.flows.find((f) => f.blockId === "stake1")!;
+    // The whole input is the user's entered figure, so the spec is genuinely a literal.
+    if (deposit.amount.kind !== "literal") throw new Error("expected a literal amount");
+    expect(deposit.amount.amount).toBe(flow.inputWei);
+    expect(deposit.amount.amount.kind).toBe("entered");
+    expect(deposit.amount.amount.value).toBe(10n * WAD_WEI);
+  });
+
+  it("emits the first deposit from the recorded wrapper at PARTIAL input allocation", () => {
+    const graph = flagshipGraph();
+    const split: StrategyGraph = {
+      blocks: graph.blocks,
+      edges: graph.edges.map((e) =>
+        e.source === "in" && e.target === "stake1" ? { ...e, allocationBps: 6_000 } : e,
+      ),
+    };
+    const result = buildPlan(split, snapshot);
+    expectOk(result);
+    const deposit = stepById(result.steps, "stake1:deposit");
+    const flow = result.flows.find((f) => f.blockId === "stake1")!;
+    // A partial allocation is `floor(entered × bps / 1e4)` — a DERIVATION over the entered
+    // figure, not the entered figure. Calling it a literal would claim the user typed it.
+    if (deposit.amount.kind !== "derived") throw new Error("expected a derived amount");
+    expect(deposit.amount.amount).toBe(flow.inputWei);
+    expect(deposit.amount.amount.value).toBe((10n * WAD_WEI * 6_000n) / 10_000n);
+    expect(provenanceTrail(deposit.amount.amount).join("\n")).toContain("entered by user");
+    // Still a plan-time amount, so encodeStep refuses a resolved one.
+    expect(() => encodeStep(deposit, 1n)).toThrow(/fixed/);
+    expect(encodeStep(deposit).value).toBe(deposit.amount.amount.value);
+  });
+
+  it("keeps every flow's provenance pinned to the snapshot's block", () => {
+    const result = buildPlan(flagshipGraph(), snapshot);
+    expectOk(result);
+    for (const flow of result.flows) {
+      for (const wrapper of [flow.inputWei, flow.outputWei]) {
+        if (wrapper === null) continue;
+        const blocks = [...observedBlocks(wrapper)];
+        expect(blocks.length, flow.blockId).toBeLessThanOrEqual(1);
+        for (const block of blocks) expect(block, flow.blockId).toBe(PINNED_BLOCK);
+      }
+    }
+  });
+
+  it("records a flow for every block of a plan with no Aave leg at all", () => {
+    const result = buildPlan(
+      chainOf([
+        { id: "in", type: "input", params: { asset: "ETH", amount: "1" } },
+        { id: "s", type: "stake", params: { protocol: "etherfi" } },
+      ]),
+      snapshot,
+    );
+    expectOk(result);
+    expect(result.flows.map((f) => f.blockId)).toEqual(["in", "s"]);
+    expect(result.flows.every((f) => f.reserve === null)).toBe(true);
+  });
+});
+
 describe("e-mode policy (SPEC §5.4, matrix §3)", () => {
   it("skips setUserEMode when the wallet is already in the target category", () => {
     const snapshot = fixtureSnapshot((raw) => {

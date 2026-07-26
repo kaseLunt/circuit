@@ -11,6 +11,11 @@
  *     residuals, native accounting, e-mode, collateral flag)
  *   - post-action reserve rates reproduced via the §5.1 strategy formula
  *     (reading reserve deficits live — matrix §9 OPEN item 3)
+ *
+ * A SECOND run follows at the bottom of this file on a re-forked, un-seeded, un-rebased
+ * chain: there the prediction and the execution are the same sequence, so every
+ * `core/risk.ts` ledger checkpoint is compared NUMERICALLY against getUserAccountData, and
+ * the predicted post-action rates are compared against the rates the protocol wrote.
  */
 import { beforeAll, describe, expect, it } from "vitest";
 import {
@@ -36,9 +41,19 @@ import {
   type PlanSuccess,
   type TransactionStep,
 } from "../../src/core/plan";
-import { computeHealthFactor, type CollateralEntry } from "../../src/core/health-factor";
-import { currentRatesRay, rayDivCeil, rayDivFloor, rayMulCeil, rayMulFloor } from "../../src/core/rates";
-import { PINNED_BLOCK, PINNED_TS, bigRead, readsMeta } from "../helpers/protocol-reads";
+import { computeHealthFactor, hfWadValue, type CollateralEntry } from "../../src/core/health-factor";
+import { riskLedger, simulate, type RiskCheckpoint } from "../../src/core/risk";
+import {
+  accruedVariableBorrowIndexRay,
+  currentRatesRay,
+  rayAprToApyWad,
+  rayDivCeil,
+  rayDivFloor,
+  rayMulCeil,
+  rayMulFloor,
+  vTokenBalance,
+} from "../../src/core/rates";
+import { PINNED_BLOCK, PINNED_TS, bigRead, readResult, readsMeta, tupleBig } from "../helpers/protocol-reads";
 import { flagshipGraph } from "../helpers/graphs";
 import { ANVIL_URL } from "./anvil";
 import { TxRevertedError, getStorageWord, nativeBalance, record, replayRevert, rpc, sendTx, setStorageWord, hexQuantity, type Receipt } from "./harness";
@@ -392,6 +407,19 @@ describe("W03 fork gate — SPEC §2 flagship on the pinned fork", () => {
     expect(pristine.reserves.WETH.virtualUnderlyingBalance.value).toBe(bigRead("WETH.getVirtualUnderlyingBalance"));
     expect(pristine.eModeCategories[0]!.collateralBitmap.value).toBe(bigRead("eMode1.collateralBitmap"));
     expect(pristine.eModeCategories[0]!.borrowableBitmap.value).toBe(bigRead("eMode1.borrowableBitmap"));
+    // The §5.1 rate-strategy family: the strategy ADDRESS is read per reserve and the bps
+    // struct is read off it, so a market that re-pointed a reserve at a new strategy shows
+    // up here rather than silently changing every post-action rate.
+    for (const key of ["weETH", "WETH"] as const) {
+      const reserve = pristine.reserves[key];
+      expect(reserve.deficit.value, `${key} deficit`).toBe(bigRead(`${key}.getReserveDeficit`));
+      expect(reserve.reserveFactorBps.value, `${key} reserveFactor`).toBe(
+        Number(tupleBig(`${key}.getReserveConfigurationData`, 4)),
+      );
+      expect(reserve.rateStrategy.value, `${key} rateStrategy`).toEqual(
+        readResult(`${key}.strategy.getInterestRateDataBps`),
+      );
+    }
     expect(pristine.etherfi.totalPooledEther.value).toBe(bigRead("LP.getTotalPooledEther"));
     expect(pristine.etherfi.totalShares.value).toBe(bigRead("eETH.totalShares"));
     expect(pristine.user.eModeCategoryId.value).toBe(0);
@@ -511,6 +539,63 @@ describe("W03 fork gate — SPEC §2 flagship on the pinned fork", () => {
     }
     expect(executed.size).toBe(13);
     expect(hfWithDebt.length).toBe(2); // borrow + resupply carry debt
+  });
+
+  /**
+   * The §5.4 cross-check `riskLedger` exists for: the minimum health factor is a claim about
+   * a moment DURING execution, and a single reading taken afterwards cannot check it.
+   *
+   * The chain-verified readings above are the evidence. `hfWithDebt` holds the two
+   * debt-bearing health factors in execution order, each already asserted to within 1e-8 of
+   * `Pool.getUserAccountData().healthFactor`; the ledger must agree about which of them is
+   * the minimum and about where it sits.
+   *
+   * Deliberately NOT a byte-exact numeric comparison: this suite induces a rebase between
+   * steps 1 and 2, so the executed amounts differ from the block-pinned prediction by
+   * design. Pinning the digits is the unit suite's job over the reads log; what only the
+   * fork can prove is that the shape of the claim survives real execution.
+   */
+  it("riskLedger agrees with the chain about where the minimum health factor sits", () => {
+    const ledger = riskLedger(flagshipGraph(INPUT_ETH, BORROW_BPS), seeded);
+    expect(ledger.ok).toBe(true);
+    expect(ledger.errors).toEqual([]);
+
+    // One checkpoint per risk-changing step, in plan order.
+    expect(ledger.checkpoints.map((c) => `${c.blockId}:${c.cause}`)).toEqual([
+      "supply1:supply",
+      "borrow:borrow",
+      "supply2:supply",
+    ]);
+    // The pre-borrow checkpoint carries no debt — the same thing the chain reported as the
+    // no-debt sentinel after supply1.
+    expect(ledger.checkpoints[0]!.healthFactor).toEqual({ status: "no-debt" });
+
+    const min = ledger.min;
+    const final = ledger.final;
+    if (min === null || final === null) throw new Error("ledger produced no checkpoints");
+    if (min.healthFactor.status !== "healthy") throw new Error("min HF is not healthy");
+    if (final.healthFactor.status !== "healthy") throw new Error("final HF is not healthy");
+
+    // The minimum is mid-execution: debt opens against the first supply alone, before the
+    // loop's second collateral lands.
+    expect(min.blockId).toBe("borrow");
+    expect(final.blockId).toBe("supply2");
+    expect(min.healthFactor.hfWad).toBeLessThan(final.healthFactor.hfWad);
+
+    // …and the chain said exactly that, in the same order.
+    const [afterBorrow, afterResupply] = hfWithDebt as [bigint, bigint];
+    expect(afterBorrow).toBeLessThan(afterResupply);
+    record(
+      `ledger min at ${min.blockId} (${min.healthFactor.hfWad}) < final at ${final.blockId} ` +
+        `(${final.healthFactor.hfWad}); chain-verified ${afterBorrow} < ${afterResupply}`,
+    );
+
+    // The correlated pair the liquidation ratio is defined over is the position at the
+    // minimum, not at the end — one collateral reserve against one debt reserve.
+    expect(min.collateralWei).not.toBeNull();
+    expect(min.debtWei).not.toBeNull();
+    expect(min.supplies).toHaveLength(1);
+    expect(min.debts).toHaveLength(1);
   });
 
   it("final state: e-mode, collateral flag, scaled balances, display balances", async () => {
@@ -656,5 +741,378 @@ describe("W03 fork gate — SPEC §2 flagship on the pinned fork", () => {
         `${key} liquidity rate: predicted ${predicted.liquidityRateRay} vs stored ${rd[5]}`,
       ).toBe(true);
     }
+  });
+});
+
+/**
+ * A SECOND fork run, deliberately without the seeding and without the induced rebase above.
+ *
+ * Those two exist to prove that attribution survives adversarial state, and they make the
+ * executed amounts differ from the block-pinned prediction ON PURPOSE. The minimum-health-
+ * factor claim is a claim about the prediction, so checking it numerically needs a run where
+ * the prediction and the execution are the same sequence — which is what this is.
+ *
+ * What only the fork can prove, and what this asserts:
+ *   - every `riskLedger` checkpoint against `Pool.getUserAccountData().healthFactor`, taken
+ *     immediately after the step that produced it, and
+ *   - the post-action rate `core/risk.ts` PREDICTS against the rate the protocol actually
+ *     wrote once the action executed (Codex finding 1's model, end to end).
+ */
+describe("W03 fork gate — riskLedger against the chain on a clean, un-rebased fork", () => {
+  /**
+   * Declared bound: 1 part in 1e6, relative. It covers the only differences that can exist
+   * between a block-pinned prediction and this execution — index accrual over the ~12 blocks
+   * the plan takes (aToken and vToken both, dominated by WETH debt at ~2.1% APR, i.e. ~1e-8
+   * relative), plus the sub-wei directional rounding on the scaled mints. It does NOT cover a
+   * modelling error: at 1e-6 the stale-debt model finding 1 corrected would still fail here.
+   */
+  const LEDGER_HF_REL_POW = 10n ** 6n;
+
+  let cleanWallet: Address;
+  let cleanSnapshot: ChainSnapshot;
+  let cleanPlan: PlanSuccess;
+  let cleanLedger: ReturnType<typeof riskLedger>;
+  const cleanExecuted = new Map<string, ExecutedStep>();
+  let actualBorrowRateRay: bigint | null = null;
+  let actualLiquidityRateRay: bigint | null = null;
+
+  async function resolveCleanAmount(step: TransactionStep): Promise<bigint | null> {
+    const spec = step.amount;
+    if (spec.kind === "none") return null;
+    if (spec.kind === "literal" || spec.kind === "derived") return spec.amount.value;
+    const producer = cleanExecuted.get(spec.producerStepId);
+    if (producer === undefined) throw new Error(`producer ${spec.producerStepId} not executed`);
+    let output: bigint;
+    switch (spec.attribution) {
+      case "share-delta": {
+        if (producer.sharesDelta === null) {
+          throw new Error(`${spec.producerStepId} has no share delta`);
+        }
+        output = await read<bigint>({
+          address: cleanSnapshot.etherfi.liquidityPool,
+          abi: ABI.lp,
+          functionName: "amountForShare",
+          fnArgs: [producer.sharesDelta],
+        });
+        break;
+      }
+      case "transfer-event":
+        output = transferValueTo(producer.receipt, outputTokenOf(producer.step), cleanWallet);
+        break;
+      case "withdraw-argument":
+        if (producer.resolvedAmount === null) {
+          throw new Error(`${spec.producerStepId} has no amount`);
+        }
+        output = producer.resolvedAmount;
+        break;
+      case "return-value":
+        throw new Error("return-value attribution is not used by the flagship plan");
+    }
+    if (spec.allocationBps === 10_000) return output;
+    return (output * BigInt(spec.allocationBps)) / 10_000n;
+  }
+
+  async function executeClean(step: TransactionStep): Promise<void> {
+    const resolved = await resolveCleanAmount(step);
+    const encoded =
+      step.amount.kind === "step-output" ? encodeStep(step, resolved!) : encodeStep(step);
+    const shares = (): Promise<bigint> =>
+      read<bigint>({
+        address: cleanSnapshot.etherfi.eETH,
+        abi: ABI.eeth,
+        functionName: "shares",
+        fnArgs: [cleanWallet],
+      });
+    const preShares = step.functionName === "deposit" ? await shares() : null;
+    const receipt = await sendTx({
+      from: cleanWallet,
+      to: encoded.to,
+      data: encoded.data,
+      value: encoded.value,
+    });
+    cleanExecuted.set(step.id, {
+      step,
+      receipt,
+      resolvedAmount: resolved,
+      sharesDelta: preShares === null ? null : (await shares()) - preShares,
+    });
+  }
+
+  async function reserveRatesOf(
+    sym: "weETH" | "WETH",
+  ): Promise<{ liquidity: bigint; borrow: bigint }> {
+    const rd = await read<
+      readonly [bigint, bigint, bigint, bigint, bigint, bigint, bigint, bigint, bigint, bigint, bigint, number]
+    >({
+      address: dataProvider,
+      abi: ABI.data,
+      functionName: "getReserveData",
+      fnArgs: [cleanSnapshot.reserves[sym].underlying],
+    });
+    return { liquidity: rd[5], borrow: rd[6] };
+  }
+
+  beforeAll(async () => {
+    // Re-fork at the pin so this run starts from clean fixture state. Identity is re-verified
+    // by hash: a reset that silently landed elsewhere would measure every assertion below
+    // against the wrong history.
+    await rpc("anvil_reset", [{ forking: { blockNumber: Number(PINNED_BLOCK) } }]);
+    const pinned = await rpc<{ hash?: string } | null>("eth_getBlockByNumber", [
+      hexQuantity(PINNED_BLOCK),
+      false,
+    ]);
+    if (pinned === null || pinned.hash !== readsMeta.pinned_block.hash) {
+      throw new Error(
+        `fork identity mismatch after reset at ${PINNED_BLOCK}: ${pinned?.hash ?? "null"}`,
+      );
+    }
+
+    client = createPublicClient({
+      chain: mainnet,
+      transport: http(ANVIL_URL, { timeout: 120_000 }),
+    }) as unknown as PublicClient;
+    dataProvider = getAddress(
+      (readsMeta as unknown as { pool_data_provider: string }).pool_data_provider,
+    );
+    // A different empty EOA from the run above, verified code-free for the same EIP-7702
+    // reason documented there.
+    cleanWallet = getAddress("0x2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c");
+    const code = await rpc<string>("eth_getCode", [cleanWallet, "latest"]);
+    if (code !== "0x") {
+      throw new Error(`clean wallet ${cleanWallet} unexpectedly has code — pick an empty EOA`);
+    }
+    await rpc("anvil_setBalance", [cleanWallet, hexQuantity(100_000n * 10n ** 18n)]);
+    await rpc("anvil_impersonateAccount", [cleanWallet]);
+
+    cleanSnapshot = await captureChainSnapshot(client, {
+      user: cleanWallet,
+      blockNumber: PINNED_BLOCK,
+      expectBlockHash: readsMeta.pinned_block.hash as `0x${string}`,
+    });
+    const built = buildPlan(flagshipGraph(INPUT_ETH, BORROW_BPS), cleanSnapshot);
+    if (!built.ok) throw new Error(`clean plan failed: ${JSON.stringify(built.errors)}`);
+    cleanPlan = built;
+    cleanLedger = riskLedger(flagshipGraph(INPUT_ETH, BORROW_BPS), cleanSnapshot);
+    expect(cleanPlan.steps).toHaveLength(13);
+    expect(cleanLedger.ok).toBe(true);
+  });
+
+  it("matches EVERY ledger checkpoint against getUserAccountData, step by step", async () => {
+    const finalStepOf = (cp: RiskCheckpoint): string =>
+      cp.cause === "supply" ? `${cp.blockId}:supply` : `${cp.blockId}:borrow`;
+    const checkpointByStep = new Map(cleanLedger.checkpoints.map((cp) => [finalStepOf(cp), cp]));
+    expect([...checkpointByStep.keys()]).toEqual([
+      "supply1:supply",
+      "borrow:borrow",
+      "supply2:supply",
+    ]);
+
+    let compared = 0;
+    for (const step of cleanPlan.steps) {
+      await executeClean(step);
+
+      // Finding 1's end-to-end evidence: read the rate the protocol WROTE, at the moment the
+      // action wrote it, so the prediction can be checked against it below.
+      if (step.id === "borrow:borrow") actualBorrowRateRay = (await reserveRatesOf("WETH")).borrow;
+      if (step.id === "supply2:supply") {
+        actualLiquidityRateRay = (await reserveRatesOf("weETH")).liquidity;
+      }
+
+      const checkpoint = checkpointByStep.get(step.id);
+      if (checkpoint === undefined) continue;
+      const chainHf = (
+        await read<readonly [bigint, bigint, bigint, bigint, bigint, bigint]>({
+          address: cleanSnapshot.pool,
+          abi: ABI.pool,
+          functionName: "getUserAccountData",
+          fnArgs: [cleanWallet],
+        })
+      )[5];
+      const ours = hfWadValue(checkpoint.healthFactor);
+      if (ours === null) throw new Error(`${step.id}: ledger health factor is unknown`);
+      if (checkpoint.healthFactor.status === "no-debt") {
+        expect(chainHf, `${step.id}: no-debt sentinel`).toBe(MAX_UINT256);
+      } else {
+        expect(
+          relWithin(ours, chainHf, LEDGER_HF_REL_POW),
+          `${step.id}: ledger ${ours} vs chain ${chainHf} beyond 1e-6 relative`,
+        ).toBe(true);
+      }
+      record(`ledger ${step.id}: ours ${ours} vs chain ${chainHf}`);
+      compared += 1;
+    }
+
+    expect(compared, "every risk-changing checkpoint was compared").toBe(3);
+    expect(cleanExecuted.size).toBe(13);
+
+    // The claim the whole module exists to make, now measured against the chain: the minimum
+    // is DURING execution, and a reading taken afterwards would have missed it.
+    const min = cleanLedger.min;
+    const final = cleanLedger.final;
+    if (min === null || final === null) throw new Error("ledger produced no checkpoints");
+    expect(min.blockId).toBe("borrow");
+    expect(final.blockId).toBe("supply2");
+    expect(hfWadValue(min.healthFactor)!).toBeLessThan(hfWadValue(final.healthFactor)!);
+  });
+  /**
+   * The WETH borrow leg, compared at the borrow transaction's OWN block timestamp — and
+   * therefore compared EXACTLY.
+   *
+   * Why exact is available here: nothing between the pinned block and this transaction
+   * touches the WETH reserve. The only Aave writes before it are `setUserEMode` (which
+   * writes no reserve state) and the weETH supply. So the state the protocol fed its own
+   * strategy — scaled debt, borrow index, last-update timestamp, virtual balance, deficit,
+   * reserve factor, strategy params — IS the pinned snapshot's state. Re-running the model
+   * at the transaction's timestamp is not an approximation of the protocol's arithmetic; it
+   * is the protocol's arithmetic, so the bound is equality and there is no residual to cover.
+   *
+   * This replaces a relative bound that could not do the job. At 1e-6 relative the stale
+   * stored-index model this suite exists to rule out sits ~149× INSIDE the bound
+   * (6.7e-9 relative at the pin, and never worse than ~4e-8 at any plausible block), so the
+   * old assertion passed whether or not the debt input was accrued. The negative control
+   * below pins that fact rather than leaving it as a claim.
+   */
+  it("reproduces the WETH post-action borrow rate EXACTLY at the borrow's own timestamp", async () => {
+    if (actualBorrowRateRay === null) throw new Error("the execution test must run first");
+    const borrow = cleanExecuted.get("borrow:borrow");
+    if (borrow === undefined || borrow.resolvedAmount === null) {
+      throw new Error("the borrow step did not execute");
+    }
+    const borrowWei = borrow.resolvedAmount;
+    const block = await rpc<{ timestamp?: string } | null>("eth_getBlockByNumber", [
+      hexQuantity(borrow.receipt.blockNumber),
+      false,
+    ]);
+    if (block === null || typeof block.timestamp !== "string") {
+      throw new Error(`could not read the timestamp of block ${borrow.receipt.blockNumber}`);
+    }
+    const borrowTs = BigInt(block.timestamp);
+    expect(borrowTs).toBeGreaterThanOrEqual(cleanSnapshot.blockTimestamp);
+
+    const W = cleanSnapshot.reserves.WETH;
+    const rateOver = (totalDebtWei: bigint): bigint =>
+      currentRatesRay({
+        strategy: W.rateStrategy.value,
+        reserveFactorBps: W.reserveFactorBps.value,
+        totalDebtWei,
+        virtualUnderlyingBalance: W.virtualUnderlyingBalance.value,
+        liquidityAddedWei: 0n,
+        liquidityTakenWei: borrowWei,
+        deficitWei: W.deficit.value,
+      }).variableBorrowRateRay;
+
+    // The corrected model: accrue the index to THIS block, mint the borrow's scaled debt at
+    // that index with the protocol's ceiling rounding, total at the same index.
+    const nextIndex = accruedVariableBorrowIndexRay(
+      W.variableBorrowRateRay.value,
+      W.variableBorrowIndexRay.value,
+      W.lastUpdateTimestamp.value,
+      borrowTs,
+    );
+    const correctedRay = rateOver(
+      rayMulCeil(W.variableDebtScaledTotalSupply.value + rayDivCeil(borrowWei, nextIndex), nextIndex),
+    );
+
+    record(
+      `matched-timestamp WETH borrow rate @ ts ${borrowTs}: model ${correctedRay} vs chain ${actualBorrowRateRay}`,
+    );
+    expect(
+      correctedRay,
+      `matched-timestamp borrow rate: model ${correctedRay} vs chain ${actualBorrowRateRay}`,
+    ).toBe(actualBorrowRateRay);
+
+    // ————— negative control: the stale stored-index model must FAIL this comparison —————
+    const staleRay = rateOver(
+      vTokenBalance(W.variableDebtScaledTotalSupply.value, W.variableBorrowIndexRay.value) +
+        borrowWei,
+    );
+    expect(staleRay).not.toBe(actualBorrowRateRay);
+    expect(staleRay).toBeLessThan(actualBorrowRateRay);
+    // The understatement is monotone in elapsed time, so the pinned-block delta is its floor
+    // — this is Codex finding 1's own number, asserted as a lower bound.
+    const staleDelta = actualBorrowRateRay - staleRay;
+    expect(staleDelta).toBeGreaterThanOrEqual(143_098_107_621_621_733n);
+    record(`stale stored-index model understates the borrow rate by ${staleDelta} ray`);
+
+    // And the reason this test had to be tightened: the previous relative bound ACCEPTS the
+    // stale model. Pinning that keeps the bound from being loosened back.
+    expect(
+      relWithin(rayAprToApyWad(staleRay), rayAprToApyWad(actualBorrowRateRay), RATE_REL_POW),
+      "a 1e-6 relative APY bound cannot discriminate the stale model — hence the exact check above",
+    ).toBe(true);
+
+    // core/risk.ts must implement exactly that model: same snapshot, timestamp moved to the
+    // borrow's block, and its published APY is the conversion of the rate just proven.
+    const atBorrowBlock = simulate(flagshipGraph(INPUT_ETH, BORROW_BPS), {
+      ...cleanSnapshot,
+      blockTimestamp: borrowTs,
+    });
+    const publishedApy = atBorrowBlock.blockValues["borrow"]?.apyWad;
+    if (publishedApy === null || publishedApy === undefined) {
+      throw new Error("borrow APY was not predicted");
+    }
+    expect(publishedApy.value).toBe(rayAprToApyWad(actualBorrowRateRay));
+  });
+
+  /**
+   * The weETH supply leg keeps a relative bound, and unlike the borrow leg it is entitled to
+   * one: the protocol wrote this reserve's rate TWICE (once per supply), accruing the index
+   * in two steps at two different rates, while `core/risk.ts` makes a single post-action
+   * claim about the finished position. That difference is real and is what the bound covers
+   * — it is ~1e-8 relative here, two orders inside 1e-6.
+   *
+   * The bound is still discriminating for this leg, which is why it survives: the stale
+   * stored-index model is 3.7e-6 relative away (weETH's index is 3h16m stale at the pin,
+   * against WETH's 60s), i.e. OUTSIDE it. The negative control asserts that directly.
+   */
+  it("predicts the weETH post-action supply rate the protocol wrote, and rejects the stale model", () => {
+    if (actualLiquidityRateRay === null || actualBorrowRateRay === null) {
+      throw new Error("the execution test must run first");
+    }
+    const result = simulate(flagshipGraph(INPUT_ETH, BORROW_BPS), cleanSnapshot);
+    const predictedSupply = result.blockValues["supply1"]?.apyWad;
+    if (predictedSupply === null || predictedSupply === undefined) {
+      throw new Error("supply APY was not predicted");
+    }
+
+    // Both legs moved in the direction their action implies, against the pre-action rates.
+    expect(actualBorrowRateRay).toBeGreaterThan(
+      cleanSnapshot.reserves.WETH.variableBorrowRateRay.value,
+    );
+    expect(actualLiquidityRateRay).toBeLessThan(
+      cleanSnapshot.reserves.weETH.liquidityRateRay.value,
+    );
+
+    const chainApy = rayAprToApyWad(actualLiquidityRateRay);
+    record(
+      `post-action weETH liquidity: predicted APY ${predictedSupply.value} vs chain APY ${chainApy} (ray ${actualLiquidityRateRay})`,
+    );
+    expect(
+      relWithin(predictedSupply.value, chainApy, RATE_REL_POW),
+      `supply APY: predicted ${predictedSupply.value} vs chain ${chainApy}`,
+    ).toBe(true);
+
+    // Negative control: the stale stored-index debt input lands OUTSIDE the same bound.
+    const E = cleanSnapshot.reserves.weETH;
+    const suppliedTotal = cleanPlan.flows
+      .filter((f) => f.type === "lend")
+      .reduce((total, f) => total + f.inputWei!.value, 0n);
+    const staleSupplyRay = currentRatesRay({
+      strategy: E.rateStrategy.value,
+      reserveFactorBps: E.reserveFactorBps.value,
+      totalDebtWei: vTokenBalance(
+        E.variableDebtScaledTotalSupply.value,
+        E.variableBorrowIndexRay.value,
+      ),
+      virtualUnderlyingBalance: E.virtualUnderlyingBalance.value,
+      liquidityAddedWei: suppliedTotal,
+      liquidityTakenWei: 0n,
+      deficitWei: E.deficit.value,
+    }).liquidityRateRay;
+    record(`stale stored-index weETH supply rate: ${staleSupplyRay} vs chain ${actualLiquidityRateRay}`);
+    expect(
+      relWithin(rayAprToApyWad(staleSupplyRay), chainApy, RATE_REL_POW),
+      `the stale model must fail this bound: stale ${staleSupplyRay} vs chain ${actualLiquidityRateRay}`,
+    ).toBe(false);
   });
 });

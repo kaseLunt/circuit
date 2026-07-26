@@ -45,6 +45,7 @@ const ABI = {
     "function getEModeCategoryBorrowableBitmap(uint8) view returns (uint128)",
     "function getIsEModeCategoryIsolated(uint8) view returns (bool)",
     "function getEModeCategoryLtvzeroBitmap(uint8) view returns (uint128)",
+    "function getReserveDeficit(address) view returns (uint256)",
   ]),
   data: parseAbi([
     "function getReserveConfigurationData(address) view returns (uint256 decimals, uint256 ltv, uint256 liquidationThreshold, uint256 liquidationBonus, uint256 reserveFactor, bool usageAsCollateralEnabled, bool borrowingEnabled, bool stableBorrowRateEnabled, bool isActive, bool isFrozen)",
@@ -53,6 +54,10 @@ const ABI = {
     "function getReserveTokensAddresses(address) view returns (address aTokenAddress, address stableDebtTokenAddress, address variableDebtTokenAddress)",
     "function getReserveData(address) view returns (uint256 unbacked, uint256 accruedToTreasuryScaled, uint256 totalAToken, uint256 totalStableDebt, uint256 totalVariableDebt, uint256 liquidityRate, uint256 variableBorrowRate, uint256 stableBorrowRate, uint256 averageStableBorrowRate, uint256 liquidityIndex, uint256 variableBorrowIndex, uint40 lastUpdateTimestamp)",
     "function getVirtualUnderlyingBalance(address) view returns (uint128)",
+    "function getInterestRateStrategyAddress(address) view returns (address)",
+  ]),
+  strategy: parseAbi([
+    "function getInterestRateDataBps(address) view returns ((uint16 optimalUsageRatio, uint32 baseVariableBorrowRate, uint32 variableRateSlope1, uint32 variableRateSlope2))",
   ]),
   oracle: parseAbi(["function getAssetPrice(address) view returns (uint256)"]),
   scaled: parseAbi(["function scaledTotalSupply() view returns (uint256)"]),
@@ -98,33 +103,40 @@ async function captureReserve(
   underlying: Address,
   dataProvider: Address,
   oracle: Address,
+  pool: Address,
   reservesList: readonly Address[],
 ): Promise<ReserveSnapshot> {
   const { client, blockNumber, mint } = ctx;
   const reserveIndex = reservesList.findIndex((a) => getAddress(a) === underlying);
   if (reserveIndex < 0) throw new Error(`${sym} is not in Pool.getReservesList`);
 
-  const [config, caps, paused, tokens, reserveData, virtualBalance] = await client.multicall({
-    allowFailure: false,
-    blockNumber,
-    contracts: [
-      { address: dataProvider, abi: ABI.data, functionName: "getReserveConfigurationData", args: [underlying] },
-      { address: dataProvider, abi: ABI.data, functionName: "getReserveCaps", args: [underlying] },
-      { address: dataProvider, abi: ABI.data, functionName: "getPaused", args: [underlying] },
-      { address: dataProvider, abi: ABI.data, functionName: "getReserveTokensAddresses", args: [underlying] },
-      { address: dataProvider, abi: ABI.data, functionName: "getReserveData", args: [underlying] },
-      { address: dataProvider, abi: ABI.data, functionName: "getVirtualUnderlyingBalance", args: [underlying] },
-    ],
-  });
+  const [config, caps, paused, tokens, reserveData, virtualBalance, strategyAddress, deficit] =
+    await client.multicall({
+      allowFailure: false,
+      blockNumber,
+      contracts: [
+        { address: dataProvider, abi: ABI.data, functionName: "getReserveConfigurationData", args: [underlying] },
+        { address: dataProvider, abi: ABI.data, functionName: "getReserveCaps", args: [underlying] },
+        { address: dataProvider, abi: ABI.data, functionName: "getPaused", args: [underlying] },
+        { address: dataProvider, abi: ABI.data, functionName: "getReserveTokensAddresses", args: [underlying] },
+        { address: dataProvider, abi: ABI.data, functionName: "getReserveData", args: [underlying] },
+        { address: dataProvider, abi: ABI.data, functionName: "getVirtualUnderlyingBalance", args: [underlying] },
+        { address: dataProvider, abi: ABI.data, functionName: "getInterestRateStrategyAddress", args: [underlying] },
+        { address: pool, abi: ABI.pool, functionName: "getReserveDeficit", args: [underlying] },
+      ],
+    });
   const aToken = getAddress(tokens[0]);
   const variableDebtToken = getAddress(tokens[2]);
-  const [aScaled, vScaled, price] = await client.multicall({
+  const [aScaled, vScaled, price, rateData] = await client.multicall({
     allowFailure: false,
     blockNumber,
     contracts: [
       { address: aToken, abi: ABI.scaled, functionName: "scaledTotalSupply" },
       { address: variableDebtToken, abi: ABI.scaled, functionName: "scaledTotalSupply" },
       { address: oracle, abi: ABI.oracle, functionName: "getAssetPrice", args: [underlying] },
+      // The strategy ADDRESS is read (above), never assumed — two reserves sharing one
+      // strategy contract is an observation about this market, not a fact to hard-code.
+      { address: getAddress(strategyAddress), abi: ABI.strategy, functionName: "getInterestRateDataBps", args: [underlying] },
     ],
   });
 
@@ -161,6 +173,20 @@ async function captureReserve(
     lastUpdateTimestamp: mint.observe(BigInt(reserveData[11]), `${sym}.getReserveData.lastUpdateTimestamp`),
     virtualUnderlyingBalance: mint.observe(virtualBalance, `${sym}.getVirtualUnderlyingBalance`),
     priceBase: mint.observe(price, `Oracle.getAssetPrice(${sym})`),
+    rateStrategy: mint.observe(
+      {
+        optimalUsageRatio: rateData.optimalUsageRatio,
+        baseVariableBorrowRate: rateData.baseVariableBorrowRate,
+        variableRateSlope1: rateData.variableRateSlope1,
+        variableRateSlope2: rateData.variableRateSlope2,
+      },
+      `${sym}.strategy.getInterestRateDataBps`,
+    ),
+    reserveFactorBps: mint.observe(
+      Number(config[4]),
+      `${sym}.getReserveConfigurationData.reserveFactor`,
+    ),
+    deficit: mint.observe(deficit, `${sym}.getReserveDeficit`),
   };
 }
 
@@ -308,8 +334,8 @@ export async function captureChainSnapshot(
   ).map((a) => getAddress(a));
 
   const [weETHReserve, wethReserve, eModeCategories] = await Promise.all([
-    captureReserve(ctx, "weETH", weETH, getAddress(dataProvider), getAddress(oracle), reservesList),
-    captureReserve(ctx, "WETH", WETH, getAddress(dataProvider), getAddress(oracle), reservesList),
+    captureReserve(ctx, "weETH", weETH, getAddress(dataProvider), getAddress(oracle), getAddress(pool), reservesList),
+    captureReserve(ctx, "WETH", WETH, getAddress(dataProvider), getAddress(oracle), getAddress(pool), reservesList),
     Promise.all(
       RECORDED_EMODE_CATEGORY_IDS.map((id) => captureEModeCategory(ctx, getAddress(pool), id)),
     ),

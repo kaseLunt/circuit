@@ -39,9 +39,11 @@ export type BlockState = "valid" | "warning" | "error" | "executing";
  * once for the whole document instead of once per block per render.
  *
  * `minHealthFactor` is wrapped because SPEC §3 step 2 admits `Provenanced<T> | null`
- * and nothing else. `SimulationResult.minHealthFactor` is a bare `HealthFactor`, so the
- * wrapper must be minted at the derivation site (core/risk.ts) — never here and never
- * in the canvas adapter, which observes nothing.
+ * and nothing else. The wrapper arrives already minted from `core/risk.ts`, the site that
+ * derives the health factor — never from here and never from the canvas adapter, which
+ * observes nothing. Here `null` means "no simulation at all", a different fact from
+ * `{ status: "unknown" }`, which is why this field keeps its `| null` and
+ * `SimulationResult.minHealthFactor` does not.
  */
 export interface BlockRuntime {
   /**

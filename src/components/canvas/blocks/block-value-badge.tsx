@@ -218,7 +218,7 @@ export function BlockValueZone({
               label={`${subject} gas cost`}
               chars={BASE_SLOT_CHARS}
               format={formatUsdBase}
-              unavailableReason="gas unavailable"
+              unavailableReason="not quoted"
               className={slotClassName(gasCostBase !== null, pending, SECONDARY_RAMP)}
             />
           </span>

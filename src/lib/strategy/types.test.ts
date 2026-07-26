@@ -9,7 +9,7 @@ import {
   type StrategyGraph,
 } from "../../core/graph";
 import { riskState, type HealthFactor, type RiskState } from "../../core/health-factor";
-import { entered } from "../../core/provenance";
+import { derived, entered, valueOf } from "../../core/provenance";
 import {
   FULL_ALLOCATION_BPS,
   type AssetType,
@@ -78,8 +78,18 @@ const simulation: SimulationResult = {
   netApyWad: entered(41_000_000_000_000_000n),
   initialAmountWei: entered(1_000_000_000_000_000_000n),
   gasCostBase: entered(1_234_567_890n),
-  minHealthFactor: { status: "healthy", hfWad: 1_420_000_000_000_000_000n },
-  finalHealthFactor: { status: "healthy", hfWad: 1_500_000_000_000_000_000n },
+  // Wrapped, as core/risk.ts mints them: the health factor is a derived quantity and
+  // reaches the display layer with its provenance attached like every other number.
+  minHealthFactor: derived<HealthFactor>(
+    { status: "healthy", hfWad: 1_420_000_000_000_000_000n },
+    "wadDiv(Σ base·lt, totalDebtBase) / 1e4",
+    [],
+  ),
+  finalHealthFactor: derived<HealthFactor>(
+    { status: "healthy", hfWad: 1_500_000_000_000_000_000n },
+    "wadDiv(Σ base·lt, totalDebtBase) / 1e4",
+    [],
+  ),
   liquidationRatioWad: entered(880_000_000_000_000_000n),
   leverageWad: entered(1_500_000_000_000_000_000n),
   yieldSources: [
@@ -410,8 +420,8 @@ describe("simulation results (manifest L156-168)", () => {
   });
 
   it("derives risk from the health factor instead of storing a second scale", () => {
-    const min: RiskState = riskState(simulation.minHealthFactor);
-    const final: RiskState = riskState(simulation.finalHealthFactor);
+    const min: RiskState = riskState(valueOf(simulation.minHealthFactor));
+    const final: RiskState = riskState(valueOf(simulation.finalHealthFactor));
     const unresolved: HealthFactor = { status: "unknown", reason: "no snapshot" };
     // A `number | null` healthFactor collapses this third state into a number.
     expect([min, final, riskState(unresolved)]).toEqual(["warning", "ok", "unknown"]);

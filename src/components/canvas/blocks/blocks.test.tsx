@@ -9,14 +9,26 @@ import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { ReactFlowProvider } from "@xyflow/react";
 import type { ReactNode } from "react";
 import { WAD, formatHealthFactor } from "../../../core/format";
-import { HF_WARN_WAD, type HealthFactor } from "../../../core/health-factor";
+import {
+  HF_WARN_WAD,
+  computeHealthFactor,
+  hfWadValue,
+  usdBase,
+  type HealthFactor,
+} from "../../../core/health-factor";
+import { buildPlan, effectiveLiquidationThresholdBps } from "../../../core/plan";
+import { simulate } from "../../../core/risk";
 import {
   derived,
   entered,
   observationMinter,
+  valueOf,
   type Derived,
   type Provenanced,
 } from "../../../core/provenance";
+import { PINNED_BLOCK } from "../../../../tests/helpers/protocol-reads";
+import { flagshipGraph } from "../../../../tests/helpers/graphs";
+import { fixtureSnapshot } from "../../../../tests/helpers/chain-snapshot";
 import type {
   AutoWrapBlockData,
   BlockData,
@@ -808,6 +820,71 @@ describe("BorrowBlock — risk thresholds come from core/health-factor.ts", () =
     const sentence = "Liquidation level unavailable.";
     expect(text.split(sentence).length - 1).toBe(1);
   });
+
+  /**
+   * Displayed parity (SPEC §3 step 3): the block renders the health factor `core/risk.ts`
+   * computed over the pinned reads log, and the expectation is computed from core too —
+   * `computeHealthFactor` over legs this test assembles itself. No digit is typed on either
+   * side, so the assertion is that the canvas shows core's number rather than that two
+   * literals agree.
+   */
+  it("renders the block-pinned minimum health factor core derived, digit for digit", () => {
+    const snapshot = fixtureSnapshot();
+    const result = simulate(flagshipGraph("10", 7000), snapshot);
+    const plan = buildPlan(flagshipGraph("10", 7000), snapshot);
+    if (!plan.ok) throw new Error("fixture plan failed");
+    const category =
+      snapshot.eModeCategories.find((c) => c.id === plan.targetEModeCategoryId) ?? null;
+    const weETH = snapshot.reserves.weETH;
+    const firstSupplyWei = plan.flows.find((f) => f.type === "lend")!.inputWei!.value;
+    const borrowWei = plan.flows.find((f) => f.type === "borrow")!.outputWei!.value;
+    const expected = formatHealthFactor(
+      hfWadValue(
+        computeHealthFactor(
+          [
+            {
+              base: usdBase(firstSupplyWei, weETH.priceBase.value),
+              ltBps: effectiveLiquidationThresholdBps(weETH, category),
+            },
+          ],
+          usdBase(borrowWei, snapshot.reserves.WETH.priceBase.value),
+        ),
+      ),
+    );
+
+    mount(
+      <BorrowBlock {...nodeProps("borrow1", "borrow", borrowData)} />,
+      borrowRuntime({
+        blockValues: { borrow1: { ...RESOLVED_VALUE, inputAsset: "weETH" } },
+        minHealthFactor: result.minHealthFactor,
+        liquidationRatioWad: result.liquidationRatioWad,
+      }),
+    );
+
+    const slot = screen.getByRole("button", { name: expected });
+    expect(slot).not.toBeNull();
+    // Below the 1.50 threshold, so the block escalates to its warning state and the figure
+    // takes the warning ramp — the §3 step-3 beat, asserted end to end.
+    expect(slot.className).toContain("text-warning");
+    expect(screen.getByRole("group").getAttribute("data-block-state")).toBe("warning");
+  });
+
+  it("cites the oracle read behind that health factor when the slot is opened (S-1)", () => {
+    const result = simulate(flagshipGraph("10", 7000), fixtureSnapshot());
+    mount(
+      <BorrowBlock {...nodeProps("borrow1", "borrow", borrowData)} />,
+      borrowRuntime({ minHealthFactor: result.minHealthFactor }),
+    );
+    const slot = screen.getByRole("button", {
+      name: formatHealthFactor(hfWadValue(valueOf(result.minHealthFactor))),
+    });
+    fireEvent.focus(slot);
+    const trail = screen.getByRole("tooltip").textContent ?? "";
+    expect(trail).toContain("Oracle.getAssetPrice(weETH)");
+    expect(trail).toContain(`@ block ${PINNED_BLOCK}`);
+    // The regime is inspectable, not scripted copy: the trail says WHY 9500 applied.
+    expect(trail).toContain("eMode1.collateralConfig.liquidationThreshold");
+  });
 });
 
 /** Every block, mounted once, so a contract can be asserted family-wide. */
@@ -834,7 +911,7 @@ describe("the network-dead probe — every value slot lands in a designed state"
     const text = container.textContent ?? "";
     expect(text).toContain("amount unavailable");
     expect(text).toContain("value unavailable");
-    expect(text).toContain("gas unavailable");
+    expect(text).toContain("not quoted");
     expect(text).toContain("rate unavailable");
     expect(text).toContain("health factor unavailable");
     expect(text).toContain("Liquidation level unavailable");

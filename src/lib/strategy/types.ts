@@ -21,8 +21,17 @@
  * `SimulationResult` below is written to avoid.
  */
 import type { Node, Edge } from "@xyflow/react";
-import type { HealthFactor } from "../../core/health-factor";
-import type { Provenanced } from "../../core/provenance";
+
+/**
+ * The simulation contract now lives in `core/risk.ts`, where it is finance math and where
+ * every one of its quantities is derived and provenanced. It is re-exported here so no
+ * consumer import path churned.
+ *
+ * The dependency must run `types.ts → core/`, never back: this module imports
+ * `@xyflow/react`'s `Node`/`Edge`, and a `core/` module reaching in for the contract would
+ * put a React Flow type dependency behind the purity line SPEC §4 draws.
+ */
+export type { SimulationResult, ComputedBlockValue, YieldSource } from "../../core/risk";
 
 export type BlockType = "input" | "stake" | "lend" | "borrow" | "swap" | "auto-wrap";
 
@@ -182,72 +191,6 @@ export interface Strategy {
    * localStorage and the share URL. */
   createdAt: number;
   updatedAt: number;
-}
-
-export interface YieldSource {
-  protocol: string;
-  type: "supply" | "borrow" | "stake";
-  /** Rate as a WAD APY (core/rates.ts rayAprToApyWad), with its provenance. */
-  apyWad: Provenanced<bigint>;
-  /**
-   * Signed weight this source's rate carries in the §5.2 net-APY composition, in
-   * integer bps: collateral-side sources carry (1 + b) — FULL_ALLOCATION_BPS plus
-   * the borrow block's allocationBps — and the debt source carries −b, so the
-   * weights sum to FULL_ALLOCATION_BPS. A multi-leg collateral rate splits its
-   * (1 + b) across legs in proportion to each leg's WAD rate, preserving the sum.
-   *
-   * The predecessor's field (`weight`, commented only "Contribution to total")
-   * declared no unit and its sole consumer is a rewrite, so no conversion from it
-   * is claimed: this is a new contract. Not a 0–1 fraction, not a percent, and
-   * never re-normalized by the display layer.
-   */
-  weightBps: number;
-}
-
-/**
- * Provisional home for the simulation contract: it belongs in core/simulation.ts
- * (P2) since it is finance math. Every quantity is core's representation so the
- * display layer can only render it through core/format.ts. No stored risk
- * classification exists — a consumer calls core's riskState(minHealthFactor),
- * so there is exactly one risk derivation and no scale that can drift from it.
- */
-export interface SimulationResult {
-  isValid: boolean;
-  errorMessage?: string;
-  /** Collateral-side APY, staking ∘ supply compounded (§5.2 r_coll), WAD. */
-  grossApyWad: Provenanced<bigint> | null;
-  /** (1+b)·(1+r_coll) − b·(1+r_debt) − 1 (§5.2), WAD, current-rate run-rate. */
-  netApyWad: Provenanced<bigint> | null;
-  /** Equity entering the strategy (§5.2 E), wei. */
-  initialAmountWei: Provenanced<bigint> | null;
-  /** Oracle base-currency (8-dec) units — §5.3 bans a non-oracle USD here. */
-  gasCostBase: Provenanced<bigint> | null;
-  /** Minimum HF across the plan — the gating quantity borrow blocks show (§5.4). */
-  minHealthFactor: HealthFactor;
-  finalHealthFactor: HealthFactor;
-  /** Collateral/debt oracle ratio at liquidation, WAD. A correlated pair has no
-   * honest USD liquidation price (§5.4). */
-  liquidationRatioWad: Provenanced<bigint> | null;
-  /** Collateral exposure ÷ equity after the closed iteration, WAD. */
-  leverageWad: Provenanced<bigint> | null;
-  /**
-   * Populated only when every leg's rate resolved: a missing rate makes
-   * netApyWad null and this list empty, never a partial breakdown that reads as
-   * a complete one.
-   */
-  yieldSources: readonly YieldSource[];
-  blockValues: Readonly<Record<string, ComputedBlockValue>>;
-}
-
-export interface ComputedBlockValue {
-  inputAsset: AssetType | null;
-  inputAmountWei: Provenanced<bigint> | null;
-  inputValueBase: Provenanced<bigint> | null;
-  outputAsset: AssetType | null;
-  outputAmountWei: Provenanced<bigint> | null;
-  outputValueBase: Provenanced<bigint> | null;
-  gasCostBase: Provenanced<bigint> | null;
-  apyWad: Provenanced<bigint> | null;
 }
 
 export interface SavedSystem {

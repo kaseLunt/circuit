@@ -15,10 +15,15 @@ import {
   useComposerStoreApi,
 } from "../../app/store/composer-provider";
 import { createComposerStore } from "../../app/store/composer-store";
-import { WAD } from "../../core/format";
-import { derived, entered, observationMinter } from "../../core/provenance";
+import { WAD, formatHealthFactor } from "../../core/format";
+import { HF_WARN_WAD, hfWadValue, type HealthFactor } from "../../core/health-factor";
+import { derived, entered, observationMinter, valueOf } from "../../core/provenance";
+import { simulate } from "../../core/risk";
 import { FLAGSHIP_TEMPLATE_ID } from "../../lib/strategy/templates";
 import type { SimulationResult } from "../../lib/strategy/types";
+import { PINNED_BLOCK } from "../../../tests/helpers/protocol-reads";
+import { flagshipGraph } from "../../../tests/helpers/graphs";
+import { fixtureSnapshot } from "../../../tests/helpers/chain-snapshot";
 
 afterEach(cleanup);
 
@@ -31,6 +36,10 @@ const supplyRate = minter.observe(
 /** bps → WAD fraction: 485 bps == 4.85% == 0.0485e18. */
 const wadPct = (bps: number): bigint => (WAD * BigInt(bps)) / 10_000n;
 
+/** The health factor arrives wrapped, exactly as core/risk.ts mints it. */
+const hf = (value: HealthFactor) =>
+  derived(value, "wadDiv(Σ base·lt, totalDebtBase) / 1e4", [supplyRate]);
+
 function simulation(overrides: Partial<SimulationResult> = {}): SimulationResult {
   return {
     isValid: true,
@@ -41,8 +50,8 @@ function simulation(overrides: Partial<SimulationResult> = {}): SimulationResult
     // Above HF_WARN_WAD (1.50) on purpose: the no-override fixture is the nominal safe
     // case, and every warning assertion below states its own health factor. A default
     // sitting inside the warning band would let a colour test pass for the wrong reason.
-    minHealthFactor: { status: "healthy", hfWad: (WAD * 185n) / 100n },
-    finalHealthFactor: { status: "healthy", hfWad: (WAD * 192n) / 100n },
+    minHealthFactor: hf({ status: "healthy", hfWad: (WAD * 185n) / 100n }),
+    finalHealthFactor: hf({ status: "healthy", hfWad: (WAD * 192n) / 100n }),
     liquidationRatioWad: derived(
       (WAD * 8_235n) / 10_000n,
       "debtWei * 1e4 * WAD / (collWei * ltBps)",
@@ -111,7 +120,7 @@ describe("SimulationPanel — designed states", () => {
   it("flips to the warning colour and announces the crossing exactly once", () => {
     const { container } = render(
       <SimulationPanel
-        result={simulation({ minHealthFactor: { status: "healthy", hfWad: (WAD * 120n) / 100n } })}
+        result={simulation({ minHealthFactor: hf({ status: "healthy", hfWad: (WAD * 120n) / 100n }) })}
         pending={false}
       />,
     );
@@ -140,7 +149,7 @@ describe("SimulationPanel — designed states", () => {
     const { container } = render(
       <SimulationPanel
         result={simulation({
-          minHealthFactor: { status: "unknown", reason: "missing collateral or debt snapshot" },
+          minHealthFactor: hf({ status: "unknown", reason: "missing collateral or debt snapshot" }),
           liquidationRatioWad: null,
         })}
         pending={false}
@@ -166,8 +175,8 @@ describe("SimulationPanel — designed states", () => {
     const { container } = render(
       <SimulationPanel
         result={simulation({
-          minHealthFactor: { status: "no-debt" },
-          finalHealthFactor: { status: "no-debt" },
+          minHealthFactor: hf({ status: "no-debt" }),
+          finalHealthFactor: hf({ status: "no-debt" }),
           liquidationRatioWad: null,
         })}
         pending={false}
@@ -186,6 +195,83 @@ describe("SimulationPanel — designed states", () => {
     expect(screen.getByRole("button", { name: "2.65%" })).not.toBeNull();
     expect(screen.getByText("170.00%")).not.toBeNull();
     expect(screen.getByText("-70.00%")).not.toBeNull();
+  });
+
+  /**
+   * Panel parity (SPEC §3 step 3), and the closure of taste finding S-1: the hero renders
+   * the health factor `core/risk.ts` derived over the pinned reads log, and it renders it
+   * through `SourcedValue`, so the number can be interrogated back to the oracle read that
+   * produced it. Nothing here is a typed digit.
+   */
+  it("renders the block-pinned health factor core derived, and cites its source", () => {
+    const result = simulate(flagshipGraph("10", 7000), fixtureSnapshot());
+    const expected = formatHealthFactor(hfWadValue(valueOf(result.minHealthFactor)));
+    const { container } = render(<SimulationPanel result={result} pending={false} />);
+
+    const hero = screen.getByRole("button", { name: expected });
+    expect(hero.className).toContain("text-2xl");
+    expect(hero.className).toContain("font-semibold");
+    expect(hero.className).toContain("text-warning");
+    expect(container.querySelector(".status-dot-warning")).not.toBeNull();
+
+    const announcement = container.querySelector('[role="status"]')?.textContent ?? "";
+    expect(announcement).toBe(
+      `Minimum health factor ${expected} — below the ${formatHealthFactor(HF_WARN_WAD)} warning threshold.`,
+    );
+
+    fireEvent.focus(hero);
+    const trail = screen.getByRole("tooltip").textContent ?? "";
+    expect(trail).toContain("Oracle.getAssetPrice(weETH)");
+    expect(trail).toContain(`@ block ${PINNED_BLOCK}`);
+  });
+
+  it("renders the final health factor with its provenance too, not as stripped text", () => {
+    const result = simulate(flagshipGraph("10", 7000), fixtureSnapshot());
+    const finalText = formatHealthFactor(hfWadValue(valueOf(result.finalHealthFactor)));
+    render(<SimulationPanel result={result} pending={false} />);
+
+    const row = screen.getByRole("button", { name: finalText });
+    expect(row.className).toContain("text-sm");
+    expect(row.className).toContain("tabular-nums");
+    // It is the row ramp, not the hero's — the final HF is context beside the gating figure.
+    expect(row.className).not.toContain("text-2xl");
+
+    fireEvent.focus(row);
+    const trail = screen.getByRole("tooltip").textContent ?? "";
+    expect(trail).toContain("Health factor after execution");
+    expect(trail).toContain("Oracle.getAssetPrice(weETH)");
+    expect(trail).toContain(`@ block ${PINNED_BLOCK}`);
+  });
+
+  it("keeps the final health factor's non-numeric states as authored prose", () => {
+    render(
+      <SimulationPanel
+        result={simulation({
+          finalHealthFactor: hf({ status: "unknown", reason: "no snapshot" }),
+        })}
+        pending={false}
+      />,
+    );
+    const prose = screen.getByText("unavailable");
+    expect(prose.tagName).toBe("SPAN");
+    expect(prose.className).toContain("text-muted-foreground");
+    expect(screen.queryByRole("button", { name: "unavailable" })).toBeNull();
+  });
+
+  it("says the APY family is unavailable while risk reads fine — the legs are independent", () => {
+    // SPEC §5.1's staking APR needs a trailing window the snapshot does not carry, so §5.2's
+    // composition is empty. The health factor is unaffected and must still render.
+    const result = simulate(flagshipGraph("10", 7000), fixtureSnapshot());
+    const { container } = render(<SimulationPanel result={result} pending={false} />);
+    expect(screen.getByText(/Breakdown unavailable/)).not.toBeNull();
+    expect(screen.getByText("net APY unavailable — a rate did not resolve")).not.toBeNull();
+    expect(
+      screen.getByRole("button", {
+        name: formatHealthFactor(hfWadValue(valueOf(result.minHealthFactor))),
+      }),
+    ).not.toBeNull();
+    expect(container.textContent).not.toContain("NaN");
+    expect(container.textContent).not.toContain("∞");
   });
 
   it("refuses a partial breakdown — an empty list says so in prose", () => {
