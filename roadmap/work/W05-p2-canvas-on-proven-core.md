@@ -3,7 +3,7 @@ id: W05
 type: work
 title: P2 canvas on the proven core — composer transplanted, reskinned, share-URL round-trip
 phase: P2
-status: active
+status: achieved
 evidence_target: spec-3-steps-1-3-and-8-green-in-playwright-on-mock-reads
 priority: 1
 depends_on: [W03]
@@ -59,7 +59,8 @@ deliverables:
   - e2e/demo-script.spec.ts
   - playwright.config.ts
   - .github/workflows/ci.yml
-evidence_receipts: []
+evidence_receipts:
+  - roadmap/evidence/E-W05-p2-canvas-on-proven-core.md
 invalidated_by:
   - SPEC.md
   - TRANSPLANT.md
@@ -72,6 +73,7 @@ invalidated_by:
   - package.json
 review_when: phase:P2:exit
 updated: 2026-07-26
+evidence_fingerprint: sha256:311497289ce13a81c3f4298b78aa2adf71bd131692c50ff615dab46c8a81ee85
 ---
 
 # W05 — P2 canvas on the proven core
