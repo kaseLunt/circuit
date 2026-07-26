@@ -3,7 +3,7 @@ id: W07
 type: work
 title: P3 execution — sandbox session service, the tx UX family, live gating
 phase: P3
-status: candidate
+status: active
 evidence_target: spec-3-steps-4-7-green-in-playwright-against-sandbox-fork
 priority: 1
 depends_on: [W05, W06]

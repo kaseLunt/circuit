@@ -30,7 +30,7 @@ claim the gate is automated unless a validator actually enforces it.
 | W04 | Disposition the P0→P1 boundary review findings | P0 | — | boundary-review-blockers-cleared-and-reconfirmed | achieved |
 | W05 | P2 canvas on the proven core — composer transplanted, reskinned, share-URL round-trip | P2 | W03 | spec-3-steps-1-3-and-8-green-in-playwright-on-mock-reads | achieved |
 | W06 | P2→P3 boundary — public narrative, phase transition, P3 charter | P2 | W05 | readme-license-landed-and-p3-charter-ratified | achieved |
-| W07 | P3 execution — sandbox session service, the tx UX family, live gating | P3 | W05, W06 | spec-3-steps-4-7-green-in-playwright-against-sandbox-fork | candidate |
+| W07 | P3 execution — sandbox session service, the tx UX family, live gating | P3 | W05, W06 | spec-3-steps-4-7-green-in-playwright-against-sandbox-fork | active |
 
 The rows above project `work/W01-p0-bootstrap.md`, `work/W02-founding-docs.md`, and
 `work/W03-p1-finance-core.md`, `work/W04-boundary-review-remediation.md`, and

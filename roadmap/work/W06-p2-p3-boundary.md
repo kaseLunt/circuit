@@ -23,7 +23,7 @@ evidence_receipts:
 invalidated_by:
   - SPEC.md
   - roadmap/decisions/**
-review_when: phase:P3:entry
+review_when: event:invalidated-by-change
 updated: 2026-07-26
 evidence_fingerprint: sha256:77586685fb11512699913b10f80bff6b92e5b5a7160b67273c845e9807d94fb2
 ---

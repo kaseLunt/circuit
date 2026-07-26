@@ -4,7 +4,7 @@ type: risk
 title: "fork CI flakes on free-tier 429s during anvil upstream storage fetch"
 status: open
 informs: []
-review_when: phase:P3:entry
+review_when: date:2026-08-09
 updated: 2026-07-26
 ---
 
@@ -23,6 +23,13 @@ initial run + its rerun racing a second throttle window). `ANVIL_CUPS=100`
 (`--compute-units-per-second`) already smooths steady-state load; the flake is burst
 shaped, concentrated where the clean-fork describe re-forks and captures a full snapshot.
 
+## Disposition (P3 entry review, 2026-07-26 — E-W06)
+
+The two pressures separate: GitHub Actions minutes exhaustion is retired by the public
+flip (public repos meter no minutes). The Alchemy free-tier 429 remains open with
+retirement option 1 chosen: anvil `--fork-retry-backoff` / `--fork-request-retries`
+flags land in W07's first fork-suite commit. The date clock above checks that landing.
+
 ## Posture (current, recorded rather than implied)
 
 **Rerun-once.** A 429 failure is environmental, not evidential: the assertions the job
@@ -39,4 +46,4 @@ consecutive failure is treated as a finding, not a throttle.
 3. Serializing the two fork describes' capture phases to halve burst concurrency.
 
 P3's sandbox session service will multiply fork traffic; this risk blocks nothing today
-but should be retired before that multiplier lands (hence `review_when: phase:P3:entry`).
+but should be retired before that multiplier lands (hence `review_when: date:2026-08-09`).

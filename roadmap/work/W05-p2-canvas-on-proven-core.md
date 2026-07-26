@@ -71,7 +71,7 @@ invalidated_by:
   - e2e/**
   - tests/**
   - package.json
-review_when: phase:P2:exit
+review_when: event:invalidated-by-change
 updated: 2026-07-26
 evidence_fingerprint: sha256:311497289ce13a81c3f4298b78aa2adf71bd131692c50ff615dab46c8a81ee85
 ---
