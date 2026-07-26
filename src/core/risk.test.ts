@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { simulate, riskLedger } from "./risk";
+import { rateKindLabel, simulate, riskLedger } from "./risk";
 import {
   HF_WARN_WAD,
   computeHealthFactor,
@@ -15,18 +15,22 @@ import { WAD, formatHealthFactor, formatWadAsMultiple, formatWadRatio } from "./
 import {
   accruedVariableBorrowIndexRay,
   currentRatesRay,
+  mulWad,
+  netApyWad,
   rayDivCeil,
   vTokenBalance,
 } from "./rates";
 import {
   observedBlocks,
   provenanceTrail,
+  provenanceTrailText,
+  withoutInheritedNotes,
   valueOf,
   type Provenanced,
 } from "./provenance";
-import { PINNED_BLOCK } from "../../tests/helpers/protocol-reads";
+import { PINNED_BLOCK, WINDOW_BLOCK } from "../../tests/helpers/protocol-reads";
 import { EXPECTED_BORROW_WEI, chainOf, flagshipGraph } from "../../tests/helpers/graphs";
-import { fixtureSnapshot } from "../../tests/helpers/chain-snapshot";
+import { fixtureSnapshot, type RawFixture } from "../../tests/helpers/chain-snapshot";
 import type { Block } from "./graph";
 
 // ————————————————————————— helpers —————————————————————————
@@ -185,8 +189,9 @@ describe("e-mode regime (SPEC §3 step 4 — quoting the wrong regime is a corre
     expect(ltBps).toBe(9500);
     expect(weETH.liquidationThresholdBps.value).toBe(8000);
 
-    const trail = provenanceTrail(simulate(flagshipGraph("10", 7000), snapshot).minHealthFactor);
-    const text = trail.join("\n");
+    const text = provenanceTrailText(
+      simulate(flagshipGraph("10", 7000), snapshot).minHealthFactor,
+    ).join(" ");
     expect(text).toContain("eMode1.collateralConfig.liquidationThreshold");
     expect(text).toContain("eMode1.collateralBitmap");
     expect(text).toContain("Pool.getReservesList.indexOf(weETH)");
@@ -216,7 +221,7 @@ describe("e-mode regime (SPEC §3 step 4 — quoting the wrong regime is a corre
     expect(ltBps).toBe(8000);
 
     const result = simulate(flagshipGraph("10", 7000), parked);
-    const trail = provenanceTrail(result.minHealthFactor).join("\n");
+    const trail = provenanceTrailText(result.minHealthFactor).join("\n");
     // The reserve's observation is cited, and the bitmap and index that decided it are too.
     expect(trail).toContain("weETH.getReserveConfigurationData.liquidationThreshold");
     expect(trail).toContain("eMode1.collateralBitmap");
@@ -239,7 +244,7 @@ describe("e-mode regime (SPEC §3 step 4 — quoting the wrong regime is a corre
     const fallback = simulate(flagshipGraph("10", 7000), excluded);
     const inCategory = simulate(flagshipGraph("10", 7000), snapshot);
     expect(hfOf(fallback.minHealthFactor)!).toBeLessThan(hfOf(inCategory.minHealthFactor)!);
-    expect(provenanceTrail(fallback.minHealthFactor).join("\n")).toContain(
+    expect(provenanceTrailText(fallback.minHealthFactor).join("\n")).toContain(
       "weETH.getReserveConfigurationData.liquidationThreshold",
     );
   });
@@ -380,19 +385,22 @@ describe("post-action rates (§2.6) — assembled here, proven against the recor
   it("puts those rates on the blocks that earn and pay them", () => {
     const at7000 = simulate(flagshipGraph("10", 7000), snapshot);
     const at5000 = simulate(flagshipGraph("10", 5000), snapshot);
-    expect(requireValue(at7000.blockValues["borrow"]!.apyWad, "r_debt")).toBe(21_543_480_050_598_075n);
-    expect(requireValue(at7000.blockValues["supply1"]!.apyWad, "r_supply")).toBe(264_681_551_200n);
-    expect(requireValue(at5000.blockValues["borrow"]!.apyWad, "r_debt")).toBe(21_543_454_236_632_190n);
-    expect(requireValue(at5000.blockValues["supply1"]!.apyWad, "r_supply")).toBe(264_682_007_088n);
+    expect(requireValue(at7000.blockValues["borrow"]!.rate!.wad, "r_debt")).toBe(21_543_480_050_598_075n);
+    expect(requireValue(at7000.blockValues["supply1"]!.rate!.wad, "r_supply")).toBe(264_681_551_200n);
+    expect(requireValue(at5000.blockValues["borrow"]!.rate!.wad, "r_debt")).toBe(21_543_454_236_632_190n);
+    expect(requireValue(at5000.blockValues["supply1"]!.rate!.wad, "r_supply")).toBe(264_682_007_088n);
 
     // Both supplies sit on one reserve, so both carry the SAME post-action supply rate —
     // one derivation, two renderings.
-    expect(at7000.blockValues["supply2"]!.apyWad).toBe(at7000.blockValues["supply1"]!.apyWad);
+    expect(at7000.blockValues["supply2"]!.rate!.wad).toBe(at7000.blockValues["supply1"]!.rate!.wad);
     // A conversion earns no rate, and the staking leg has no window in this snapshot.
-    expect(at7000.blockValues["wrap1"]!.apyWad).toBeNull();
-    expect(at7000.blockValues["unwrap"]!.apyWad).toBeNull();
-    expect(at7000.blockValues["stake1"]!.apyWad).toBeNull();
-    expect(at7000.blockValues["in"]!.apyWad).toBeNull();
+    expect(at7000.blockValues["wrap1"]!.rate).toBeNull();
+    expect(at7000.blockValues["unwrap"]!.rate).toBeNull();
+    // The staking leg now has a rate: the trailing window's two blocks resolved.
+    expect(requireValue(at7000.blockValues["stake1"]!.rate!.wad, "r_stake")).toBe(
+      23_614_925_307_064_831n,
+    );
+    expect(at7000.blockValues["in"]!.rate).toBeNull();
   });
 });
 
@@ -442,6 +450,265 @@ describe("the SPEC §3 step-3 drag, 50% → 70%", () => {
       previousHf = hf;
       previousRatio = ratio;
     }
+  });
+});
+
+/**
+ * EVERY qualification every mint site carries, verbatim.
+ *
+ * This list is the reason "nothing was shortened" is a checkable claim rather than a promise.
+ * The unbundle that split `expression` from the WHY silently DROPPED three of these, because
+ * `note` was one slot and `derivedOverWindow` assigned over it — and nothing failed. A
+ * screenshot caught it. This does now.
+ *
+ * Deleting or reWORDing any note in `core/risk.ts` or `core/plan.ts` fails here.
+ */
+const MINT_QUALIFICATIONS = {
+  // core/plan.ts — the share model
+  sharesMinted: "shares minted, matrix §7",
+  eethBalance: "eETH balance",
+  sharesForAmount: "sharesForAmount, weETH minted",
+  collateralSum: "summed over supplies preceding the borrow",
+  // core/risk.ts — valuation, risk, rates
+  baseCurrency: "AaveOracle base currency (8-dec)",
+  ethIsWeth: "ETH ≡ WETH by wrap",
+  eethIsEth: "eETH ≡ ETH 1:1",
+  minRole: "the minimum across the plan",
+  finalRole: "after the last risk-changing step",
+  aTokenPosition: "the collateral position this supply creates",
+  liquidationRatio: "the collateral/debt oracle ratio at HF = 1, at the minimum-HF step",
+  leverage: "collateral exposure ÷ equity after the closed iteration",
+  supplyRate:
+    "Aave third-order compounding over one year, at the utilization this plan's own supply leaves behind, over debt accrued to this block",
+  borrowRate:
+    "Aave third-order compounding over one year; the borrow both mints debt at the accrued index and drains the virtual balance",
+  // core/risk.ts — the three cross-block mints, whose own qualifications the window
+  // reason must NOT displace
+  stakingApr: "trailing staking APR",
+  grossComposition: "§5.2 r_coll, staking and supply compounding on one collateral",
+  netComposition:
+    "§5.2, current-rate run-rate over one iteration; incentives and points excluded by construction",
+  windowLicence:
+    "cross-block window: an instantaneous exchange rate is not an APR (SPEC §5.1); the window's endpoints are two reads at two blocks",
+} as const;
+
+describe("every qualification a mint site carries survives into the rendered trail", () => {
+  /** Everything the flagship result can prove, flattened through the SAME renderer path. */
+  function renderedProof(): string {
+    const result = simulate(flagshipGraph("10", 7000), snapshot);
+    const wrappers: Array<Provenanced<unknown>> = [
+      result.minHealthFactor,
+      result.finalHealthFactor,
+      result.grossApyWad!,
+      result.netApyWad!,
+      result.liquidationRatioWad!,
+      result.leverageWad!,
+    ];
+    for (const value of Object.values(result.blockValues)) {
+      for (const wrapper of [
+        value.inputAmountWei,
+        value.inputValueBase,
+        value.outputAmountWei,
+        value.outputValueBase,
+        value.rate === null ? null : value.rate.wad,
+      ]) {
+        if (wrapper !== null) wrappers.push(wrapper);
+      }
+    }
+    return wrappers.flatMap((w) => provenanceTrailText(w)).join("\n");
+  }
+
+  it("renders all of them, none abbreviated", () => {
+    const proof = renderedProof();
+    for (const [name, qualification] of Object.entries(MINT_QUALIFICATIONS)) {
+      expect(proof, `${name} is missing from the rendered trail`).toContain(qualification);
+    }
+  });
+
+  it("keeps a cross-block mint's OWN qualification beside the window licence", () => {
+    // The exact regression: the licence used to overwrite the qualification, so the §5.2
+    // framing vanished from the product while the formula still looked complete.
+    const result = simulate(flagshipGraph("10", 7000), snapshot);
+    for (const [wrapper, own] of [
+      [result.netApyWad!, MINT_QUALIFICATIONS.netComposition],
+      [result.grossApyWad!, MINT_QUALIFICATIONS.grossComposition],
+      [result.blockValues["stake1"]!.rate!.wad, MINT_QUALIFICATIONS.stakingApr],
+    ] as const) {
+      const [entry] = provenanceTrail(wrapper);
+      expect(entry?.notes, own).toContain(own);
+      expect(entry?.notes, own).toContain(MINT_QUALIFICATIONS.windowLicence);
+      // Two distinct lines, not one string doing both jobs.
+      expect(entry?.notes?.length).toBe(2);
+    }
+  });
+
+  it("carries the window licence up EVERY composition, in the data", () => {
+    // The propagation invariant `derivedOverWindow` exists to enforce: a composition that
+    // consumed a cross-block value cannot present itself as single-block. The renderer may
+    // suppress the echo; the data may not.
+    const result = simulate(flagshipGraph("10", 7000), snapshot);
+    for (const wrapper of [result.netApyWad!, result.grossApyWad!]) {
+      const notes = provenanceTrail(wrapper)[0]?.notes ?? [];
+      expect(notes).toContain(MINT_QUALIFICATIONS.windowLicence);
+    }
+  });
+
+  it("suppresses only the ECHO when rendering, and only where it is visible below", () => {
+    const result = simulate(flagshipGraph("10", 7000), snapshot);
+    const entries = provenanceTrail(result.netApyWad!);
+    const rendered = withoutInheritedNotes(entries);
+
+    // Same entries, same order, same text — this is a note-level edit and nothing else.
+    expect(rendered.map((e) => `${e.depth}:${e.text}`)).toEqual(
+      entries.map((e) => `${e.depth}:${e.text}`),
+    );
+
+    // The licence appears three times in the DATA (net → gross → the staking APR itself)…
+    const licence = MINT_QUALIFICATIONS.windowLicence;
+    const inData = entries.filter((e) => (e.notes ?? []).includes(licence)).length;
+    expect(inData).toBe(3);
+    // …and exactly once on screen, at the entry where the fact originates.
+    const onScreen = rendered.filter((e) => (e.notes ?? []).includes(licence));
+    expect(onScreen).toHaveLength(1);
+    expect(onScreen[0]!.text).toContain("rateNow − rateBefore");
+
+    // A qualification with no descendant echo is never touched.
+    const net = rendered[0]!;
+    expect(net.notes).toEqual([MINT_QUALIFICATIONS.netComposition]);
+  });
+});
+
+describe("rate kinds are carried in the type, not assumed by the slot", () => {
+  it("labels the staking leg an APR and the Aave legs APYs", () => {
+    const result = simulate(flagshipGraph("10", 7000), snapshot);
+    // The staking rate annualizes a seven-day delta LINEARLY (ruling Q3): no compounding is
+    // applied, so calling it an APY would claim arithmetic core/rates.ts never performed.
+    expect(result.blockValues["stake1"]!.rate!.kind).toBe("apr");
+    // Aave rates go through rayAprToApyWad, which compounds over a year. Those are APYs.
+    expect(result.blockValues["supply1"]!.rate!.kind).toBe("apy");
+    expect(result.blockValues["borrow"]!.rate!.kind).toBe("apy");
+
+    expect(result.yieldSources.map((y) => `${y.type}:${y.rate.kind}`)).toEqual([
+      "stake:apr",
+      "supply:apy",
+      "borrow:apy",
+    ]);
+  });
+
+  it("names each kind one way, so no consumer can invent a suffix", () => {
+    expect(rateKindLabel("apr")).toBe("APR");
+    expect(rateKindLabel("apy")).toBe("APY");
+  });
+
+  it("keeps the kind attached to the figure it describes", () => {
+    // One object per leg: a renderer cannot pick up the wad and lose the kind on the way.
+    const result = simulate(flagshipGraph("10", 7000), snapshot);
+    const stake = result.yieldSources[0]!;
+    expect(stake.rate).toBe(result.blockValues["stake1"]!.rate);
+    expect(stake.rate.wad.value).toBe(23_614_925_307_064_831n);
+  });
+});
+
+describe("the §5.2 yield composition (design §2.7, §2.8)", () => {
+  it("pins the trailing staking APR and the compositions built on it", () => {
+    const at5000 = simulate(flagshipGraph("10", 5000), snapshot);
+    const at7000 = simulate(flagshipGraph("10", 7000), snapshot);
+
+    // The staking leg is a pure property of the window, so it does not move with `b`.
+    const stake = 23_614_925_307_064_831n;
+    expect(requireValue(at5000.blockValues["stake1"]!.rate!.wad, "r_stake")).toBe(stake);
+    expect(requireValue(at7000.blockValues["stake1"]!.rate!.wad, "r_stake")).toBe(stake);
+
+    expect(requireValue(at5000.grossApyWad, "gross")).toBe(23_615_196_239_517_746n);
+    expect(requireValue(at7000.grossApyWad, "gross")).toBe(23_615_196_239_051_092n);
+    expect(requireValue(at5000.netApyWad, "net")).toBe(24_651_067_240_960_524n);
+    expect(requireValue(at7000.netApyWad, "net")).toBe(25_065_397_570_968_204n);
+
+    // More leverage on a collateral yielding more than the debt costs raises the net APY.
+    expect(requireValue(at7000.netApyWad, "net")).toBeGreaterThan(
+      requireValue(at5000.netApyWad, "net"),
+    );
+  });
+
+  it("composes gross from the two collateral legs, and net over the closed iteration", () => {
+    // Recomputed here from core/rates.ts's own primitives, so the assertion is that risk.ts
+    // COMPOSED them, not that it agrees with a number this test typed.
+    const result = simulate(flagshipGraph("10", 7000), snapshot);
+    const stake = requireValue(result.blockValues["stake1"]!.rate!.wad, "r_stake");
+    const supply = requireValue(result.blockValues["supply1"]!.rate!.wad, "r_supply");
+    const debt = requireValue(result.blockValues["borrow"]!.rate!.wad, "r_debt");
+
+    const gross = mulWad(WAD + stake, WAD + supply) - WAD;
+    expect(requireValue(result.grossApyWad, "gross")).toBe(gross);
+    expect(requireValue(result.netApyWad, "net")).toBe(
+      netApyWad((7_000n * WAD) / 10_000n, stake, supply, debt),
+    );
+  });
+
+  it("carries the three legs in canonical order, each with the rate its block shows", () => {
+    const result = simulate(flagshipGraph("10", 7000), snapshot);
+    expect(result.yieldSources.map((y) => `${y.protocol}/${y.type}`)).toEqual([
+      "etherfi/stake",
+      "aave-v3/supply",
+      "aave-v3/borrow",
+    ]);
+    // One derivation, two renderings: the panel's leg and the block's slot are one object.
+    expect(result.yieldSources[0]!.rate.wad).toBe(result.blockValues["stake1"]!.rate!.wad);
+    expect(result.yieldSources[1]!.rate.wad).toBe(result.blockValues["supply1"]!.rate!.wad);
+    expect(result.yieldSources[2]!.rate.wad).toBe(result.blockValues["borrow"]!.rate!.wad);
+  });
+
+  /**
+   * §2.8's weight contract, as a property rather than an example: the collateral legs share
+   * (1 + b), the debt leg carries −b, and the three always sum to FULL_ALLOCATION_BPS. The
+   * sum is what the panel's breakdown claims, so an off-by-one here is a visible lie.
+   */
+  it("keeps the weight invariant across the whole slider", () => {
+    for (let bps = 100; bps <= 9_300; bps += 100) {
+      const sources = simulate(flagshipGraph("10", bps), snapshot).yieldSources;
+      expect(sources, `b=${bps}`).toHaveLength(3);
+      const weights = sources.map((y) => y.weightBps);
+      expect(weights.reduce((a, w) => a + w, 0), `b=${bps}`).toBe(10_000);
+      // The debt leg is exactly −b, and the collateral legs share (1 + b).
+      expect(weights[2], `b=${bps}`).toBe(-bps);
+      expect(weights[0]! + weights[1]!, `b=${bps}`).toBe(10_000 + bps);
+      for (const w of weights) expect(Number.isInteger(w), `b=${bps}`).toBe(true);
+    }
+  });
+
+  it("pins the split at the two demo points, proportional to each leg's rate", () => {
+    expect(simulate(flagshipGraph("10", 5000), snapshot).yieldSources.map((y) => y.weightBps))
+      .toEqual([14_999, 1, -5_000]);
+    expect(simulate(flagshipGraph("10", 7000), snapshot).yieldSources.map((y) => y.weightBps))
+      .toEqual([16_999, 1, -7_000]);
+  });
+
+  /**
+   * A NEGATIVE staking rate is a real slashing reading, not a missing one, so it must not be
+   * nulled away. With no positive collateral rate to apportion, §2.8 splits the collateral
+   * share evenly rather than inventing a preference — and the invariant still holds.
+   */
+  it("splits evenly when the staking rate is negative — a slashing reading still renders", () => {
+    // A window whose rate FELL: the exchange rate went down over the seven days.
+    const slashed = fixtureSnapshot((raw) => {
+      raw.etherfi.rateWindow!.rateBefore = raw.etherfi.rateWindow!.rateNow + 10n ** 15n;
+    });
+    const result = simulate(flagshipGraph("10", 7000), slashed);
+    const stake = requireValue(result.blockValues["stake1"]!.rate!.wad, "r_stake");
+    expect(stake).toBeLessThan(0n);
+    expect(result.yieldSources.map((y) => y.weightBps)).toEqual([8_500, 8_500, -7_000]);
+    expect(result.yieldSources.reduce((a, y) => a + y.weightBps, 0)).toBe(10_000);
+    // The composition still resolves — a negative rate is a reading, not an absence.
+    expect(result.grossApyWad).not.toBeNull();
+    expect(requireValue(result.netApyWad, "net")).toBeLessThan(0n);
+  });
+
+  it("has no composition without a borrow block to supply b", () => {
+    const result = simulate(chainOf([INPUT, STAKE, WRAP, LEND]), snapshot);
+    expect(result.blockValues["stake1"]!.rate).not.toBeNull();
+    expect(result.grossApyWad).toBeNull();
+    expect(result.netApyWad).toBeNull();
+    expect(result.yieldSources).toEqual([]);
   });
 });
 
@@ -495,18 +762,46 @@ describe("degenerate but valid graphs (§5.3)", () => {
 });
 
 describe("missing reads inside a valid plan (§5.2)", () => {
-  it("keeps the APY family unavailable without touching risk — the legs are independent", () => {
-    // SPEC §5.1's staking APR needs a trailing two-block window this snapshot does not carry
-    // (ruling Q1), so §5.2's composition is complete-or-nothing.
-    const result = simulate(flagshipGraph("10", 7000), snapshot);
+  it("drops the WHOLE APY family when the trailing window is missing, and only that family", () => {
+    // SPEC §5.1's staking APR needs the window's two endpoints. Without them §5.2's
+    // composition is complete-or-nothing — but the risk path never depended on it.
+    const noWindow = fixtureSnapshot((raw) => {
+      raw.etherfi.rateWindow = null;
+    });
+    const result = simulate(flagshipGraph("10", 7000), noWindow);
+    expect(result.isValid).toBe(true);
     expect(result.grossApyWad).toBeNull();
     expect(result.netApyWad).toBeNull();
     expect(result.yieldSources).toEqual([]);
+    expect(result.blockValues["stake1"]!.rate).toBeNull();
+    // The per-reserve rates are independent of the window and stay put.
+    expect(result.blockValues["supply1"]!.rate).not.toBeNull();
+    expect(result.blockValues["borrow"]!.rate).not.toBeNull();
     // …and the whole risk path is unaffected.
-    expect(valueOf(result.minHealthFactor).status).toBe("healthy");
+    expect(hfOf(result.minHealthFactor)).toBe(1_357_142_857_144_167_216n);
     expect(result.liquidationRatioWad).not.toBeNull();
     expect(result.leverageWad).not.toBeNull();
     expect(result.blockValues["supply1"]!.inputAmountWei).not.toBeNull();
+  });
+
+  it("refuses a degenerate window rather than annualizing nonsense", () => {
+    for (const mutate of [
+      (raw: RawFixture) => {
+        raw.etherfi.rateWindow!.secondsElapsed = 0n;
+      },
+      (raw: RawFixture) => {
+        raw.etherfi.rateWindow!.rateBefore = 0n;
+      },
+      (raw: RawFixture) => {
+        raw.etherfi.rateWindow!.rateNow = 0n;
+      },
+    ]) {
+      const result = simulate(flagshipGraph("10", 7000), fixtureSnapshot(mutate));
+      expect(result.grossApyWad).toBeNull();
+      expect(result.netApyWad).toBeNull();
+      expect(result.yieldSources).toEqual([]);
+      expect(result.blockValues["stake1"]!.rate).toBeNull();
+    }
   });
 
   it("an unusable oracle price makes the health factor unknown, never silently safe", () => {
@@ -560,9 +855,9 @@ describe("missing reads inside a valid plan (§5.2)", () => {
       raw.WETH.rateStrategy = { ...raw.WETH.rateStrategy, optimalUsageRatio: 0 };
     });
     const result = simulate(flagshipGraph("10", 7000), broken);
-    expect(result.blockValues["borrow"]!.apyWad).toBeNull();
+    expect(result.blockValues["borrow"]!.rate).toBeNull();
     // The supply leg sits on the other reserve and is untouched, as is the health factor.
-    expect(result.blockValues["supply1"]!.apyWad).not.toBeNull();
+    expect(result.blockValues["supply1"]!.rate).not.toBeNull();
     expect(valueOf(result.minHealthFactor).status).toBe("healthy");
   });
 });
@@ -584,7 +879,11 @@ describe("refusals (§5.1) — a complete refusal, never a partial reading", () 
       // Zero-input derivation: honest here because it genuinely consumed nothing, and it
       // implies no observation.
       expect(observedBlocks(hf).size).toBe(0);
-      expect(provenanceTrail(hf)[0]).toContain("no plan:");
+      // The formula says what happened; the note carries the sentence.
+      expect(provenanceTrailText(hf)[0]).toContain("no plan");
+      const [entry] = provenanceTrail(hf);
+      expect(entry?.text).toBe("derived: no plan");
+      expect(entry?.notes).toEqual([result.errorMessage]);
     }
   };
 
@@ -692,15 +991,15 @@ describe("per-block values", () => {
     const aBalance = requireValue(value.outputAmountWei, "supply out");
     expect(aBalance).toBe(9_092_267_716_600_505_492n);
     expect(aBalance).toBeLessThanOrEqual(supplies[0]!);
-    expect(provenanceTrail(value.outputAmountWei!)[0]).toContain("aTokenBalance");
+    expect(provenanceTrailText(value.outputAmountWei!)[0]).toContain("aTokenBalance");
   });
 
   it("values ETH and eETH through the ETH/USD feed, and says so in the expression", () => {
     const stake = result.blockValues["stake1"]!;
     expect(stake.inputAsset).toBe("ETH");
     expect(stake.outputAsset).toBe("eETH");
-    const inTrail = provenanceTrail(stake.inputValueBase!).join("\n");
-    const outTrail = provenanceTrail(stake.outputValueBase!).join("\n");
+    const inTrail = provenanceTrailText(stake.inputValueBase!).join("\n");
+    const outTrail = provenanceTrailText(stake.outputValueBase!).join("\n");
     expect(inTrail).toContain("ETH ≡ WETH by wrap");
     expect(outTrail).toContain("eETH ≡ ETH 1:1");
     for (const trail of [inTrail, outTrail]) {
@@ -747,16 +1046,53 @@ describe("determinism and provenance honesty", () => {
         value.inputValueBase,
         value.outputAmountWei,
         value.outputValueBase,
-        value.apyWad,
+        value.rate === null ? null : value.rate.wad,
       );
     }
     for (const wrapper of wrappers) {
       if (wrapper === null) continue;
-      const blocks = [...observedBlocks(wrapper)];
-      // Either a pure derivation over entered input, or observations from ONE block: this
-      // commit has no cross-block quantity at all.
+      const blocks = [...observedBlocks(wrapper)].sort((a, b) => (a < b ? -1 : 1));
+      // A quantity may cross blocks only if it SAYS SO. `derivedOverWindow` folds its reason
+      // into the expression, so the trail is the licence — and the licence is checkable.
+      if (provenanceTrailText(wrapper).join(" ").includes("cross-block window:")) {
+        expect(blocks).toEqual([WINDOW_BLOCK, PINNED_BLOCK]);
+        continue;
+      }
+      // Everything else is either a pure derivation over entered input or observations from
+      // ONE block. A drifted observation, or an undeclared crossing, fails here.
       expect(blocks.length).toBeLessThanOrEqual(1);
       for (const block of blocks) expect(block).toBe(PINNED_BLOCK);
+    }
+  });
+
+  /**
+   * The ONE sanctioned cross-block family, and the assertion that keeps it one: a trailing
+   * rate has two endpoints, so the staking APR and every composition containing it span
+   * exactly two blocks — the pinned block and the window's start — and no more.
+   */
+  it("confines the two-block window to the staking APR and the compositions containing it", () => {
+    const result = simulate(flagshipGraph("10", 7000), snapshot);
+    const stake = result.yieldSources.find((y) => y.type === "stake");
+    if (stake === undefined) throw new Error("expected a staking yield source");
+
+    for (const [name, wrapper] of [
+      ["stake block APR", result.blockValues["stake1"]!.rate!.wad!],
+      ["staking yield source", stake.rate.wad],
+      ["grossApyWad", result.grossApyWad!],
+      ["netApyWad", result.netApyWad!],
+    ] as const) {
+      const blocks = [...observedBlocks(wrapper)].sort((a, b) => (a < b ? -1 : 1));
+      expect(blocks, name).toEqual([WINDOW_BLOCK, PINNED_BLOCK]);
+      // The crossing is DECLARED, not silent: the reason rides the expression into the trail.
+      expect(provenanceTrailText(wrapper).join(" "), name).toContain("cross-block window:");
+    }
+
+    // The supply and borrow legs are ordinary single-block derivations; only the staking
+    // leg crosses, and it must not drag them across with it.
+    for (const type of ["supply", "borrow"] as const) {
+      const leg = result.yieldSources.find((y) => y.type === type);
+      if (leg === undefined) throw new Error(`expected an ${type} yield source`);
+      expect([...observedBlocks(leg.rate.wad)], type).toEqual([PINNED_BLOCK]);
     }
   });
 
@@ -770,7 +1106,7 @@ describe("determinism and provenance honesty", () => {
       result.finalHealthFactor,
       result.liquidationRatioWad!,
       result.leverageWad!,
-      result.blockValues["supply1"]!.apyWad!,
+      result.blockValues["supply1"]!.rate!.wad,
       result.blockValues["supply1"]!.inputValueBase!,
       result.blockValues["supply1"]!.outputAmountWei!,
     ]) {

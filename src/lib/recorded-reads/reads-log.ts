@@ -24,6 +24,12 @@ interface ReadEntry {
 const LOG = readsLog as unknown as {
   readonly meta: {
     readonly pinned_block: { readonly number: string; readonly hash: string; readonly timestamp: string };
+    readonly staking_window_block: {
+      readonly number: string;
+      readonly hash: string;
+      readonly timestamp: string;
+      readonly elapsed_seconds: string;
+    };
     readonly anchors: Readonly<Record<string, string>>;
     readonly pool: string;
     readonly pool_data_provider: string;
@@ -35,6 +41,18 @@ const LOG = readsLog as unknown as {
 export const readsMeta = LOG.meta;
 export const PINNED_BLOCK = BigInt(LOG.meta.pinned_block.number);
 export const PINNED_TS = BigInt(LOG.meta.pinned_block.timestamp);
+
+/**
+ * The trailing staking-APR window's earlier endpoint (SPEC §5.1). A SECOND block the fixture
+ * is pinned to: its observations must be minted against it, never against the pinned block,
+ * because the whole quantity is a claim about the span between the two.
+ */
+export const WINDOW_BLOCK = BigInt(LOG.meta.staking_window_block.number);
+export const WINDOW_TS = BigInt(LOG.meta.staking_window_block.timestamp);
+/** Recorded from the two block headers rather than assumed from a block count. */
+export const WINDOW_ELAPSED_SECONDS = BigInt(LOG.meta.staking_window_block.elapsed_seconds);
+/** The label the capture writes for the archive read, so one string owns it. */
+export const WINDOW_RATE_LABEL = `weETH.getRate @ window start (block ${WINDOW_BLOCK})`;
 
 export function readResult(label: string): unknown {
   const hit = LOG.reads.find((r) => r.label === label);

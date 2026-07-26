@@ -8,6 +8,10 @@
 export {
   PINNED_BLOCK,
   PINNED_TS,
+  WINDOW_BLOCK,
+  WINDOW_ELAPSED_SECONDS,
+  WINDOW_RATE_LABEL,
+  WINDOW_TS,
   addrRead,
   addressOf,
   anchorAddr,

@@ -21,16 +21,25 @@
  * pinned block and is passed through as a derivation input; nothing here launders a literal
  * into an observation (lint enforces the shape ban on top of that).
  *
- * SCOPE THIS COMMIT (ruling Q1). SPEC §5.1's trailing staking APR needs two exchange-rate
- * reads at two blocks, i.e. an archive endpoint and an `EtherFiSnapshot.rateWindow` this
- * snapshot does not carry. Until that lands the staking leg has no rate, and §5.2's
- * composition is complete-or-nothing: `grossApyWad`, `netApyWad` and `yieldSources` are all
- * in their unavailable states rather than composed from two legs out of three. Everything
- * the health factor, the liquidation ratio, the leverage and the per-block values need is
- * present and is computed here in full — none of it depends on the window.
+ * THE ONE CROSS-BLOCK QUANTITY. SPEC §5.1's staking rate is a TRAILING rate: a rate of change
+ * has two endpoints, so it is two exchange-rate reads at two blocks. It therefore mints
+ * through `derivedOverWindow` rather than `derived`, and so does every composition that
+ * contains it — gross APY, net APY, and the staking yield source all legitimately span the
+ * window's two blocks and say so. Everything else in this module is single-block.
+ *
+ * AND IT IS AN APR, NOT AN APY. The window's growth is annualized linearly, with no
+ * compounding assumed (ruling Q3), so every rate leaves here inside a `ProvenancedRate`
+ * carrying its `kind`. No renderer appends a unit blind: the suffix is read from the figure.
+ *
+ * §5.2's composition is complete-or-nothing: if the window did not resolve, or a rate leg is
+ * missing, or the graph has no borrow block to supply `b`, then `grossApyWad`, `netApyWad`
+ * AND `yieldSources` go to their unavailable states together. A two-of-three composition
+ * would render as the whole composition, which is the defect. The health factor, liquidation
+ * ratio, leverage and per-block amounts never depend on any of it.
  *
  * NOTE (D-007): money-math. The checkpoint-walk minimum HF, the two-sided post-action borrow
- * rate and the ETH/eETH base valuation are the review's focus points.
+ * rate, the ETH/eETH base valuation and the trailing-window crossing are the review's focus
+ * points.
  */
 import { WAD } from "./format";
 import {
@@ -55,6 +64,8 @@ import {
 } from "./plan";
 import {
   derived,
+  derivedOverWindow,
+  entered,
   type AnyProvenanced,
   type Observed,
   type ParamOrigins,
@@ -65,19 +76,48 @@ import {
   accruedLiquidityIndexRay,
   accruedVariableBorrowIndexRay,
   currentRatesRay,
+  mulWad,
+  netApyWad,
   rayAprToApyWad,
   rayDivCeil,
   rayDivFloor,
+  trailingAprWad,
   vTokenBalance,
 } from "./rates";
 
 // ————————————————————————— contract —————————————————————————
 
+/**
+ * What KIND of rate a figure is — and it is in the type because it was not, and a trailing
+ * APR shipped inside fields and labels that said APY.
+ *
+ * They are different claims. An APY states what one year of COMPOUNDING at the current rate
+ * would produce; an APR states an annualized rate of change with no compounding assumed.
+ * SPEC §5.1's staking rate is a trailing seven-day exchange-rate delta annualized linearly —
+ * an APR — and `core/rates.ts` deliberately proves no conversion for it (ruling Q3). Labelling
+ * it "APY" claimed a compounding the math never did.
+ *
+ * Carrying the kind beside the value means no renderer can append a unit blind: the suffix
+ * is READ from the figure rather than assumed by the slot it lands in.
+ */
+export type RateKind = "apr" | "apy";
+
+/** A rate, its provenance, and what kind of rate it is. */
+export interface ProvenancedRate {
+  readonly kind: RateKind;
+  readonly wad: Provenanced<bigint>;
+}
+
+/** How a rate of this kind is named on screen. One place decides, everywhere agrees. */
+export function rateKindLabel(kind: RateKind): string {
+  return kind === "apr" ? "APR" : "APY";
+}
+
 export interface YieldSource {
   protocol: string;
   type: "supply" | "borrow" | "stake";
-  /** Rate as a WAD APY (core/rates.ts rayAprToApyWad), with its provenance. */
-  apyWad: Provenanced<bigint>;
+  /** The leg's rate, WAD, with its provenance AND its kind — never a bare "APY". */
+  rate: ProvenancedRate;
   /**
    * Signed weight this source's rate carries in the §5.2 net-APY composition, in
    * integer bps: collateral-side sources carry (1 + b) — FULL_ALLOCATION_BPS plus
@@ -137,7 +177,11 @@ export interface ComputedBlockValue {
   outputAmountWei: Provenanced<bigint> | null;
   outputValueBase: Provenanced<bigint> | null;
   gasCostBase: Provenanced<bigint> | null;
-  apyWad: Provenanced<bigint> | null;
+  /**
+   * The rate this block earns or pays, with its kind. `null` when the block earns no rate
+   * (a conversion) or its source did not resolve.
+   */
+  rate: ProvenancedRate | null;
 }
 
 /** One supply standing in the ledger, with everything a citation about it needs. */
@@ -247,7 +291,10 @@ const PRICE_FEED: Readonly<Record<Asset, PriceFeed | null>> = {
 interface Valuation {
   readonly base: bigint | null;
   readonly price: Observed<bigint> | null;
+  /** The formula, when there is one; otherwise the refusal, which is its own explanation. */
   readonly expression: string;
+  /** The oracle-stack semantics this valuation rests on (ruling Q4). */
+  readonly note?: string;
 }
 
 function valueInBase(amountWei: bigint, asset: Asset, snapshot: ChainSnapshot): Valuation {
@@ -279,7 +326,8 @@ function valueInBase(amountWei: bigint, asset: Asset, snapshot: ChainSnapshot): 
   return {
     base: usdBase(amountWei, reserve.priceBase.value),
     price: reserve.priceBase,
-    expression: `floor(amountWei × priceBase / 1e18) — AaveOracle base currency (8-dec), ${feed.semantics}`,
+    expression: "floor(amountWei × priceBase / 1e18)",
+    note: `AaveOracle base currency (8-dec), ${feed.semantics}`,
   };
 }
 
@@ -290,7 +338,7 @@ function baseValueProv(
 ): Provenanced<bigint> | null {
   const valuation = valueInBase(amount.value, asset, snapshot);
   if (valuation.base === null || valuation.price === null) return null;
-  return derived(valuation.base, valuation.expression, [amount, valuation.price]);
+  return derived(valuation.base, valuation.expression, [amount, valuation.price], valuation.note);
 }
 
 // ————————————————————————— the ledger (§2.3) —————————————————————————
@@ -485,14 +533,16 @@ function mintHealthFactor(cp: RiskCheckpoint | null, role: string): Provenanced<
     // it is a reading rather than a refusal — there is genuinely nothing to liquidate.
     return derived<HealthFactor>(
       { status: "no-debt" },
-      "no risk-changing step in this strategy: it opens no Aave position",
+      "no risk-changing step in this strategy",
       [],
+      "it opens no Aave position",
     );
   }
   return derived(
     cp.healthFactor,
-    `computeHealthFactor(Σ collateral base·lt, totalDebtBase) after step ${cp.blockId} — ${role}`,
+    `computeHealthFactor(Σ collateral base·lt, totalDebtBase) after step ${cp.blockId}`,
     healthFactorInputsOf(cp),
+    role,
   );
 }
 
@@ -585,7 +635,7 @@ function supplyApyOf(
   addedWei: bigint,
   amountInputs: readonly AnyProvenanced[],
   blockTimestamp: bigint,
-): Provenanced<bigint> | null {
+): ProvenancedRate | null {
   if (!ratesComputable(reserve, 0n, blockTimestamp)) return null;
   const post = currentRatesRay({
     strategy: reserve.rateStrategy.value,
@@ -597,11 +647,14 @@ function supplyApyOf(
     liquidityTakenWei: 0n,
     deficitWei: reserve.deficit.value,
   });
-  return derived(
+  const wad = derived(
     rayAprToApyWad(post.liquidityRateRay),
-    "rayAprToApyWad(currentRatesRay(post-action).liquidityRate) — Aave third-order compounding over one year, at the utilization this plan's own supply leaves behind, over debt accrued to this block",
+    "rayAprToApyWad(currentRatesRay(post-action).liquidityRate)",
     [...rateInputsOf(reserve), ...amountInputs],
+    "Aave third-order compounding over one year, at the utilization this plan's own supply leaves behind, over debt accrued to this block",
   );
+  // An APY: rayAprToApyWad compounds the APR over a year, which is what makes it one.
+  return { kind: "apy", wad };
 }
 
 function borrowApyOf(
@@ -609,7 +662,7 @@ function borrowApyOf(
   borrowedWei: bigint,
   amountInputs: readonly AnyProvenanced[],
   blockTimestamp: bigint,
-): Provenanced<bigint> | null {
+): ProvenancedRate | null {
   if (!ratesComputable(reserve, borrowedWei, blockTimestamp)) return null;
   const post = currentRatesRay({
     strategy: reserve.rateStrategy.value,
@@ -626,18 +679,20 @@ function borrowApyOf(
     liquidityTakenWei: borrowedWei,
     deficitWei: reserve.deficit.value,
   });
-  return derived(
+  const wad = derived(
     rayAprToApyWad(post.variableBorrowRateRay),
-    "rayAprToApyWad(currentRatesRay(post-action).variableBorrowRate) — Aave third-order compounding over one year; the borrow both mints debt at the accrued index and drains the virtual balance",
+    "rayAprToApyWad(currentRatesRay(post-action).variableBorrowRate)",
     [...rateInputsOf(reserve), ...amountInputs],
+    "Aave third-order compounding over one year; the borrow both mints debt at the accrued index and drains the virtual balance",
   );
+  return { kind: "apy", wad };
 }
 
 const RESERVE_KEYS = ["weETH", "WETH"] as const;
 
 interface ReserveRates {
-  readonly supplyApy: Provenanced<bigint> | null;
-  readonly borrowApy: Provenanced<bigint> | null;
+  readonly supplyApy: ProvenancedRate | null;
+  readonly borrowApy: ProvenancedRate | null;
 }
 
 function reserveRatesOf(
@@ -708,13 +763,14 @@ function collateralPositionOf(
   const balance = aTokenBalance(rayDivFloor(amount.value, index), index);
   return derived(
     balance,
-    "aTokenBalance(rayDivFloor(amountWei, accruedLiquidityIndex), accruedLiquidityIndex) — the collateral position this supply creates",
+    "aTokenBalance(rayDivFloor(amountWei, accruedLiquidityIndex), accruedLiquidityIndex)",
     [
       amount,
       reserve.liquidityRateRay,
       reserve.liquidityIndexRay,
       reserve.lastUpdateTimestamp,
     ],
+    "the collateral position this supply creates",
   );
 }
 
@@ -722,7 +778,7 @@ function blockValuesOf(
   plan: PlanSuccess,
   snapshot: ChainSnapshot,
   rates: Readonly<Record<ReserveKey, ReserveRates>>,
-  stakingApy: Provenanced<bigint> | null,
+  stakingApy: ProvenancedRate | null,
 ): Readonly<Record<string, ComputedBlockValue>> {
   const values: Record<string, ComputedBlockValue> = {};
   for (const flow of plan.flows) {
@@ -749,7 +805,7 @@ function blockValuesOf(
       // session in P3a. Until then every gas slot renders its authored unavailable state
       // rather than a quoted-looking zero.
       gasCostBase: null,
-      apyWad:
+      rate:
         flow.type === "stake"
           ? stakingApy
           : isLend
@@ -784,12 +840,13 @@ function liquidationRatioOf(min: RiskCheckpoint | null): Provenanced<bigint> | n
   if (first.ltBps <= 0 || first.ltBps > 10_000) return null;
   return derived(
     liquidationRatioWad(collateralWei, debtWei, first.ltBps),
-    "debtWei × 1e4 × WAD / (collateralWei × ltBps), ceiling — the collateral/debt oracle ratio at HF = 1, at the minimum-HF step",
+    "debtWei × 1e4 × WAD / (collateralWei × ltBps), ceiling",
     [
       ...min.supplies.map((s) => s.amountProv),
       ...min.debts.map((d) => d.amountProv),
       ...first.ltInputs,
     ],
+    "the collateral/debt oracle ratio at HF = 1, at the minimum-HF step",
   );
 }
 
@@ -810,13 +867,166 @@ function leverageOf(
   for (const entry of final.collateral) exposure += entry.base;
   return derived(
     (exposure * WAD) / equity.base,
-    `floor(Σ collateralBase × WAD / equityBase) — collateral exposure ÷ equity after the closed iteration; equity ${PRICE_FEED.ETH!.semantics}`,
+    "floor(Σ collateralBase × WAD / equityBase)",
     [
       ...final.supplies.map((s) => s.baseProv).filter((p): p is Provenanced<bigint> => p !== null),
       initialAmountWei,
       equity.price,
     ],
+    `collateral exposure ÷ equity after the closed iteration; equity ${PRICE_FEED.ETH!.semantics}`,
   );
+}
+
+// ————————————————————————— the §5.2 composition —————————————————————————
+
+/**
+ * 100% of a source's output, in the integer bps `core/graph.ts` validates. Restated here
+ * rather than imported from `lib/strategy/types.ts`: the dependency runs one way, and a
+ * `core/` module must not reach into the view model for a unit.
+ */
+const FULL_ALLOCATION_BPS = 10_000;
+
+/**
+ * Why this crossing is correct, in the words the tooltip will carry. Authored once so every
+ * quantity that inherits the window says the same thing.
+ */
+const WINDOW_REASON =
+  "an instantaneous exchange rate is not an APR (SPEC §5.1); the window's endpoints are two reads at two blocks";
+
+/**
+ * The trailing staking APR (SPEC §5.1), used DIRECTLY as the one-year appreciation factor and
+ * labelled an APR (ruling Q3).
+ *
+ * `trailingAprWad` annualizes the window's growth linearly. §5.1 and §5.2 both name the
+ * quantity an APR, and `core/rates.ts` proves no `(1+g)^(365/7) − 1` conversion — inventing
+ * one here would be new, unproven math dressed as a formatting choice.
+ *
+ * Pre-conditions are tested rather than caught: `trailingAprWad` throws on a non-positive
+ * endpoint or span, and a missing endpoint must surface as an unavailable slot, never as a
+ * default.
+ */
+function stakingAprOf(snapshot: ChainSnapshot): ProvenancedRate | null {
+  const window = snapshot.etherfi.rateWindow;
+  if (window === null) return null;
+  if (window.rateNow.value <= 0n) return null;
+  if (window.rateBefore.value <= 0n) return null;
+  if (window.secondsElapsed.value <= 0n) return null;
+  // An APR, and the type says so: the window's growth is annualized LINEARLY, with no
+  // compounding assumed or applied (ruling Q3). Nothing downstream may call it an APY.
+  const wad = derivedOverWindow(
+    trailingAprWad(window.rateNow.value, window.rateBefore.value, window.secondsElapsed.value),
+    "(rateNow − rateBefore)/rateBefore × SECONDS_PER_YEAR/secondsElapsed",
+    [window.rateNow, window.rateBefore, window.secondsElapsed],
+    WINDOW_REASON,
+    "trailing staking APR",
+  );
+  return { kind: "apr", wad };
+}
+
+/** The three rate legs §5.2 composes, present only when ALL of them are. */
+interface CompositionLegs {
+  readonly bBps: number;
+  readonly stake: ProvenancedRate;
+  readonly supply: ProvenancedRate;
+  readonly debt: ProvenancedRate;
+}
+
+/**
+ * §5.2 describes ONE closed iteration of a single correlated pair, so the composition is
+ * defined only for that shape: one borrow block supplying `b`, one collateral reserve, one
+ * debt reserve, and a rate for each of the three legs. Anything else — a missing window, a
+ * second borrow, a rate that did not resolve — returns null and takes the whole family with
+ * it, rather than publishing a partial composition that reads as a complete one.
+ */
+function compositionLegsOf(
+  graph: StrategyGraph,
+  plan: PlanSuccess,
+  rates: Readonly<Record<ReserveKey, ReserveRates>>,
+  stakingApy: ProvenancedRate | null,
+): CompositionLegs | null {
+  if (stakingApy === null) return null;
+  const borrowBlocks = graph.blocks.filter((b) => b.type === "borrow");
+  if (borrowBlocks.length !== 1) return null;
+  const bBps = borrowBlocks[0]!.params["allocationBps"];
+  if (typeof bBps !== "number") return null;
+
+  const collateralReserves = new Set(
+    plan.flows.filter((f) => f.type === "lend").map((f) => f.reserve!),
+  );
+  const debtReserves = new Set(
+    plan.flows.filter((f) => f.type === "borrow").map((f) => f.reserve!),
+  );
+  if (collateralReserves.size !== 1 || debtReserves.size !== 1) return null;
+
+  const supply = rates[[...collateralReserves][0]!].supplyApy;
+  const debt = rates[[...debtReserves][0]!].borrowApy;
+  if (supply === null || debt === null) return null;
+  return { bBps, stake: stakingApy, supply, debt };
+}
+
+/**
+ * Collateral-side APY: staking and supply compound on the SAME collateral, so they multiply
+ * rather than add.
+ *
+ * `derivedOverWindow`, not `derived`: the staking leg's observations span two blocks, so any
+ * composition containing it does too. `derived` would throw here, and rightly — the honest
+ * move is to declare the crossing, not to hide it.
+ */
+function grossApyOf(legs: CompositionLegs): Provenanced<bigint> {
+  return derivedOverWindow(
+    mulWad(WAD + legs.stake.wad.value, WAD + legs.supply.wad.value) - WAD,
+    "(1 + r_stake)(1 + r_supply) − 1",
+    [legs.stake.wad, legs.supply.wad],
+    WINDOW_REASON,
+    "§5.2 r_coll, staking and supply compounding on one collateral",
+  );
+}
+
+function netApyOf(legs: CompositionLegs, gross: Provenanced<bigint>): Provenanced<bigint> {
+  const bWad = (BigInt(legs.bBps) * WAD) / BigInt(FULL_ALLOCATION_BPS);
+  return derivedOverWindow(
+    netApyWad(bWad, legs.stake.wad.value, legs.supply.wad.value, legs.debt.wad.value),
+    "(1 + b)(1 + r_coll) − b(1 + r_debt) − 1",
+    [entered(legs.bBps), gross, legs.debt.wad],
+    WINDOW_REASON,
+    "§5.2, current-rate run-rate over one iteration; incentives and points excluded by construction",
+  );
+}
+
+/**
+ * The §5.2 exposure weights, in the integer bps the contract fixes: the collateral legs share
+ * `(1 + b)` and the debt leg carries `−b`, so the three sum to FULL_ALLOCATION_BPS.
+ *
+ * The collateral share splits in proportion to each leg's rate, with the remainder landing on
+ * the supply leg so the sum is exact rather than approximately right.
+ *
+ * The `else` branch covers a zero collateral rate AND a NEGATIVE staking rate — a real
+ * slashing reading, not a missing one, which must not be nulled away. With no positive rate
+ * to apportion, an even split states "both legs apply to the whole collateral" without
+ * inventing a preference. The invariant holds in both branches.
+ */
+function yieldWeights(
+  bBps: number,
+  rStake: bigint,
+  rSupply: bigint,
+): { readonly stake: number; readonly supply: number; readonly borrow: number } {
+  const collateralBps = FULL_ALLOCATION_BPS + bBps;
+  const totalCollateralRate = rStake + rSupply;
+  const stake =
+    totalCollateralRate > 0n && rStake >= 0n && rSupply >= 0n
+      ? Number((BigInt(collateralBps) * rStake) / totalCollateralRate)
+      : Math.ceil(collateralBps / 2);
+  return { stake, supply: collateralBps - stake, borrow: -bBps };
+}
+
+/** Canonical order: the collateral legs in the order they compound, then the debt leg. */
+function yieldSourcesOf(legs: CompositionLegs): readonly YieldSource[] {
+  const weights = yieldWeights(legs.bBps, legs.stake.wad.value, legs.supply.wad.value);
+  return [
+    { protocol: "etherfi", type: "stake", rate: legs.stake, weightBps: weights.stake },
+    { protocol: "aave-v3", type: "supply", rate: legs.supply, weightBps: weights.supply },
+    { protocol: "aave-v3", type: "borrow", rate: legs.debt, weightBps: weights.borrow },
+  ];
 }
 
 // ————————————————————————— failure semantics (§5) —————————————————————————
@@ -845,7 +1055,7 @@ function errorMessageOf(errors: readonly PlanError[]): string {
 function refusal(errors: readonly PlanError[]): SimulationResult {
   const message = errorMessageOf(errors);
   const unknown = (): Provenanced<HealthFactor> =>
-    derived<HealthFactor>({ status: "unknown", reason: message }, `no plan: ${message}`, []);
+    derived<HealthFactor>({ status: "unknown", reason: message }, "no plan", [], message);
   return {
     isValid: false,
     errorMessage: message,
@@ -883,14 +1093,13 @@ export function simulate(
   const ledger = ledgerFrom(plan, snapshot);
   const rates = reserveRatesOf(plan, snapshot);
 
-  // SPEC §5.1's staking APR is a trailing window — two reads at two blocks — and this
-  // snapshot carries no window (ruling Q1). The leg therefore has no rate, which by §5.2's
-  // complete-or-nothing rule takes gross APY, net APY and the whole breakdown with it. A
-  // two-of-three composition would render as the whole composition, which is the defect.
-  const stakingApy: Provenanced<bigint> | null = null;
-  const grossApyWad: Provenanced<bigint> | null = null;
-  const netApyWad: Provenanced<bigint> | null = null;
-  const yieldSources: readonly YieldSource[] = [];
+  // §5.2, complete or nothing: the three legs are resolved together, and if any one of them
+  // is missing the gross APY, the net APY and the whole breakdown are unavailable together.
+  const stakingApy = stakingAprOf(snapshot);
+  const legs = compositionLegsOf(graph, plan, rates, stakingApy);
+  const grossApyWad = legs === null ? null : grossApyOf(legs);
+  const netApyWad = legs === null || grossApyWad === null ? null : netApyOf(legs, grossApyWad);
+  const yieldSources = legs === null ? [] : yieldSourcesOf(legs);
 
   const inputFlow = plan.flows.find((f) => f.type === "input");
   const initialAmountWei = inputFlow === undefined ? null : inputFlow.outputWei;

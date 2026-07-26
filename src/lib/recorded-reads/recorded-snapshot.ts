@@ -30,6 +30,10 @@ import type { RateStrategyBps } from "../../core/rates";
 import {
   PINNED_BLOCK,
   PINNED_TS,
+  WINDOW_BLOCK,
+  WINDOW_ELAPSED_SECONDS,
+  WINDOW_RATE_LABEL,
+  WINDOW_TS,
   addressOf,
   anchorAddr,
   addrRead,
@@ -95,6 +99,8 @@ export interface RecordedProtocol {
     weETH: Address;
     totalPooledEther: bigint;
     totalShares: bigint;
+    /** The trailing staking-APR window's two endpoints, raw (SPEC §5.1). */
+    rateWindow: { rateNow: bigint; rateBefore: bigint; secondsElapsed: bigint } | null;
   };
 }
 
@@ -198,12 +204,18 @@ export function recordedProtocol(): RecordedProtocol {
       weETH: anchorAddr("weETH"),
       totalPooledEther: bigRead("LP.getTotalPooledEther"),
       totalShares: bigRead("eETH.totalShares"),
+      rateWindow: {
+        rateNow: bigRead("weETH.getRate"),
+        rateBefore: bigRead(WINDOW_RATE_LABEL),
+        secondsElapsed: WINDOW_ELAPSED_SECONDS,
+      },
     },
   };
 }
 
 export function snapshotFrom(raw: RecordedProtocol, user: UserSnapshot): ChainSnapshot {
   const mint = observationMinter(PINNED_BLOCK, Number(PINNED_TS));
+  const windowMint = observationMinter(WINDOW_BLOCK, Number(WINDOW_TS));
   const reserve = (sym: "WETH" | "weETH", r: RawReserve) => ({
     underlying: r.underlying,
     aToken: r.aToken,
@@ -269,6 +281,19 @@ export function snapshotFrom(raw: RecordedProtocol, user: UserSnapshot): ChainSn
       weETH: raw.etherfi.weETH,
       totalPooledEther: mint.observe(raw.etherfi.totalPooledEther, "LP.getTotalPooledEther"),
       totalShares: mint.observe(raw.etherfi.totalShares, "eETH.totalShares"),
+      // The window's earlier endpoint is minted by a SECOND minter pinned to ITS OWN block.
+      // Minting it against the pinned block would forge the very thing the quantity is about.
+      rateWindow:
+        raw.etherfi.rateWindow === null
+          ? null
+          : {
+              rateNow: mint.observe(raw.etherfi.rateWindow.rateNow, "weETH.getRate"),
+              rateBefore: windowMint.observe(raw.etherfi.rateWindow.rateBefore, "weETH.getRate"),
+              secondsElapsed: windowMint.observe(
+                raw.etherfi.rateWindow.secondsElapsed,
+                "eth_getBlockByNumber.timestampDelta(pinned,window)",
+              ),
+            },
     },
     user,
   };

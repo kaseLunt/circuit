@@ -200,6 +200,8 @@ function fixtureSnapshot(): ChainSnapshot {
       weETH: anchorAddr("weETH"),
       totalPooledEther: mint.observe(bigRead("LP.getTotalPooledEther"), "LP.getTotalPooledEther"),
       totalShares: mint.observe(bigRead("eETH.totalShares"), "eETH.totalShares"),
+      // The route optimizer never reaches a rate; the window would be noise in this fixture.
+      rateWindow: null,
     },
     // A deliberately clean fixture wallet: no e-mode, no Aave footprint. The
     // phase gate returns before either is read, so neither steers this suite.

@@ -113,6 +113,68 @@ describe("component-boundary formatters (W05 canvas batch)", () => {
     expect(formatWadAsPercent((17n * WAD) / 10n)).toBe("170.00%");
   });
 
+  /**
+   * A real, non-zero rate rendered as "0.00%" is a lie about a value the chain reported —
+   * the display asserting ZERO where the truth is "small". The threshold form states the
+   * bound instead. The headline case is real: at the pinned block the weETH supply APY is
+   * ~2.6e-7 WAD, and it is what the lend block shows.
+   */
+  describe("a non-zero rate that rounds away says so, rather than claiming zero", () => {
+    /** The recorded weETH post-action supply APY at the pinned block (b = 7000). */
+    const REAL_WEETH_SUPPLY_APY = 264_681_551_200n;
+
+    it("renders the real weETH supply APY as a bound, never as 0.00%", () => {
+      expect(formatWadAsPercent(REAL_WEETH_SUPPLY_APY)).toBe("<0.01%");
+      expect(formatWadAsPercent(REAL_WEETH_SUPPLY_APY)).not.toBe("0.00%");
+    });
+
+    it("keeps an actual zero an actual zero — the bound is not a stand-in for nothing", () => {
+      expect(formatWadAsPercent(0n)).toBe("0.00%");
+      expect(formatRayRateAsPct(0n)).toBe("0.00%");
+    });
+
+    it("preserves sign: a value that costs a little is not one that earns a little", () => {
+      expect(formatWadAsPercent(-1n)).toBe(">-0.01%");
+      expect(formatWadAsPercent(1n)).toBe("<0.01%");
+      // A RAY rate is scaled down before formatting and BigInt division truncates toward
+      // zero, so the sign has to come from the input rather than the rendered string.
+      expect(formatRayRateAsPct(-1n)).toBe(">-0.01%");
+      expect(formatRayRateAsPct(1n)).toBe("<0.01%");
+    });
+
+    it("moves the threshold with the requested precision", () => {
+      expect(formatWadAsPercent(1n, 0)).toBe("<1%");
+      expect(formatWadAsPercent(1n, 4)).toBe("<0.0001%");
+      expect(formatWadAsPercent(-1n, 4)).toBe(">-0.0001%");
+      // Enough precision to show the figure: no bound, the real digits.
+      expect(formatWadAsPercent(50_000_000_000_000n, 4)).toBe("0.0050%");
+    });
+
+    it("is exact at the half-up boundary — only values that ROUND to zero get the bound", () => {
+      expect(formatWadAsPercent(49_999_999_999_999n)).toBe("<0.01%");
+      expect(formatWadAsPercent(50_000_000_000_000n)).toBe("0.01%");
+      expect(formatWadAsPercent(-49_999_999_999_999n)).toBe(">-0.01%");
+      expect(formatWadAsPercent(-50_000_000_000_000n)).toBe("-0.01%");
+    });
+
+    it("leaves a RAY rate that rounds away with the same treatment", () => {
+      // The post-action weETH liquidity rate, in RAY.
+      expect(formatRayRateAsPct(264_681_516_172_345_992_079n)).toBe("<0.01%");
+    });
+
+    it("never widens past the slot the canvas reserves for a rate", () => {
+      // base-block.ts RATE_SLOT_CHARS = 7, sized for "12.34%". The bound forms must fit it.
+      for (const rendered of [
+        formatWadAsPercent(1n),
+        formatWadAsPercent(-1n),
+        formatRayRateAsPct(1n),
+        formatRayRateAsPct(-1n),
+      ]) {
+        expect(rendered.length).toBeLessThanOrEqual(7);
+      }
+    });
+  });
+
   it("formats WAD ratios to 4 dp", () => {
     expect(formatWadRatio(912_300_000_000_000_000n)).toBe("0.9123");
   });

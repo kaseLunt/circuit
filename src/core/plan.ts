@@ -104,12 +104,34 @@ export interface EModeCategorySnapshot {
   readonly ltvZeroBitmap: Observed<bigint>;
 }
 
+/**
+ * The two read points SPEC §5.1's trailing staking APR needs.
+ *
+ * `rateBefore` and `secondsElapsed` are minted by a SECOND `ObservationMinter` pinned to the
+ * earlier block — that is the point of the type: an `Observed` must carry the block it was
+ * actually read at, and this is the only cross-block quantity in v1.
+ */
+export interface StakingRateWindow {
+  /** weETH.getRate() at the snapshot's own block. */
+  readonly rateNow: Observed<bigint>;
+  /** weETH.getRate() at the window's start block. */
+  readonly rateBefore: Observed<bigint>;
+  /** now.timestamp − before.timestamp, from the two block headers. */
+  readonly secondsElapsed: Observed<bigint>;
+}
+
 export interface EtherFiSnapshot {
   readonly liquidityPool: Address;
   readonly eETH: Address;
   readonly weETH: Address;
   readonly totalPooledEther: Observed<bigint>;
   readonly totalShares: Observed<bigint>;
+  /**
+   * `null` when the archive endpoint did not resolve: the staking leg then has no rate, and
+   * net/gross APY and the yield breakdown all go to their unavailable states rather than to
+   * a guess made from an instantaneous exchange rate.
+   */
+  readonly rateWindow: StakingRateWindow | null;
 }
 
 /**
@@ -763,16 +785,18 @@ export function buildPlan(
         const minted = (wei * shares) / pooled;
         const mintedProv = derived(
           minted,
-          "floor(amountWei × eETH.totalShares / LP.getTotalPooledEther) — shares minted, matrix §7",
+          "floor(amountWei × eETH.totalShares / LP.getTotalPooledEther)",
           [prov, sharesObs, pooledObs],
+          "shares minted, matrix §7",
         );
         pooled += wei;
         shares += minted;
         const out = (minted * pooled) / shares;
         const outProv = derived(
           out,
-          "floor(sharesMinted × totalPooledEtherAfter / totalSharesAfter) — eETH balance",
+          "floor(sharesMinted × totalPooledEtherAfter / totalSharesAfter)",
           [mintedProv],
+          "eETH balance",
         );
         predictedOut.set(id, out);
         provOut.set(id, outProv);
@@ -784,8 +808,9 @@ export function buildPlan(
         const out = (wei * shares) / pooled;
         const outProv = derived(
           out,
-          "floor(eETHAmount × totalShares / totalPooledEther) — sharesForAmount, weETH minted",
+          "floor(eETHAmount × totalShares / totalPooledEther)",
           [prov],
+          "sharesForAmount, weETH minted",
         );
         predictedOut.set(id, out);
         provOut.set(id, outProv);
@@ -819,8 +844,9 @@ export function buildPlan(
         }
         const collateralProv = derived(
           collateralBase,
-          "floor(suppliedWei × priceBase / 10^decimals), summed over supplies preceding the borrow",
+          "floor(suppliedWei × priceBase / 10^decimals)",
           collateralInputs,
+          "summed over supplies preceding the borrow",
         );
         const borrowBase = (collateralBase * BigInt(bBps)) / 10_000n;
         const borrowBaseProv = derived(borrowBase, `floor(collateralBase × ${bBps} / 10^4)`, [
