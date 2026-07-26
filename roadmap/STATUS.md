@@ -1,6 +1,6 @@
 ---
 active_phase: P3
-active_task: none
+active_task: W07
 project_state: active
 writer_mode: serial
 parallel_readers: allowed
@@ -16,7 +16,7 @@ updated: 2026-07-26
 
 The frontmatter fields above are the machine-validated integration pointer and enforcement posture.
 `project_state: active` requires exactly one In progress phase. `project_state: complete` permits a
-zero-In-progress terminal roadmap, requires `active_task: none`, and forbids active work or claims;
+zero-In-progress terminal roadmap, requires `active_task: W07`, and forbids active work or claims;
 `active_phase` may remain as the last-phase pointer.
 `enforcement_evidence` is empty only at bootstrap; later postures point to typed, current
 observations under `roadmap/evidence/`. Even `merge-gated-attested` is an evidence claim, not a
