@@ -3,6 +3,7 @@
 import { useId, type ChangeEvent } from "react";
 import { Layers } from "lucide-react";
 import { formatWadAsPercent } from "../../../core/format";
+import { rateKindLabel } from "../../../core/risk";
 import type { StakeBlockData, StakeProtocol } from "../../../lib/strategy/types";
 import { SourcedValue, slotClassName, type SlotRamp } from "../../shared/sourced-value";
 import {
@@ -56,7 +57,10 @@ export function StakeBlock({ id, data, selected }: NodePropsFor<StakeBlockData>)
   const fieldId = useId();
   const rejection = useWriteRejection();
   const blockValue = runtime.blockValues[id] ?? null;
-  const apyWad = blockValue === null ? null : blockValue.apyWad;
+  const rate = blockValue === null ? null : blockValue.rate;
+  // Read from the figure, never assumed by the slot: an unresolved rate still has to be
+  // named something, and the staking leg is an APR by construction (core/risk.ts).
+  const stakingKindLabel = rateKindLabel(rate === null ? "apr" : rate.kind);
 
   function handleProtocolChange(event: ChangeEvent<HTMLSelectElement>): void {
     // The select is bound to the document, so a refused write snaps the control back.
@@ -116,16 +120,25 @@ export function StakeBlock({ id, data, selected }: NodePropsFor<StakeBlockData>)
       </div>
 
       <div className="flex items-baseline gap-2">
-        <span className="text-xs text-muted-foreground">Staking APY</span>
+        {/* An APR, said out loud. The trailing seven-day window annualizes linearly and
+            compounds nothing, so calling it an APY would claim arithmetic the rate never did.
+            The qualifier uses the same micro-tier grammar the supply and borrow blocks use
+            for "current-rate run-rate": the framing rides with the figure, always. */}
+        <span className="flex flex-col">
+          <span className="text-xs text-muted-foreground">{`Staking ${stakingKindLabel}`}</span>
+          <span className="text-micro uppercase tracking-wider text-muted-foreground">
+            trailing 7-day window
+          </span>
+        </span>
         <span className="ml-auto">
           <SourcedValue
-            value={apyWad}
+            value={rate === null ? null : rate.wad}
             pending={runtime.pending}
-            label="Staking APY"
+            label={`Staking ${stakingKindLabel}, trailing 7-day window`}
             chars={RATE_SLOT_CHARS}
             format={formatWadAsPercent}
             unavailableReason="rate unavailable"
-            className={slotClassName(apyWad !== null, runtime.pending, RATE_RAMP)}
+            className={slotClassName(rate !== null, runtime.pending, RATE_RAMP)}
           />
         </span>
       </div>

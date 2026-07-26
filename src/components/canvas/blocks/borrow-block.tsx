@@ -5,6 +5,7 @@ import { HandCoins } from "lucide-react";
 import { formatBpsAsPercent, formatHealthFactor, formatWadAsPercent, formatWadRatio } from "../../../core/format";
 import { HF_WARN_WAD, hfWadValue, riskState, type HealthFactor } from "../../../core/health-factor";
 import { valueOf } from "../../../core/provenance";
+import { rateKindLabel } from "../../../core/risk";
 import { FULL_ALLOCATION_BPS, type BorrowBlockData } from "../../../lib/strategy/types";
 import { AssetChip } from "../../shared/asset-chip";
 import { SourcedValue, slotClassName, type SlotRamp } from "../../shared/sourced-value";
@@ -116,7 +117,8 @@ export function BorrowBlock({ id, data, selected }: NodePropsFor<BorrowBlockData
   const rejection = useWriteRejection();
   const blockValue = runtime.blockValues[id] ?? null;
 
-  const apyWad = blockValue === null ? null : blockValue.apyWad;
+  const rate = blockValue === null ? null : blockValue.rate;
+  const kindLabel = rateKindLabel(rate === null ? "apy" : rate.kind);
   const collateralAsset = blockValue === null ? null : blockValue.inputAsset;
   const pair = collateralAsset === null ? "collateral/debt" : `${collateralAsset}/${data.asset}`;
 
@@ -274,20 +276,20 @@ export function BorrowBlock({ id, data, selected }: NodePropsFor<BorrowBlockData
 
       <div className="flex items-baseline gap-2">
         <span className="flex flex-col">
-          <span className="text-xs text-muted-foreground">Borrow APY</span>
+          <span className="text-xs text-muted-foreground">{`Borrow ${kindLabel}`}</span>
           <span className="text-micro uppercase tracking-wider text-muted-foreground">
             current-rate run-rate
           </span>
         </span>
         <span className="ml-auto">
           <SourcedValue
-            value={apyWad}
+            value={rate === null ? null : rate.wad}
             pending={runtime.pending}
-            label="Borrow APY, current-rate run-rate"
+            label={`Borrow ${kindLabel}, current-rate run-rate`}
             chars={RATE_SLOT_CHARS}
             format={formatWadAsPercent}
             unavailableReason="rate unavailable"
-            className={slotClassName(apyWad !== null, runtime.pending, RATE_RAMP)}
+            className={slotClassName(rate !== null, runtime.pending, RATE_RAMP)}
           />
         </span>
       </div>

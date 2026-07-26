@@ -73,7 +73,10 @@ const RESOLVED_VALUE: ComputedBlockValue = {
   outputValueBase: minter.observe(34_990_00000000n, "derived from AaveOracle.getAssetPrice(weETH)"),
   gasCostBase: minter.observe(3_45000000n, "derived from eth_feeHistory"),
   // 3.42% expressed as a WAD.
-  apyWad: minter.observe((WAD * 342n) / 10_000n, "AavePool.getReserveData(WETH).liquidityRate"),
+  rate: {
+    kind: "apy",
+    wad: minter.observe((WAD * 342n) / 10_000n, "AavePool.getReserveData(WETH).liquidityRate"),
+  },
 };
 
 function runtime(overrides: Partial<BlockRuntime> = {}): BlockRuntime {

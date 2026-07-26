@@ -1,8 +1,10 @@
 /** @vitest-environment jsdom */
 
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import { Button, buttonVariants } from "./button";
+import { SourcedValue } from "../shared/sourced-value";
+import { derived, observationMinter, provenanceTrail } from "../../core/provenance";
 import { SkeletonValue } from "./skeleton";
 import { AssetChip } from "../shared/asset-chip";
 import { ErrorBoundary } from "../shared/error-boundary";
@@ -207,5 +209,150 @@ describe("ErrorBoundary", () => {
     );
     expect(screen.getByText("panel unavailable")).not.toBeNull();
     expect(screen.queryByRole("alert")).toBeNull();
+  });
+});
+
+describe("SourcedValue — the two provenance surfaces", () => {
+  const minter = observationMinter(25_592_678n, 1_784_776_451);
+  const price = minter.observe(192_386_686_200n, "Oracle.getAssetPrice(WETH)");
+  const inner = derived(2n, "inner formula", [price], "the inner WHY");
+  const deep = derived(3n, "outer formula", [inner]);
+  const shallow = derived(3n, "outer formula", [price]);
+  const fmt = (v: bigint): string => String(v);
+
+  it("caps the canvas tooltip at one level and STATES what it is not showing", () => {
+    render(
+      <SourcedValue value={deep} pending={false} label="Deep" chars={4} format={fmt} />,
+    );
+    fireEvent.focus(screen.getByRole("button", { name: "3" }));
+    const tip = screen.getByRole("tooltip");
+    const text = tip.textContent ?? "";
+    // Depth 0 and 1 are shown…
+    expect(text).toContain("outer formula");
+    expect(text).toContain("inner formula");
+    // …and the remainder is a COUNT, never an ellipsis.
+    expect(text).toContain("1 more derivation step");
+    expect(text).not.toContain("Oracle.getAssetPrice(WETH)");
+    expect(text).not.toContain("…");
+    expect(text).not.toContain("...");
+  });
+
+  it("says nothing about a remainder when there is none — a fully proven slot is silent", () => {
+    render(
+      <SourcedValue value={shallow} pending={false} label="Shallow" chars={4} format={fmt} />,
+    );
+    fireEvent.focus(screen.getByRole("button", { name: "3" }));
+    const text = screen.getByRole("tooltip").textContent ?? "";
+    expect(text).toContain("Oracle.getAssetPrice(WETH)");
+    expect(text).not.toContain("more derivation");
+  });
+
+  it("renders nesting as padding, not as leading spaces in the text", () => {
+    render(
+      <SourcedValue value={deep} pending={false} label="Deep" chars={4} format={fmt} />,
+    );
+    fireEvent.focus(screen.getByRole("button", { name: "3" }));
+    const lines = screen.getByRole("tooltip").querySelectorAll<HTMLElement>("span[style]");
+    expect(lines.length).toBeGreaterThan(0);
+    for (const line of lines) {
+      expect(line.style.paddingLeft).toMatch(/rem$/);
+      expect(line.textContent ?? "").toBe((line.textContent ?? "").trimStart());
+    }
+  });
+
+  it("shows a derivation's note apart from its formula", () => {
+    render(
+      <SourcedValue value={inner} pending={false} label="Inner" chars={4} format={fmt} />,
+    );
+    fireEvent.focus(screen.getByRole("button", { name: "2" }));
+    const text = screen.getByRole("tooltip").textContent ?? "";
+    expect(text).toContain("inner formula");
+    expect(text).toContain("the inner WHY");
+    // Not concatenated into the formula — a renderer can tell them apart.
+    expect(text).not.toContain("inner formula — the inner WHY");
+  });
+
+  describe("disclosure surface", () => {
+    function open() {
+      render(
+        <SourcedValue
+          value={deep}
+          pending={false}
+          label="Net APY"
+          chars={4}
+          format={fmt}
+          provenance="disclosure"
+        />,
+      );
+      const trigger = screen.getByRole("button", { name: "3" });
+      expect(trigger.getAttribute("aria-expanded")).toBe("false");
+      fireEvent.click(trigger);
+      return { trigger, section: screen.getByRole("group", { name: "Net APY provenance" }) };
+    }
+
+    it("expands in the flow with the WHOLE tree — no cap, because nothing floats", () => {
+      const { section } = open();
+      const text = section.textContent ?? "";
+      expect(text).toContain("outer formula");
+      expect(text).toContain("inner formula");
+      // The depth the tooltip had to cap is fully present here.
+      expect(text).toContain("Oracle.getAssetPrice(WETH)");
+      expect(text).not.toContain("more derivation");
+      // In-flow, not floating: no tooltip role, and nothing positioned absolutely.
+      expect(screen.queryByRole("tooltip")).toBeNull();
+    });
+
+    it("moves focus into the section and returns it to the trigger on Escape", () => {
+      const { trigger, section } = open();
+      expect(document.activeElement).toBe(section);
+      fireEvent.keyDown(section, { key: "Escape" });
+      expect(screen.queryByRole("group", { name: "Net APY provenance" })).toBeNull();
+      expect(document.activeElement).toBe(trigger);
+      expect(trigger.getAttribute("aria-expanded")).toBe("false");
+    });
+
+    it("heads the section with the subject being proven, and keeps it in view", () => {
+      const { section } = open();
+      const header = section.firstElementChild as HTMLElement;
+      // At any scroll depth the reader can still name what is being proven, and leave.
+      expect(header.className).toContain("sticky");
+      expect(header.className).toContain("top-0");
+      expect(header.className).toContain("bg-card");
+      expect(header.textContent).toContain("Provenance · Net APY");
+      // The VALUE, so the header identifies the figure and not just the slot.
+      expect(header.textContent).toContain("3");
+      expect(within(header).getByRole("button", { name: "Close" })).not.toBeNull();
+    });
+
+    it("renders each qualification as its own line, and drops an inherited echo", () => {
+      const shared = "the shared WHY";
+      const child = derived(1n, "child formula", [price], shared);
+      const parent = derived(2n, "parent formula", [child], shared);
+      render(
+        <SourcedValue
+          value={parent}
+          pending={false}
+          label="Composed"
+          chars={4}
+          format={fmt}
+          provenance="disclosure"
+        />,
+      );
+      fireEvent.click(screen.getByRole("button", { name: "2" }));
+      const section = screen.getByRole("group", { name: "Composed provenance" });
+      // The fact originates on the child; the parent's echo adds nothing on screen.
+      expect(screen.getAllByText(shared)).toHaveLength(1);
+      // …and the data still carries it on both, which is the propagation invariant.
+      expect(provenanceTrail(parent)[0]?.notes).toEqual([shared]);
+      expect(section.textContent).toContain("parent formula");
+    });
+
+    it("is dismissible by pointer, and the trigger reports its state", () => {
+      const { trigger } = open();
+      expect(trigger.getAttribute("aria-expanded")).toBe("true");
+      fireEvent.click(screen.getByRole("button", { name: "Close" }));
+      expect(screen.queryByRole("group", { name: "Net APY provenance" })).toBeNull();
+      expect(document.activeElement).toBe(trigger);
+    });
   });
 });
