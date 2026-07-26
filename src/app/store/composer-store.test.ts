@@ -22,6 +22,7 @@ import {
   overAllocatedSourceIds,
   readBorrowAllocationBps,
   readInputAmount,
+  readOutgoingAllocationBps,
   selectGraph,
   selectRedoLabel,
   selectUndoLabel,
@@ -778,5 +779,72 @@ describe("composer store — gate, provenance and transport invariants", () => {
         expect(round.ok && round.graph).toEqual(doc);
       }
     }
+  });
+});
+
+describe("composer store — outgoing allocation reaches the display provenanced", () => {
+  it("says nothing about a block that routes nothing out", () => {
+    const store = seeded();
+    const sink = store.getState().doc.blocks.find((b) => b.type === "borrow");
+    expect(sink).not.toBeUndefined();
+    const outgoing = store
+      .getState()
+      .doc.edges.filter((e) => e.source === (sink?.id ?? ""));
+    if (outgoing.length === 0) {
+      expect(readOutgoingAllocationBps(store.getState(), sink?.id ?? "")).toBeNull();
+    }
+    // An id that is not in the document at all is an absence, never a zero.
+    expect(readOutgoingAllocationBps(store.getState(), "nope")).toBeNull();
+  });
+
+  it("derives the sum over the entered edge allocations, naming the derivation", () => {
+    const store = seeded();
+    const doc = store.getState().doc;
+    const source = doc.edges[0]?.source ?? "";
+    const expected = doc.edges
+      .filter((e) => e.source === source)
+      .reduce((sum, e) => sum + e.allocationBps, 0);
+
+    const derivedSum = readOutgoingAllocationBps(store.getState(), source);
+    expect(derivedSum).not.toBeNull();
+    expect(derivedSum?.kind).toBe("derived");
+    expect(derivedSum?.value).toBe(expected);
+    expect(derivedSum?.expression).toContain(source);
+    // Its inputs are the user's own numbers: nothing here can launder one into Observed.
+    for (const input of derivedSum?.inputs ?? []) {
+      expect(input.kind).toBe("entered");
+    }
+  });
+
+  it("agrees with overAllocatedSourceIds on every source in the document", () => {
+    const store = seeded();
+    const first = store.getState().doc.blocks.find((b) => b.type === "input");
+    const targets = store
+      .getState()
+      .doc.blocks.filter((b) => b.type === "lend")
+      .map((b) => b.id);
+    // Force one source over 100% by splitting it two ways at full allocation each.
+    for (const target of targets) store.getState().connect(first?.id ?? "", target);
+
+    const over = new Set(overAllocatedSourceIds(store.getState().doc));
+    for (const block of store.getState().doc.blocks) {
+      const sum = readOutgoingAllocationBps(store.getState(), block.id);
+      const isOver = sum !== null && sum.value > FULL_ALLOCATION_BPS;
+      expect(isOver).toBe(over.has(block.id));
+    }
+  });
+
+  it("follows the document rather than caching it", () => {
+    const store = seeded();
+    const edge = store.getState().doc.edges[0];
+    expect(edge).not.toBeUndefined();
+    const source = edge?.source ?? "";
+    store.getState().setEdgeAllocationBps(edge?.id ?? "", 3_333);
+    expect(readOutgoingAllocationBps(store.getState(), source)?.value).toBe(
+      store
+        .getState()
+        .doc.edges.filter((e) => e.source === source)
+        .reduce((sum, e) => sum + e.allocationBps, 0),
+    );
   });
 });

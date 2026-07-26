@@ -36,7 +36,7 @@ import {
   type Edge,
   type StrategyGraph,
 } from "../../core/graph";
-import { entered, type Entered } from "../../core/provenance";
+import { derived, entered, type Derived, type Entered } from "../../core/provenance";
 import {
   WRAP_PAIRS,
   optimizeRoute,
@@ -795,4 +795,27 @@ export function readBorrowAllocationBps(
   if (block === undefined || block.type !== "borrow") return null;
   const raw = block.params["allocationBps"];
   return typeof raw === "number" ? entered(raw) : null;
+}
+
+/**
+ * The total a source routes out, as a DERIVED quantity over the entered edge allocations
+ * it sums — the digits behind `overAllocatedSourceIds`' verdict. The two are deliberately
+ * separate: one authority answers "is it over" and one answers "by how much", so the
+ * display cannot re-derive the second and disagree with the first.
+ *
+ * The math is `core/allocation.ts`'s `outgoingBps` and nothing else; this reader only
+ * wraps its result in the provenance the display boundary requires. `null` means the
+ * block sends nothing out — an absence, never a zero.
+ */
+export function readOutgoingAllocationBps(
+  state: Pick<ComposerState, "doc">,
+  blockId: string,
+): Derived<number> | null {
+  const outgoing = state.doc.edges.filter((e) => e.source === blockId);
+  if (outgoing.length === 0) return null;
+  return derived(
+    outgoingBps(state.doc.edges, blockId),
+    `sum of outgoing edge allocationBps out of ${blockId}`,
+    outgoing.map((e) => entered(e.allocationBps)),
+  );
 }
