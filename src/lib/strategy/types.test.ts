@@ -17,6 +17,7 @@ import {
   type BaseBlockData,
   type BlockData,
   type BlockType,
+  type BlockView,
   type BorrowBlockData,
   type ComputedBlockValue,
   type InputBlockData,
@@ -27,7 +28,6 @@ import {
   type StakeProtocol,
   type Strategy,
   type StrategyEdge,
-  type StrategyTemplate,
   type SwapBlockData,
   type YieldSource,
 } from "./types";
@@ -454,18 +454,28 @@ describe("yield sources (manifest L140, deviation D-5)", () => {
   });
 });
 
-describe("templates (manifest L236)", () => {
-  it("drops the hand-written APY claim but keeps the editorial risk label", () => {
-    const noEstimatedApy: "estimatedApy" extends keyof StrategyTemplate ? false : true = true;
-    const template: StrategyTemplate = {
-      id: "t1",
-      name: "Leveraged Restake",
-      description: "stake · wrap · supply · borrow",
-      riskLevel: "high",
-      blocks: [],
-      edges: [],
-      tags: ["etherfi", "aave-v3"],
-    };
-    expect([noEstimatedApy, template.riskLevel]).toEqual([true, "high"]);
+describe("templates (manifest L236) — the editorial template contract is deleted (W05 R1)", () => {
+  it("declares no template shape here: no riskLevel, no tags, anywhere in the view model", () => {
+    // `StrategyTemplate` and `RiskLevel` had zero consumers, and an authored risk
+    // label beside the derived RiskState is the same second-scale defect this file
+    // already pins out of SimulationResult. The composer's template contract lives
+    // in ./templates.ts and carries prose plus a graph() — nothing to fabricate.
+    const noTagsOnStrategy: "tags" extends keyof Strategy ? false : true = true;
+    const noRiskLevelOnStrategy: "riskLevel" extends keyof Strategy ? false : true = true;
+    const noTemplateOnStrategy: "template" extends keyof Strategy ? false : true = true;
+    expect([noTagsOnStrategy, noRiskLevelOnStrategy, noTemplateOnStrategy]).toEqual([
+      true,
+      true,
+      true,
+    ]);
+  });
+});
+
+describe("canvas view state (W05 R5)", () => {
+  it("carries the coordinate the deterministic layout pass produces, and nothing money-bearing", () => {
+    const at: BlockView = { x: 0, y: 140, isAutoInserted: true };
+    const noSelected: "selected" extends keyof BlockView ? false : true = true;
+    const noApy: "apy" extends keyof BlockView ? false : true = true;
+    expect([at.x, at.y, at.isAutoInserted, noSelected, noApy]).toEqual([0, 140, true, true, true]);
   });
 });

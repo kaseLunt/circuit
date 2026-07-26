@@ -131,9 +131,15 @@ python roadmap/tools/doctor.py --snapshot index
 - read_first: `TRANSPLANT.md` P1 row and the per-file edit lists; SPEC §3 (the demo script is the
   acceptance test), §5.6 (share-URL validation), §7 (taste rules); `src/core/graph.ts` and
   `src/core/plan.ts` module headers — the canvas consumes these, it does not reimplement them.
-- hazards: **D-010 applies from this item onward** — work lands via pull request, and until the
-  owner completes branch protection + `CONTROL_PLANE_POLICY_APPROVAL` + the required-workflow
-  wiring, every owner-gated transition still needs a recorded override. The prototype's
+- hazards: **D-010 applies from this item onward** — work lands via pull request; branch
+  protection and the trusted audit are LIVE (PR #1). **Branch discipline the replay policy
+  enforces (learned on PR #2):** merge commits are legal only in the integration orientation
+  (first parent an ancestor of the second — an up-to-date branch landing into main), so
+  "merge main into the feature branch" is structurally banned; keep `w05` linear via
+  rebase-onto + `--force-with-lease` when main moves mid-PR, and after every PR merge reset the
+  branch onto the new tip (`git checkout -B w05 origin/main` — the claim binds the branch NAME,
+  which survives the reset). Never force-push main. Product-only PRs need no approval token;
+  owner-gated PRs need the `CONTROL_PLANE_POLICY_APPROVAL` token re-issued per reviewed head. The prototype's
   `protocols.ts` is contaminated with hardcoded APYs/TVLs/GAS_COSTS: port only the
   `id`/`inputAsset`/`outputAsset` slice (manifest L83). The old global stylesheet's "STRATEGY
   BUILDER" section is design language #3 and is deleted wholesale, except the React Flow selection

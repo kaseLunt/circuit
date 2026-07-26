@@ -38,8 +38,8 @@ import {
 } from "../../src/core/plan";
 import { computeHealthFactor, type CollateralEntry } from "../../src/core/health-factor";
 import { currentRatesRay, rayDivCeil, rayDivFloor, rayMulCeil, rayMulFloor } from "../../src/core/rates";
-import type { Block, StrategyGraph } from "../../src/core/graph";
 import { PINNED_BLOCK, PINNED_TS, bigRead, readsMeta } from "../helpers/protocol-reads";
+import { flagshipGraph } from "../helpers/graphs";
 import { ANVIL_URL } from "./anvil";
 import { TxRevertedError, getStorageWord, nativeBalance, record, replayRevert, rpc, sendTx, setStorageWord, hexQuantity, type Receipt } from "./harness";
 import { decodeRevert } from "../../src/core/errors";
@@ -105,30 +105,6 @@ const ABI = {
 };
 
 const TRANSFER_TOPIC = encodeEventTopics({ abi: ABI.transfer, eventName: "Transfer" })[0];
-
-// ————————————————————————— fixture graph —————————————————————————
-
-function flagshipGraph(): StrategyGraph {
-  const blocks: Block[] = [
-    { id: "in", type: "input", params: { asset: "ETH", amount: INPUT_ETH } },
-    { id: "stake1", type: "stake", params: { protocol: "etherfi" } },
-    { id: "wrap1", type: "wrap", params: { from: "eETH", to: "weETH" } },
-    { id: "supply1", type: "lend", params: { protocol: "aave-v3", asset: "weETH" } },
-    { id: "borrow", type: "borrow", params: { protocol: "aave-v3", asset: "WETH", allocationBps: BORROW_BPS } },
-    { id: "unwrap", type: "unwrap", params: { from: "WETH", to: "ETH" } },
-    { id: "stake2", type: "stake", params: { protocol: "etherfi" } },
-    { id: "wrap2", type: "wrap", params: { from: "eETH", to: "weETH" } },
-    { id: "supply2", type: "lend", params: { protocol: "aave-v3", asset: "weETH" } },
-  ];
-  const chain = ["in", "stake1", "wrap1", "supply1", "borrow", "unwrap", "stake2", "wrap2", "supply2"];
-  const edges = chain.slice(0, -1).map((source, i) => ({
-    id: `e${i}`,
-    source,
-    target: chain[i + 1]!,
-    allocationBps: 10_000,
-  }));
-  return { blocks, edges };
-}
 
 // ————————————————————————— shared state —————————————————————————
 
@@ -423,7 +399,7 @@ describe("W03 fork gate — SPEC §2 flagship on the pinned fork", () => {
   });
 
   it("buildPlan on the pristine snapshot reproduces the unit fixture", () => {
-    const result = buildPlan(flagshipGraph(), pristine);
+    const result = buildPlan(flagshipGraph(INPUT_ETH, BORROW_BPS), pristine);
     if (!result.ok) throw new Error(`pristine plan failed: ${JSON.stringify(result.errors)}`);
     expect(result.steps).toHaveLength(13);
     expect(result.targetEModeCategoryId).toBe(1);
@@ -453,7 +429,7 @@ describe("W03 fork gate — SPEC §2 flagship on the pinned fork", () => {
     seeded = await captureChainSnapshot(client, { user: wallet });
     // Wallet tokens are NOT an Aave footprint — the predicate must stay false.
     expect(seeded.user.hasAaveFootprint.value).toBe(false);
-    const result = buildPlan(flagshipGraph(), seeded);
+    const result = buildPlan(flagshipGraph(INPUT_ETH, BORROW_BPS), seeded);
     if (!result.ok) throw new Error(`seeded plan failed: ${JSON.stringify(result.errors)}`);
     plan = result;
     expect(plan.steps).toHaveLength(13);

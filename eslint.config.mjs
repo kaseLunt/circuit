@@ -69,6 +69,34 @@ const eslintConfig = [
       "no-restricted-syntax": ["error", ...numericFallbackBan],
     },
   },
+  {
+    // W05 R10. These four carry money-adjacent contracts outside core/: the bps
+    // domains both write paths share, the untrusted share/draft payload, the template
+    // defaults, and the document every simulation is computed over. SPEC §7 names the
+    // composer alongside core/ for the numeric ban, and a `?? 0` on a missing rate,
+    // price or allocation is the same defect here as it is in core/. Listed after the
+    // src/** block on purpose — flat config replaces a rule's options rather than
+    // merging them, so the forge ban is restated rather than inherited.
+    files: [
+      "src/lib/share/encode.ts",
+      "src/lib/strategy/templates.ts",
+      "src/lib/strategy/layout.ts",
+      "src/app/store/composer-store.ts",
+    ],
+    rules: {
+      "no-restricted-syntax": ["error", forgedObservedBan, ...numericFallbackBan],
+    },
+  },
+  {
+    // W05 R10. The shared fixtures mint every Observed through observationMinter over
+    // the committed reads log; a hand-written observed literal here would forge
+    // provenance into every suite that imports them — including the ones asserting
+    // that provenance is honest.
+    files: ["tests/helpers/**/*.ts"],
+    rules: {
+      "no-restricted-syntax": ["error", forgedObservedBan],
+    },
+  },
 ];
 
 export default eslintConfig;
