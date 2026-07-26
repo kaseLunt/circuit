@@ -1,34 +1,25 @@
 ---
-claim_id: 89f984ca-66fd-4ed3-a5d4-e31a2aa1f1d9
-generation: 8
+claim_id: dee66aba-85d8-4f50-824c-07d0bfc46c87
+generation: 9
 agent: claude-code
-task: W05
-status: released
+task: W06
+status: active
 integrator: true
 branch: w05
 worktree_id: fcc099da-1d6b-593f-bfcb-bd6915fc89c2
-base_commit: e375aced6984e5b4da5e0f6af8458620d9290f47
+base_commit: 14749854b9365ebfab4406da035c0b71dfc69bf7
 allowed_paths:
-  - src/**
-  - tests/**
-  - e2e/**
+  - README.md
+  - LICENSE
   - docs/**
-  - .github/**
-  - package.json
-  - package-lock.json
-  - playwright.config.ts
-  - vitest.config.ts
-  - tsconfig.json
-  - eslint.config.mjs
-  - .gitignore
-  - scripts/**
-  - roadmap/work/W05-p2-canvas-on-proven-core.md
-scope_hash: sha256:dca66352cd33ba8df70bc27675a2ade7f3f513f51ae15222df3fc06a8f3b4b5d
-issued_at: 2026-07-26T20:16:58Z
-lease_expires: 2026-07-27T04:16:58Z
-updated_at: 2026-07-26T21:05:36Z
+  - roadmap/work/W06-p2-p3-boundary.md
+  - roadmap/work/W07-p3-execution.md
+scope_hash: sha256:ac42b98f13dc740c5ccb7a9b7d38636b95920e7cb625b6efe81697e742bb1cf5
+issued_at: 2026-07-26T22:47:16Z
+lease_expires: 2026-07-27T06:47:16Z
+updated_at: 2026-07-26T22:47:16Z
 ---
 
-# Claim: claude-code -> W05
+# Claim: claude-code -> W06
 
 This is a serial task/scope binding, not a distributed lock.
