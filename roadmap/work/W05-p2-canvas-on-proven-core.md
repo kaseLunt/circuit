@@ -22,16 +22,40 @@ allowed_paths:
   - tsconfig.json
   - eslint.config.mjs
   - .gitignore
+  - scripts/**
   - roadmap/work/W05-p2-canvas-on-proven-core.md
 deliverables:
   - src/lib/strategy/types.ts
   - src/core/route-optimizer.ts
+  - src/core/risk.ts
   - src/app/store/composer-store.ts
+  - src/app/store/composer-provider.tsx
   - src/lib/strategy/templates.ts
+  - src/lib/recorded-reads/recorded-snapshot.ts
   - src/components/canvas/canvas.tsx
+  - src/components/canvas/canvas.css
+  - src/components/canvas/flow-edge.tsx
+  - src/components/canvas/selection-action-bar.tsx
+  - src/components/canvas/canvas-empty-state.tsx
+  - src/components/canvas/blocks/base-block.tsx
+  - src/components/canvas/blocks/block-value-badge.tsx
+  - src/components/canvas/blocks/input-block.tsx
+  - src/components/canvas/blocks/stake-block.tsx
+  - src/components/canvas/blocks/lend-block.tsx
+  - src/components/canvas/blocks/borrow-block.tsx
+  - src/components/canvas/blocks/auto-wrap-block.tsx
+  - src/components/canvas/blocks/index.ts
   - src/components/composer/sidebar.tsx
   - src/components/composer/simulation-panel.tsx
+  - src/components/composer/composer-shell.tsx
+  - src/components/composer/sandbox-composer.tsx
+  - src/components/composer/simulation-host.tsx
+  - src/components/composer/arrival.ts
+  - src/components/composer/share-link.tsx
+  - src/components/composer/share-refusal.tsx
+  - src/components/shared/sourced-value.tsx
   - src/lib/share/encode.ts
+  - src/lib/share/share-url.ts
   - e2e/demo-script.spec.ts
   - playwright.config.ts
   - .github/workflows/ci.yml
@@ -47,7 +71,7 @@ invalidated_by:
   - tests/**
   - package.json
 review_when: phase:P2:exit
-updated: 2026-07-25
+updated: 2026-07-26
 ---
 
 # W05 — P2 canvas on the proven core
@@ -69,11 +93,14 @@ The porting order is fixed by the manifest: `strategy/types.ts` → `route-optim
 commit with provenance in the message; `port-with-edits` files land with **every** listed edit in
 the same commit. Anything absent from the manifest does not exist.
 
-Block and edge components land under `src/components/canvas/blocks/` and `edges/` (in scope via
-`src/**`) but are deliberately not enumerated in `deliverables` yet: doctor requires achieved
-deliverables to be concrete existing files (globs and directories are rejected,
-`doctor.py:760`), and the port fixes their names. Amend `deliverables` with the concrete files
-in the commit that lands them — a contract amendment, so it is owner-gated by design.
+**Contract amendment (owner-reviewed, 2026-07-26):** deliverables enumerated with the concrete
+files the port fixed (the amendment this section promised — blocks family, canvas chrome, store
+binding, host/share surfaces, core/risk.ts, the recorded-reads builder). `scripts/**` and
+`docs/protocol-matrix-reads.json` enter `allowed_paths` for the staking-APR trailing-window
+capture: SPEC §5.1's staking APR needs one archive read ~7 days before the pinned block, which
+means one change to `scripts/protocol-reads.mjs` and a re-capture of the committed reads log.
+The archive read uses the existing runtime-built RPC endpoint; no URL or key is ever committed
+(post-credential-leak policy).
 
 ## Acceptance
 
