@@ -1,8 +1,4 @@
 /** @vitest-environment jsdom */
-// devDeps required by this suite and not yet in package.json: `jsdom` and
-// `@testing-library/react` (which pulls @testing-library/dom). They belong in the same
-// dep commit as @radix-ui/react-slot, class-variance-authority and lucide-react.
-// No jest-dom matchers are used, so `@testing-library/jest-dom` is not required.
 
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";

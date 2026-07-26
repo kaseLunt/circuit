@@ -76,7 +76,9 @@ describe("provenanceTrail", () => {
   });
 
   it("renders each leaf kind", () => {
-    expect(provenanceTrail(m.observe(1n, "s"))[0]).toContain("@ block 25592678");
+    const observedLine = provenanceTrail(m.observe(1n, "s"))[0];
+    expect(observedLine).toContain("@ block 25592678");
+    expect(observedLine).toContain("2025-07-23 03:14:11 UTC");
     expect(provenanceTrail(configured(1, "N", "f.ts"))[0]).toContain("configured N");
     expect(provenanceTrail(entered(1))[0]).toContain("entered by user");
   });

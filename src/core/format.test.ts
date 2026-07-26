@@ -6,6 +6,7 @@ import {
   formatHealthFactor,
   formatRayRateAsPct,
   formatAddress,
+  formatBlockTime,
   HF_NO_DEBT,
   RAY,
   WAD,
@@ -81,5 +82,15 @@ describe("formatRayRateAsPct", () => {
 describe("formatAddress", () => {
   it("shortens with an ellipsis", () => {
     expect(formatAddress("0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2")).toBe("0xC02a…6Cc2");
+  });
+});
+
+describe("formatBlockTime", () => {
+  it("renders an absolute UTC instant", () => {
+    expect(formatBlockTime(1_753_240_451)).toBe("2025-07-23 03:14:11 UTC");
+  });
+
+  it("zero-pads every field at the epoch", () => {
+    expect(formatBlockTime(0)).toBe("1970-01-01 00:00:00 UTC");
   });
 });

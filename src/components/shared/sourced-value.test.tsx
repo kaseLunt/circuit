@@ -1,9 +1,4 @@
 /** @vitest-environment jsdom */
-// devDeps required by this suite and not yet in package.json: `jsdom` and
-// `@testing-library/react` (which pulls @testing-library/dom). They belong in the same
-// dep commit as @radix-ui/react-slot, class-variance-authority and lucide-react.
-// No jest-dom matchers are used, so `@testing-library/jest-dom` is not required.
-//
 // The type-level half of this contract is checked by `npm run typecheck`, not here:
 // `value` admits `Provenanced<T> | null` and nothing else, so `value={3.42}` does not
 // compile. Asserting that at runtime would need a suppression comment, which is banned.
@@ -113,6 +108,7 @@ describe("SourcedValue — provenance tooltip", () => {
     const tooltip = screen.getByRole("tooltip");
     expect(tooltip.textContent).toContain("AavePool.getReserveData(WETH).liquidityRate");
     expect(tooltip.textContent).toContain("@ block 25592678");
+    expect(tooltip.textContent).toContain("2025-07-23 03:14:11 UTC");
     expect(trigger.getAttribute("aria-describedby")).toBe(tooltip.getAttribute("id"));
   });
 
