@@ -7,6 +7,11 @@ import {
   formatRayRateAsPct,
   formatAddress,
   formatBlockTime,
+  formatBpsAsPercent,
+  formatEth,
+  formatWadAsMultiple,
+  formatWadAsPercent,
+  formatWadRatio,
   HF_NO_DEBT,
   RAY,
   WAD,
@@ -92,5 +97,31 @@ describe("formatBlockTime", () => {
 
   it("zero-pads every field at the epoch", () => {
     expect(formatBlockTime(0)).toBe("1970-01-01 00:00:00 UTC");
+  });
+});
+
+describe("component-boundary formatters (W05 canvas batch)", () => {
+  it("formats bps as a percent at 0 and 2 dp, sign preserved", () => {
+    expect(formatBpsAsPercent(11_500)).toBe("115%");
+    expect(formatBpsAsPercent(3_333, 2)).toBe("33.33%");
+    expect(formatBpsAsPercent(50, 2)).toBe("0.50%");
+    expect(formatBpsAsPercent(-7_000, 2)).toBe("-70.00%");
+  });
+
+  it("formats WAD rates as percents", () => {
+    expect(formatWadAsPercent(34_200_000_000_000_000n)).toBe("3.42%");
+    expect(formatWadAsPercent((17n * WAD) / 10n)).toBe("170.00%");
+  });
+
+  it("formats WAD ratios to 4 dp", () => {
+    expect(formatWadRatio(912_300_000_000_000_000n)).toBe("0.9123");
+  });
+
+  it("formats WAD multiples", () => {
+    expect(formatWadAsMultiple((25n * WAD) / 10n)).toBe("2.50×");
+  });
+
+  it("formats an ETH amount with its unit", () => {
+    expect(formatEth(1_099_835_630_856_114_428n)).toBe("1.0998 ETH");
   });
 });
