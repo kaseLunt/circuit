@@ -16,6 +16,7 @@ export default defineConfig({
       include: [
         "src/core/**/*.ts",
         "src/lib/share/encode.ts",
+        "src/lib/share/share-url.ts",
         "src/lib/strategy/templates.ts",
         "src/lib/strategy/layout.ts",
         "src/app/store/composer-store.ts",
