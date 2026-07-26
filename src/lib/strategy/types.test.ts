@@ -96,13 +96,13 @@ const simulation: SimulationResult = {
     {
       protocol: "etherfi",
       type: "stake",
-      apyWad: entered(29_000_000_000_000_000n),
+      rate: { kind: "apr" as const, wad: entered(29_000_000_000_000_000n) },
       weightBps: FULL_ALLOCATION_BPS + borrowData.allocationBps,
     },
     {
       protocol: "aave-v3",
       type: "borrow",
-      apyWad: entered(26_000_000_000_000_000n),
+      rate: { kind: "apy" as const, wad: entered(26_000_000_000_000_000n) },
       weightBps: -borrowData.allocationBps,
     },
   ],
@@ -436,10 +436,13 @@ describe("simulation results (manifest L156-168)", () => {
       outputAmountWei: entered(940_000_000_000_000_000n),
       outputValueBase: entered(300_000_000_000n),
       gasCostBase: entered(120_000_000n),
-      apyWad: null,
+      rate: null,
     };
     const noUsd: "inputValueUsd" extends keyof ComputedBlockValue ? false : true = true;
-    expect([noUsd, blockValue.apyWad]).toEqual([true, null]);
+    // The unit-neutral field: a rate carries its KIND, so no renderer can append "APY" to
+    // a figure that is an APR (Codex D-007, the trailing-window round).
+    const noBareApy: "apyWad" extends keyof ComputedBlockValue ? false : true = true;
+    expect([noUsd, noBareApy, blockValue.rate]).toEqual([true, true, null]);
   });
 });
 

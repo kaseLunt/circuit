@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { decodeFunctionData, toFunctionSelector } from "viem";
 import type { StrategyGraph } from "./graph";
-import { observedBlocks, provenanceTrail } from "./provenance";
+import { observedBlocks, provenanceTrailText } from "./provenance";
 import {
   buildPlan,
   encodeStep,
@@ -111,7 +111,7 @@ describe("buildPlan — flagship 13-step canonical fixture (SPEC §2)", () => {
     expect(borrow.amount.amount.expression).toMatch(/floor/);
     // Every observed leaf in the derivation sits at the pinned block.
     expect([...observedBlocks(borrow.amount.amount)]).toEqual([PINNED_BLOCK]);
-    const trail = provenanceTrail(borrow.amount.amount).join("\n");
+    const trail = provenanceTrailText(borrow.amount.amount).join("\n");
     expect(trail).toContain("Oracle.getAssetPrice(weETH)");
     expect(trail).toContain("Oracle.getAssetPrice(WETH)");
     expect(trail).toContain("entered by user");
@@ -320,7 +320,7 @@ describe("plan.flows — a recording of the pass that already ran, not a second 
     if (deposit.amount.kind !== "derived") throw new Error("expected a derived amount");
     expect(deposit.amount.amount).toBe(flow.inputWei);
     expect(deposit.amount.amount.value).toBe((10n * WAD_WEI * 6_000n) / 10_000n);
-    expect(provenanceTrail(deposit.amount.amount).join("\n")).toContain("entered by user");
+    expect(provenanceTrailText(deposit.amount.amount).join("\n")).toContain("entered by user");
     // Still a plan-time amount, so encodeStep refuses a resolved one.
     expect(() => encodeStep(deposit, 1n)).toThrow(/fixed/);
     expect(encodeStep(deposit).value).toBe(deposit.amount.amount.value);

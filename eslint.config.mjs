@@ -108,6 +108,14 @@ const eslintConfig = [
     },
   },
   {
+    // The e2e geometry evidence is emitted as a GitHub Actions `::notice` line,
+    // which the runner parses from stdout — so this one file writes to the
+    // console by design (the B5 pattern: a sanctioned writer is declared here,
+    // never dodged via process.stdout).
+    files: ["e2e/demo-script.spec.ts"],
+    rules: { "no-console": "off" },
+  },
+  {
     // W05 R10. The shared fixtures mint every Observed through observationMinter over
     // the committed reads log; a hand-written observed literal here would forge
     // provenance into every suite that imports them — including the ones asserting

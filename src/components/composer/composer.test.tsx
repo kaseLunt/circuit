@@ -15,7 +15,13 @@ import {
   useComposerStoreApi,
 } from "../../app/store/composer-provider";
 import { createComposerStore } from "../../app/store/composer-store";
-import { WAD, formatHealthFactor } from "../../core/format";
+import {
+  WAD,
+  formatBpsAsPercent,
+  formatHealthFactor,
+  formatWadAsPercent,
+  formatWadRatio,
+} from "../../core/format";
 import { HF_WARN_WAD, hfWadValue, type HealthFactor } from "../../core/health-factor";
 import { derived, entered, observationMinter, valueOf } from "../../core/provenance";
 import { simulate } from "../../core/risk";
@@ -62,13 +68,13 @@ function simulation(overrides: Partial<SimulationResult> = {}): SimulationResult
       {
         protocol: "etherfi",
         type: "stake",
-        apyWad: derived(wadPct(310), "rayAprToApyWad(stakeApr)", [supplyRate]),
+        rate: { kind: "apr" as const, wad: derived(wadPct(310), "trailing staking APR", [supplyRate]) },
         weightBps: 17_000,
       },
       {
         protocol: "aave-v3",
         type: "borrow",
-        apyWad: derived(wadPct(265), "rayAprToApyWad(borrowApr)", [supplyRate]),
+        rate: { kind: "apy" as const, wad: derived(wadPct(265), "rayAprToApyWad(borrowApr)", [supplyRate]) },
         weightBps: -7_000,
       },
     ],
@@ -275,8 +281,11 @@ describe("SimulationPanel — designed states", () => {
       `Minimum health factor ${expected} — below the ${formatHealthFactor(HF_WARN_WAD)} warning threshold.`,
     );
 
-    fireEvent.focus(hero);
-    const trail = screen.getByRole("tooltip").textContent ?? "";
+    // The panel discloses in-flow rather than floating: click the figure, the evidence
+    // expands underneath it inside the panel that scrolls.
+    fireEvent.click(hero);
+    const disclosure = screen.getByRole("group", { name: /Minimum health factor.*provenance/ });
+    const trail = disclosure.textContent ?? "";
     expect(trail).toContain("Oracle.getAssetPrice(weETH)");
     expect(trail).toContain(`@ block ${PINNED_BLOCK}`);
   });
@@ -292,9 +301,12 @@ describe("SimulationPanel — designed states", () => {
     // It is the row ramp, not the hero's — the final HF is context beside the gating figure.
     expect(row.className).not.toContain("text-2xl");
 
-    fireEvent.focus(row);
-    const trail = screen.getByRole("tooltip").textContent ?? "";
-    expect(trail).toContain("Health factor after execution");
+    fireEvent.click(row);
+    const disclosure = screen.getByRole("group", { name: /Health factor after execution provenance/ });
+    // The label is the section's ACCESSIBLE NAME (the query above proves it); the visible
+    // header says "Provenance", so the row's own label is not repeated on screen.
+    const trail = disclosure.textContent ?? "";
+    expect(trail).toContain("Provenance");
     expect(trail).toContain("Oracle.getAssetPrice(weETH)");
     expect(trail).toContain(`@ block ${PINNED_BLOCK}`);
   });
@@ -314,20 +326,65 @@ describe("SimulationPanel — designed states", () => {
     expect(screen.queryByRole("button", { name: "unavailable" })).toBeNull();
   });
 
-  it("says the APY family is unavailable while risk reads fine — the legs are independent", () => {
-    // SPEC §5.1's staking APR needs a trailing window the snapshot does not carry, so §5.2's
-    // composition is empty. The health factor is unaffected and must still render.
+  it("renders the complete §5.2 breakdown core composed, weights and all", () => {
     const result = simulate(flagshipGraph("10", 7000), fixtureSnapshot());
     const { container } = render(<SimulationPanel result={result} pending={false} />);
+
+    // Complete or empty, never partial — so the prose branch must be gone.
+    expect(screen.queryByText(/Breakdown unavailable/)).toBeNull();
+    expect(result.yieldSources).toHaveLength(3);
+    for (const source of result.yieldSources) {
+      expect(
+        screen.getAllByRole("button", { name: formatWadAsPercent(valueOf(source.rate.wad)) }).length,
+      ).toBeGreaterThan(0);
+      expect(screen.getAllByText(formatBpsAsPercent(source.weightBps, 2)).length).toBeGreaterThan(0);
+    }
+    // The hero and the position row carry the composed figures.
+    expect(
+      screen.getAllByRole("button", { name: formatWadAsPercent(valueOf(result.netApyWad!)) }).length,
+    ).toBeGreaterThan(0);
+    expect(
+      screen.getAllByRole("button", { name: formatWadAsPercent(valueOf(result.grossApyWad!)) }).length,
+    ).toBeGreaterThan(0);
+    expect(container.textContent).not.toContain("NaN");
+    expect(container.textContent).not.toContain("∞");
+  });
+
+  it("still refuses the whole breakdown when the trailing window is missing", () => {
+    const noWindow = fixtureSnapshot((raw) => {
+      raw.etherfi.rateWindow = null;
+    });
+    const result = simulate(flagshipGraph("10", 7000), noWindow);
+    render(<SimulationPanel result={result} pending={false} />);
     expect(screen.getByText(/Breakdown unavailable/)).not.toBeNull();
     expect(screen.getByText("net APY unavailable — a rate did not resolve")).not.toBeNull();
+    // Risk is unaffected: the health factor still renders from its own reads.
     expect(
       screen.getByRole("button", {
         name: formatHealthFactor(hfWadValue(valueOf(result.minHealthFactor))),
       }),
     ).not.toBeNull();
-    expect(container.textContent).not.toContain("NaN");
-    expect(container.textContent).not.toContain("∞");
+  });
+
+  it("discloses the liquidation ratio in the panel flow, not in a capped tooltip", () => {
+    // The last panel slot on the floating surface. Under the canvas depth-1 cap its supply
+    // and debt derivations were unreachable — which is the whole reason the panel discloses.
+    const result = simulate(flagshipGraph("10", 7000), fixtureSnapshot());
+    render(<SimulationPanel result={result} pending={false} />);
+
+    const ratio = screen.getByRole("button", {
+      name: formatWadRatio(valueOf(result.liquidationRatioWad!)),
+    });
+    expect(ratio.getAttribute("aria-expanded")).toBe("false");
+    fireEvent.click(ratio);
+
+    const section = screen.getByRole("group", { name: "Liquidation ratio provenance" });
+    expect(screen.queryByRole("tooltip")).toBeNull();
+    const trail = section.textContent ?? "";
+    // The full depth is present: the ratio's own formula AND the amounts underneath it.
+    expect(trail).toContain("debtWei × 1e4 × WAD / (collateralWei × ltBps)");
+    expect(trail).toContain("Oracle.getAssetPrice(weETH)");
+    expect(trail).not.toContain("more derivation");
   });
 
   it("refuses a partial breakdown — an empty list says so in prose", () => {

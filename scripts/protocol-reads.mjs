@@ -61,6 +61,27 @@ const PIN = {
   number: 25592678n,
   hash: "0x7f1f53176578a6df42c94948c10623f002cca61398208c888edce99eaedbf0de",
 };
+
+/**
+ * The trailing staking-APR window (SPEC §5.1). An instantaneous exchange rate is not an APR,
+ * so the rate has two endpoints and they are two reads at two blocks — the only cross-block
+ * quantity in v1.
+ *
+ * The start block is PIN.number minus a fixed block count, so it is a deterministic function
+ * of the pin rather than a separately chosen number, and its hash is pinned exactly like the
+ * fixture's. 50_400 blocks is seven days of 12-second slots; the ACTUAL elapsed time is read
+ * from the two block headers and recorded, because missed slots make the block count an
+ * approximation and the APR must annualize the span that really happened.
+ */
+const WINDOW_BLOCKS = 50_400n;
+const WINDOW_PIN = {
+  number: PIN.number - WINDOW_BLOCKS,
+  hash: "0xcaf7c517454ae84252825488abf3a5b340a11784b69f04a39a53df1165beb4b2",
+};
+/** Sanity band on the recorded span: a window far from seven days is a bad fixture. */
+const WINDOW_MIN_SECONDS = 6n * 86_400n;
+const WINDOW_MAX_SECONDS = 8n * 86_400n;
+
 const REPIN = process.argv.includes("--repin");
 
 const VERIFY_ROOTS = process.argv.includes("--verify-roots");
@@ -241,6 +262,22 @@ if (REPIN) {
 }
 const B = pinned.number;
 emit(`pinned block ${B} (${pinned.hash}) @ ${new Date(Number(pinned.timestamp) * 1000).toISOString()}`);
+
+// ---- pin the staking-APR window's earlier endpoint ---------------------------
+const windowNumber = REPIN ? B - WINDOW_BLOCKS : WINDOW_PIN.number;
+const windowBlock = await client.getBlock({ blockNumber: windowNumber });
+if (REPIN) {
+  emit(`REPIN MODE: new window block ${windowBlock.number} hash ${windowBlock.hash} — update WINDOW_PIN in this script`);
+} else if (windowBlock.hash !== WINDOW_PIN.hash) {
+  fail(`FATAL: window block ${windowNumber} hash ${windowBlock.hash} != pinned ${WINDOW_PIN.hash}`);
+  process.exit(1);
+}
+const windowElapsed = pinned.timestamp - windowBlock.timestamp;
+if (windowElapsed < WINDOW_MIN_SECONDS || windowElapsed > WINDOW_MAX_SECONDS) {
+  fail(`FATAL: staking window spans ${windowElapsed}s, outside the 6–8 day band — the APR would annualize a span nobody intended`);
+  process.exit(1);
+}
+emit(`window block ${windowBlock.number} (${windowBlock.hash}) @ ${new Date(Number(windowBlock.timestamp) * 1000).toISOString()} — ${windowElapsed}s before the pin`);
 if (VERIFY_ROOTS) await verifyRootsAgainstUpstream();
 
 // ---- anchor round-trips ------------------------------------------------------
@@ -334,6 +371,15 @@ await implSlot("EtherFi LiquidityPool implementation (EIP-1967)", A.ETHERFI_LP, 
 await implSlot("eETH implementation (EIP-1967)", A.eETH, B);
 await implSlot("weETH implementation (EIP-1967)", A.weETH, B);
 await read("weETH.getRate", { address: A.weETH, abi: abis.weeth, functionName: "getRate", blockNumber: B });
+// The window's earlier endpoint. Read at ITS OWN block and labelled with it, so nothing
+// downstream can mistake it for a reading at the pinned block: the whole point of the
+// quantity is that its two endpoints come from two different blocks.
+await read(`weETH.getRate @ window start (block ${WINDOW_PIN.number})`, {
+  address: A.weETH,
+  abi: abis.weeth,
+  functionName: "getRate",
+  blockNumber: WINDOW_PIN.number,
+});
 assertAnchor(
   "LP.eETH",
   await read("LP.eETH (round-trip)", { address: A.ETHERFI_LP, abi: abis.lp, functionName: "eETH", blockNumber: B }),
@@ -353,6 +399,16 @@ const out = {
     generated_by: "scripts/protocol-reads.mjs",
     rpc: RPC_LABEL,
     pinned_block: { number: B.toString(), hash: pinned.hash, timestamp: pinned.timestamp.toString(), iso: new Date(Number(pinned.timestamp) * 1000).toISOString() },
+    // The trailing staking-APR window's earlier endpoint (SPEC §5.1). Recorded beside the
+    // pin, in the same shape, because it is a SECOND block the fixture is pinned to and every
+    // consumer must be able to mint its observations against the block they were read at.
+    staking_window_block: {
+      number: windowBlock.number.toString(),
+      hash: windowBlock.hash,
+      timestamp: windowBlock.timestamp.toString(),
+      iso: new Date(Number(windowBlock.timestamp) * 1000).toISOString(),
+      elapsed_seconds: windowElapsed.toString(),
+    },
     anchors: A,
     pool: POOL,
     pool_data_provider: DATA,

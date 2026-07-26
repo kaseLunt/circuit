@@ -1,13 +1,13 @@
 ---
-claim_id: 4bd74513-8644-482f-a7b0-b4b36f98d6b9
-generation: 7
+claim_id: 89f984ca-66fd-4ed3-a5d4-e31a2aa1f1d9
+generation: 8
 agent: claude-code
 task: W05
 status: active
 integrator: true
 branch: w05
 worktree_id: fcc099da-1d6b-593f-bfcb-bd6915fc89c2
-base_commit: 3126e39bd12982c07670aec03111984005f36019
+base_commit: e375aced6984e5b4da5e0f6af8458620d9290f47
 allowed_paths:
   - src/**
   - tests/**
@@ -21,11 +21,12 @@ allowed_paths:
   - tsconfig.json
   - eslint.config.mjs
   - .gitignore
+  - scripts/**
   - roadmap/work/W05-p2-canvas-on-proven-core.md
-scope_hash: sha256:3ee05b92371cbc6b0d9b559fa9e33087efef420228e4619db39eaee70a1ad684
-issued_at: 2026-07-25T22:48:33Z
-lease_expires: 2026-07-26T22:48:33Z
-updated_at: 2026-07-25T22:48:33Z
+scope_hash: sha256:dca66352cd33ba8df70bc27675a2ade7f3f513f51ae15222df3fc06a8f3b4b5d
+issued_at: 2026-07-26T20:16:58Z
+lease_expires: 2026-07-27T04:16:58Z
+updated_at: 2026-07-26T20:16:58Z
 ---
 
 # Claim: claude-code -> W05

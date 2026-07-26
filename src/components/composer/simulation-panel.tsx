@@ -35,6 +35,7 @@ import {
 } from "../../core/format";
 import { HF_WARN_WAD, hfWadValue, riskState, type HealthFactor } from "../../core/health-factor";
 import { valueOf } from "../../core/provenance";
+import { rateKindLabel } from "../../core/risk";
 import type { SimulationResult } from "../../lib/strategy/types";
 import { InlineError } from "../shared/error-boundary";
 import { SourcedValue, slotClassName, type SlotRamp } from "../shared/sourced-value";
@@ -79,9 +80,20 @@ interface RowProps {
 
 function Row({ label, children }: RowProps) {
   return (
-    <div className="flex h-9 items-center justify-between gap-3">
-      <span className="shrink-0 text-xs text-muted-foreground">{label}</span>
-      <span className="min-w-0 text-sm tabular-nums text-foreground">{children}</span>
+    // MIN height, not fixed: the value's provenance disclosure expands INSIDE this row, and a
+    // 36px box would have let it overlap the rows beneath at their closed positions. Each
+    // cell keeps its own 36px centred line box, so a CLOSED row is pixel-identical to a fixed
+    // h-9 one; `items-start` then keeps the label on its own first line when the row grows.
+    <div className="flex min-h-9 items-start justify-between gap-3">
+      <span className="flex min-h-9 shrink-0 items-center text-xs text-muted-foreground">
+        {label}
+      </span>
+      {/* `flex-1 text-right` keeps the figure at the right edge while giving an OPEN
+          disclosure the row's full width to expand into, instead of the few characters the
+          number itself occupies. */}
+      <span className="flex min-h-9 min-w-0 flex-1 flex-col justify-center text-right text-sm tabular-nums text-foreground">
+        {children}
+      </span>
     </div>
   );
 }
@@ -231,6 +243,7 @@ export function SimulationPanel({ result, pending }: SimulationPanelProps) {
                 value={netApyWad}
                 pending={pending}
                 label="Net APY"
+                provenance="disclosure"
                 chars={8}
                 format={formatWadAsPercent}
                 unavailableReason="net APY unavailable — a rate did not resolve"
@@ -267,6 +280,7 @@ export function SimulationPanel({ result, pending }: SimulationPanelProps) {
                   value={hf}
                   pending={pending}
                   label="Minimum health factor during execution"
+                  provenance="disclosure"
                   chars={HF_SLOT_CHARS}
                   format={formatMinHealthFactor}
                   unavailableReason="health factor unavailable"
@@ -296,9 +310,13 @@ export function SimulationPanel({ result, pending }: SimulationPanelProps) {
               </>
             )}
 
+            {/* Normal inline flow rather than a flex row below: a flex container blockifies
+                its items, which would break the figure out of the sentence. In the flow the
+                figure stays in the line and its disclosure expands beneath the sentence, the
+                same as every other panel slot. */}
             {hfValue !== null && hfValue.status === "healthy" ? (
-              <p className="mt-1 flex flex-wrap items-baseline gap-1 text-xs text-muted-foreground">
-                <span>Liquidates when the collateral/debt oracle ratio reaches</span>
+              <p className="mt-1 text-xs text-muted-foreground">
+                Liquidates when the collateral/debt oracle ratio reaches{" "}
                 <SourcedValue
                   value={liquidationRatioWad}
                   pending={pending}
@@ -306,6 +324,8 @@ export function SimulationPanel({ result, pending }: SimulationPanelProps) {
                   chars={7}
                   format={formatWadRatio}
                   unavailableReason="ratio unavailable"
+                  inline
+                  provenance="disclosure"
                   className={slotClassName(liquidationRatioWad !== null, pending, CONTEXT_RAMP)}
                 />
               </p>
@@ -322,6 +342,7 @@ export function SimulationPanel({ result, pending }: SimulationPanelProps) {
                     value={result.finalHealthFactor}
                     pending={pending}
                     label="Health factor after execution"
+                    provenance="disclosure"
                     chars={HF_SLOT_CHARS}
                     format={formatMinHealthFactor}
                     unavailableReason="unavailable"
@@ -348,6 +369,7 @@ export function SimulationPanel({ result, pending }: SimulationPanelProps) {
                 value={grossApyWad}
                 pending={pending}
                 label="Gross APY"
+                provenance="disclosure"
                 chars={8}
                 format={formatWadAsPercent}
                 unavailableReason="unavailable"
@@ -359,6 +381,7 @@ export function SimulationPanel({ result, pending }: SimulationPanelProps) {
                 value={leverageWad}
                 pending={pending}
                 label="Leverage"
+                provenance="disclosure"
                 chars={6}
                 format={formatWadAsMultiple}
                 unavailableReason="unavailable"
@@ -370,6 +393,7 @@ export function SimulationPanel({ result, pending }: SimulationPanelProps) {
                 value={initialAmountWei}
                 pending={pending}
                 label="Equity in"
+                provenance="disclosure"
                 chars={11}
                 format={formatEth}
                 unavailableReason="unavailable"
@@ -381,6 +405,7 @@ export function SimulationPanel({ result, pending }: SimulationPanelProps) {
                 value={gasCostBase}
                 pending={pending}
                 label="Gas cost"
+                provenance="disclosure"
                 chars={10}
                 format={formatUsdBase}
                 unavailableReason="not quoted"
@@ -416,7 +441,7 @@ export function SimulationPanel({ result, pending }: SimulationPanelProps) {
                 result.yieldSources.map((source) => (
                   <div
                     key={`${source.protocol}-${source.type}`}
-                    className="flex h-9 items-center justify-between gap-3"
+                    className="flex min-h-9 items-baseline justify-between gap-3 py-1"
                   >
                     <span className="flex min-w-0 items-baseline gap-2">
                       <span className="truncate text-xs text-foreground">{source.protocol}</span>
@@ -424,21 +449,25 @@ export function SimulationPanel({ result, pending }: SimulationPanelProps) {
                         {source.type}
                       </span>
                     </span>
-                    <span className="flex shrink-0 items-baseline gap-2">
-                      <span className="text-xs tabular-nums text-muted-foreground">
+                    <span className="flex min-w-0 flex-1 items-baseline justify-end gap-2">
+                      <span className="shrink-0 text-xs tabular-nums text-muted-foreground">
                         <span className="sr-only">weight </span>
                         {/* The debt leg's weight is negative by construction (§5.2), and
                             core preserves the sign rather than showing a magnitude. */}
                         {formatBpsAsPercent(source.weightBps, 2)}
                       </span>
                       <SourcedValue
-                        value={source.apyWad}
+                        value={source.rate.wad}
                         pending={pending}
-                        label={`${source.protocol} ${source.type} APY`}
+                        // The suffix is READ from the leg, never appended blind: the staking
+                        // leg is an APR, and calling it an APY claimed a compounding its
+                        // math never performed.
+                        label={`${source.protocol} ${source.type} ${rateKindLabel(source.rate.kind)}`}
                         chars={8}
                         format={formatWadAsPercent}
                         unavailableReason="unavailable"
-                        className={slotClassName(source.apyWad !== null, pending, ROW_RAMP)}
+                        provenance="disclosure"
+                        className={slotClassName(true, pending, ROW_RAMP)}
                       />
                     </span>
                   </div>

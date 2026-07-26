@@ -90,6 +90,34 @@ export function formatHealthFactor(hfWad: bigint | null): string {
 }
 
 /**
+ * A percentage that rounded away to nothing, said honestly.
+ *
+ * A real, non-zero rate that renders as "0.00%" is a lie the display tells about a value the
+ * chain actually reported — and it is the exact failure this product exists not to make: at
+ * the pinned block the weETH supply APY is ~2.6e-7, which is small, but "0.00%" claims it is
+ * ZERO. The threshold form states the bound instead of asserting a false value.
+ *
+ * Sign is preserved, because ">-0.01%" and "<0.01%" are different facts: one is a position
+ * that earns a little, the other one that costs a little. Collapsing both to "<0.01%" would
+ * trade one dishonesty for another.
+ *
+ * The threshold generalizes with the requested precision: 2 dp → "0.01%", 0 dp → "1%".
+ */
+const ZERO_AT_PRECISION = /^-?0(\.0*)?%$/;
+
+/**
+ * `raw` rather than the rendered string decides the sign: a RAY rate is scaled down before
+ * formatting, and BigInt division truncates toward zero, so a tiny negative reaches
+ * `formatUnits` as an unsigned 0 and would otherwise be reported as "<0.01%" — the wrong
+ * direction for a value that costs rather than earns.
+ */
+function withUnderflowNotice(rendered: string, raw: bigint, displayDecimals: number): string {
+  if (raw === 0n || !ZERO_AT_PRECISION.test(rendered)) return rendered;
+  const threshold = formatUnits(1n, displayDecimals, displayDecimals);
+  return raw < 0n ? `>-${threshold}%` : `<${threshold}%`;
+}
+
+/**
  * Format a RAY-scaled per-annum rate (Aave liquidityRate/variableBorrowRate) as
  * a percentage string with `displayDecimals` fraction digits. This is an APR
  * display; APR→APY conversion lives in rates.ts.
@@ -99,7 +127,11 @@ export function formatRayRateAsPct(ratePerAnnumRay: bigint, displayDecimals = 2)
   // Scale to one extra digit, then round half-up to displayDecimals.
   const scale = 10n ** BigInt(displayDecimals + 1);
   const pctScaledPlus1 = (ratePerAnnumRay * 100n * scale) / RAY;
-  return `${formatUnits(pctScaledPlus1, displayDecimals + 1, displayDecimals, "nearest")}%`;
+  return withUnderflowNotice(
+    `${formatUnits(pctScaledPlus1, displayDecimals + 1, displayDecimals, "nearest")}%`,
+    ratePerAnnumRay,
+    displayDecimals,
+  );
 }
 
 /** Shorten an address for display: 0x1234…abcd. */
@@ -130,7 +162,11 @@ export function formatBpsAsPercent(bps: number, displayDecimals = 0): string {
 
 /** WAD-scaled rate/share rendered as a percent: 1e18 = 100%, so percent lives at 1e16. */
 export function formatWadAsPercent(wad: bigint, displayDecimals = 2): string {
-  return `${formatUnits(wad, 16, displayDecimals, "nearest")}%`;
+  return withUnderflowNotice(
+    `${formatUnits(wad, 16, displayDecimals, "nearest")}%`,
+    wad,
+    displayDecimals,
+  );
 }
 
 /** WAD-scaled ratio to 4 dp, e.g. the oracle collateral/debt ratio at liquidation. */

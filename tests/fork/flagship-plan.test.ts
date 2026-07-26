@@ -56,7 +56,7 @@ import {
 import { PINNED_BLOCK, PINNED_TS, bigRead, readResult, readsMeta, tupleBig } from "../helpers/protocol-reads";
 import { flagshipGraph } from "../helpers/graphs";
 import { ANVIL_URL } from "./anvil";
-import { TxRevertedError, getStorageWord, nativeBalance, record, replayRevert, rpc, sendTx, setStorageWord, hexQuantity, type Receipt } from "./harness";
+import { TxRevertedError, getStorageWord, nativeBalance, record, replayRevert, rpc, rpcWithRetry, sendTx, setStorageWord, hexQuantity, type Receipt } from "./harness";
 import { decodeRevert } from "../../src/core/errors";
 
 // ————————————————————————— constants (named per W03) —————————————————————————
@@ -856,7 +856,7 @@ describe("W03 fork gate — riskLedger against the chain on a clean, un-rebased 
     // Re-fork at the pin so this run starts from clean fixture state. Identity is re-verified
     // by hash: a reset that silently landed elsewhere would measure every assertion below
     // against the wrong history.
-    await rpc("anvil_reset", [{ forking: { blockNumber: Number(PINNED_BLOCK) } }]);
+    await rpcWithRetry("anvil_reset", [{ forking: { blockNumber: Number(PINNED_BLOCK) } }]);
     const pinned = await rpc<{ hash?: string } | null>("eth_getBlockByNumber", [
       hexQuantity(PINNED_BLOCK),
       false,
@@ -954,7 +954,8 @@ describe("W03 fork gate — riskLedger against the chain on a clean, un-rebased 
     expect(final.blockId).toBe("supply2");
     expect(hfWadValue(min.healthFactor)!).toBeLessThan(hfWadValue(final.healthFactor)!);
   });
-  /**
+
+  /**
    * The WETH borrow leg, compared at the borrow transaction's OWN block timestamp — and
    * therefore compared EXACTLY.
    *
@@ -1047,11 +1048,13 @@ describe("W03 fork gate — riskLedger against the chain on a clean, un-rebased 
       ...cleanSnapshot,
       blockTimestamp: borrowTs,
     });
-    const publishedApy = atBorrowBlock.blockValues["borrow"]?.apyWad;
+    const publishedApy = atBorrowBlock.blockValues["borrow"]?.rate;
     if (publishedApy === null || publishedApy === undefined) {
       throw new Error("borrow APY was not predicted");
     }
-    expect(publishedApy.value).toBe(rayAprToApyWad(actualBorrowRateRay));
+    expect(publishedApy.wad.value).toBe(rayAprToApyWad(actualBorrowRateRay));
+    // Aave rates are compounded to a yearly figure, so the debt leg is an APY.
+    expect(publishedApy.kind).toBe("apy");
   });
 
   /**
@@ -1070,7 +1073,7 @@ describe("W03 fork gate — riskLedger against the chain on a clean, un-rebased 
       throw new Error("the execution test must run first");
     }
     const result = simulate(flagshipGraph(INPUT_ETH, BORROW_BPS), cleanSnapshot);
-    const predictedSupply = result.blockValues["supply1"]?.apyWad;
+    const predictedSupply = result.blockValues["supply1"]?.rate;
     if (predictedSupply === null || predictedSupply === undefined) {
       throw new Error("supply APY was not predicted");
     }
@@ -1085,11 +1088,11 @@ describe("W03 fork gate — riskLedger against the chain on a clean, un-rebased 
 
     const chainApy = rayAprToApyWad(actualLiquidityRateRay);
     record(
-      `post-action weETH liquidity: predicted APY ${predictedSupply.value} vs chain APY ${chainApy} (ray ${actualLiquidityRateRay})`,
+      `post-action weETH liquidity: predicted APY ${predictedSupply.wad.value} vs chain APY ${chainApy} (ray ${actualLiquidityRateRay})`,
     );
     expect(
-      relWithin(predictedSupply.value, chainApy, RATE_REL_POW),
-      `supply APY: predicted ${predictedSupply.value} vs chain ${chainApy}`,
+      relWithin(predictedSupply.wad.value, chainApy, RATE_REL_POW),
+      `supply APY: predicted ${predictedSupply.wad.value} vs chain ${chainApy}`,
     ).toBe(true);
 
     // Negative control: the stale stored-index debt input lands OUTSIDE the same bound.

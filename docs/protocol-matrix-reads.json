@@ -8,6 +8,13 @@
    "timestamp": "1784776451",
    "iso": "2026-07-23T03:14:11.000Z"
   },
+  "staking_window_block": {
+   "number": "25542278",
+   "hash": "0xcaf7c517454ae84252825488abf3a5b340a11784b69f04a39a53df1165beb4b2",
+   "timestamp": "1784169383",
+   "iso": "2026-07-16T02:36:23.000Z",
+   "elapsed_seconds": "607068"
+  },
   "anchors": {
    "ADDRESSES_PROVIDER": "0x2f39d218133AFaB8F2B819B1066c7E434Ad94E9e",
    "WETH": "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2",
@@ -748,6 +755,13 @@
    "fn": "getRate",
    "args": [],
    "result": "1099835630856114428"
+  },
+  {
+   "label": "weETH.getRate @ window start (block 25542278)",
+   "to": "0xCd5fE23C85820F7B72D0926FC9b05b43E359b7ee",
+   "fn": "getRate",
+   "args": [],
+   "result": "1099335886710212705"
   },
   {
    "label": "LP.eETH (round-trip)",

@@ -42,6 +42,48 @@ export async function rpc<T>(method: string, params: readonly unknown[] = []): P
 }
 
 /**
+ * A bursty SETUP call, retried with backoff.
+ *
+ * `anvil_reset` re-forks, which makes anvil re-fetch state from the upstream provider in one
+ * burst. On a free-tier endpoint that reliably trips the provider's rate limiter, and anvil
+ * surfaces it as an RPC error — so the suite failed for an ENVIRONMENT reason wearing the
+ * costume of a fixture failure (2 of the last 3 CI runs). Retrying is correct here and only
+ * here: a reset is idempotent, so a second attempt is the same request, not a different one.
+ *
+ * Deliberately NOT applied to `rpc` in general. Retrying a `eth_sendTransaction` could send a
+ * transaction twice, and retrying a read that failed for a real reason would turn a fixture
+ * bug into a timeout. Assertions are untouched: this only decides whether the fork was
+ * successfully placed in its starting state.
+ */
+const RESET_ATTEMPTS = 5;
+const RESET_BACKOFF_MS = 2_000;
+
+export async function rpcWithRetry<T>(
+  method: string,
+  params: readonly unknown[] = [],
+  attempts = RESET_ATTEMPTS,
+): Promise<T> {
+  let lastError: unknown;
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    try {
+      return await rpc<T>(method, params);
+    } catch (error) {
+      lastError = error;
+      if (attempt === attempts) break;
+      // Linear backoff: the limiter's window is seconds, and an exponential ramp would
+      // overshoot the suite's budget without buying a better chance of success.
+      const waitMs = RESET_BACKOFF_MS * attempt;
+      record(`${method} attempt ${attempt}/${attempts} failed (${String(error)}); retrying in ${waitMs}ms`);
+      await new Promise((resolve) => setTimeout(resolve, waitMs));
+    }
+  }
+  throw new Error(
+    `${method} failed after ${attempts} attempts — the upstream endpoint is rate-limiting the re-fork; ` +
+      `raise ANVIL_CUPS or use a paid endpoint. Last error: ${String(lastError)}`,
+  );
+}
+
+/**
  * Evidence output channel. W03's mutation contract requires the rebase slot id and pre/post
  * words to reach the test output, so this is contractual, not debug logging — it goes through
  * stdout directly so `no-console` can stay an error across the whole repository.

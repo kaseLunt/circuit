@@ -28,10 +28,27 @@ export interface Observed<T> {
 export interface Derived<T> {
   readonly kind: "derived";
   readonly value: T;
-  /** Human-readable formula, e.g. "collateralBase * b_bps / 1e4 (floor)". */
+  /**
+   * The FORMULA and nothing else, e.g. "collateralBase * b_bps / 1e4 (floor)".
+   *
+   * The WHY belongs in `note`. Concatenating the two — "formula — because reason" — was the
+   * habit this split ends: it made one unbreakable string that a renderer could neither
+   * style differently nor wrap sensibly, and it buried the justification inside what reads
+   * as arithmetic.
+   */
   readonly expression: string;
   /** The provenanced inputs the derivation consumed. */
   readonly inputs: readonly AnyProvenanced[];
+  /**
+   * WHY this derivation is correct, or which regime it belongs to — rendered distinguishably
+   * from the formula and never folded into `expression`.
+   *
+   * A LIST, not one slot, because qualifications COMPOSE: a cross-block derivation carries
+   * both its own justification and its window licence, and a single field made the second
+   * silently overwrite the first. Each entry renders as its own line; none is a substitute
+   * for another.
+   */
+  readonly notes?: readonly string[];
 }
 
 /** A value entered by the user (an allocation, an input amount). */
@@ -105,6 +122,7 @@ export function derived<T>(
   value: T,
   expression: string,
   inputs: readonly AnyProvenanced[],
+  note?: string,
 ): Derived<T> {
   const blocks = new Set<bigint>();
   for (const i of inputs) observedBlocks(i, blocks);
@@ -113,7 +131,64 @@ export function derived<T>(
       `derived value mixes observations from multiple blocks: ${[...blocks].join(", ")}`,
     );
   }
-  return { kind: "derived", value, expression, inputs };
+  return note === undefined
+    ? { kind: "derived", value, expression, inputs }
+    : { kind: "derived", value, expression, inputs, notes: [note] };
+}
+
+/**
+ * A derivation whose inputs are deliberately read at DIFFERENT blocks.
+ *
+ * `derived` forbids this, and that ban is the repo's primary no-fabrication enforcement: a
+ * quantity assembled from two moments of chain state, presented as one reading, is the most
+ * plausible-looking lie a rates layer can tell. So this is not a relaxation of that rule — it
+ * is a SECOND, NARROWER rule for the one quantity that cannot obey the first.
+ *
+ * The trailing exchange-rate APR (SPEC §5.1) is that quantity, and it is the only one in v1.
+ * An instantaneous exchange rate is not an APR: an APR is a rate of CHANGE, so it has two
+ * endpoints, and two endpoints are two reads at two blocks. Refusing the crossing would not
+ * make the number safer, it would delete it.
+ *
+ * The guard is therefore the exact INVERSE of `derived`'s — at least TWO distinct observed
+ * blocks are REQUIRED — so this cannot be used as a way around the same-block rule. A
+ * single-block derivation must go through `derived`; passing one here is a bug and throws.
+ *
+ * `windowReason` is mandatory and non-empty, and is APPENDED to the derivation's notes, so
+ * `provenanceTrail` renders WHY the crossing is correct instead of quietly showing two block
+ * numbers and leaving the reader to wonder. It is a NOTE rather than part of the expression
+ * because it is a justification, not arithmetic — and a renderer must be able to tell them
+ * apart. `Derived<T>`'s shape is otherwise unchanged, so `observedBlocks` needs no edit and
+ * the surface simply shows both read points, which is the honest rendering.
+ */
+export function derivedOverWindow<T>(
+  value: T,
+  expression: string,
+  inputs: readonly AnyProvenanced[],
+  windowReason: string,
+  note?: string,
+): Derived<T> {
+  if (windowReason.trim() === "") {
+    throw new RangeError(
+      "derivedOverWindow requires a windowReason: an unexplained cross-block derivation is exactly what derived() exists to forbid",
+    );
+  }
+  const blocks = new Set<bigint>();
+  for (const i of inputs) observedBlocks(i, blocks);
+  if (blocks.size < 2) {
+    throw new RangeError(
+      `derivedOverWindow requires observations from at least two distinct blocks, got ${blocks.size}; a single-block derivation must use derived()`,
+    );
+  }
+  return {
+    kind: "derived",
+    value,
+    expression,
+    inputs,
+    // APPENDED, never assigned over: the mint's own qualification survives alongside the
+    // licence. Assigning here is precisely how "§5.2 … incentives and points excluded by
+    // construction" stopped rendering anywhere.
+    notes: [...(note === undefined ? [] : [note]), `cross-block window: ${windowReason}`],
+  };
 }
 
 export function entered<T>(value: T): Entered<T> {
@@ -174,24 +249,94 @@ export function valueOf<T>(p: Provenanced<T>): T {
 }
 
 /**
- * Flatten a provenanced value's origin chain into human-readable lines for a
- * tooltip. `Observed` cites source + block; `Derived` recurses into its inputs.
+ * One line of a provenance trail, with its nesting expressed as DATA.
+ *
+ * Depth used to be baked into the text as leading spaces, which forced every renderer to
+ * treat the trail as preformatted: a line that wrapped put its continuation back at column
+ * zero, under the wrong parent, so a deep tree read as a flat list of unrelated claims. As a
+ * number, the renderer can indent with padding and let wrapped continuations stay under
+ * their own entry.
  */
-export function provenanceTrail(p: AnyProvenanced, depth = 0): string[] {
-  const indent = "  ".repeat(depth);
+export interface TrailEntry {
+  /** 0 for the value itself; each level of inputs is one deeper. */
+  readonly depth: number;
+  /** The claim: a citation, a formula, or the fact that a human typed it. */
+  readonly text: string;
+  /** The derivation's justifications, if it carries any. Rendered apart from `text`. */
+  readonly notes?: readonly string[];
+}
+
+/**
+ * Flatten a provenanced value's origin chain into renderable entries. `Observed` cites
+ * source + block; `Derived` states its formula, carries its note, and recurses into its
+ * inputs.
+ */
+export function provenanceTrail(p: AnyProvenanced, depth = 0): TrailEntry[] {
   switch (p.kind) {
     case "observed":
       return [
-        `${indent}observed ${p.source} @ block ${p.block} · ${formatBlockTime(p.fetchedAt)}`,
+        {
+          depth,
+          text: `observed ${p.source} @ block ${p.block} · ${formatBlockTime(p.fetchedAt)}`,
+        },
       ];
     case "configured":
-      return [`${indent}configured ${p.name} (${p.definedAt})`];
+      return [{ depth, text: `configured ${p.name} (${p.definedAt})` }];
     case "entered":
-      return [`${indent}entered by user`];
+      return [{ depth, text: "entered by user" }];
     case "derived":
       return [
-        `${indent}derived: ${p.expression}`,
+        p.notes === undefined
+          ? { depth, text: `derived: ${p.expression}` }
+          : { depth, text: `derived: ${p.expression}`, notes: p.notes },
         ...p.inputs.flatMap((i) => provenanceTrail(i, depth + 1)),
       ];
   }
+}
+
+/**
+ * The trail as flat text, for assertions and for any caller that wants one string.
+ * Notes ride with their entry so nothing a derivation claimed can be dropped by flattening.
+ */
+export function provenanceTrailText(p: AnyProvenanced): string[] {
+  return provenanceTrail(p).map((entry) => {
+    const notes = (entry.notes ?? []).map((note) => ` [${note}]`).join("");
+    return `${"  ".repeat(entry.depth)}${entry.text}${notes}`;
+  });
+}
+
+/** The deepest level in a trail — what a capped renderer needs to know it is capping. */
+export function provenanceDepth(p: AnyProvenanced): number {
+  return provenanceTrail(p).reduce((deepest, entry) => Math.max(deepest, entry.depth), 0);
+}
+
+/**
+ * Suppress a note on an entry when the SAME note already appears on one of its descendants.
+ *
+ * A fact originates where it is first true. `derivedOverWindow` propagates the window licence
+ * up every composition that consumes a cross-block value — which is the invariant that stops a
+ * composition from looking single-block — but rendering the same sentence at three nesting
+ * levels in the first screenful buries the trail it is supposed to clarify.
+ *
+ * So this is a RENDER concern and nothing else: the data is untouched, `observedBlocks` is
+ * untouched, and the licence is still on every ancestor for any consumer that inspects it.
+ * Only the echo is dropped, and only when the identical text is provably visible below.
+ */
+export function withoutInheritedNotes(
+  entries: readonly TrailEntry[],
+): readonly TrailEntry[] {
+  return entries.map((entry, index) => {
+    if (entry.notes === undefined) return entry;
+    const descendants = new Set<string>();
+    for (let i = index + 1; i < entries.length; i += 1) {
+      const candidate = entries[i]!;
+      if (candidate.depth <= entry.depth) break;
+      for (const note of candidate.notes ?? []) descendants.add(note);
+    }
+    const kept = entry.notes.filter((note) => !descendants.has(note));
+    if (kept.length === entry.notes.length) return entry;
+    return kept.length === 0
+      ? { depth: entry.depth, text: entry.text }
+      : { depth: entry.depth, text: entry.text, notes: kept };
+  });
 }

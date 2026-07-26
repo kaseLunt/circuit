@@ -11,11 +11,17 @@
  * template's borrow default, and the 70% the script drags to.
  */
 import { expect, test, type Locator, type Page } from "@playwright/test";
-import { formatBlockTime, formatHealthFactor, formatWadAsPercent, formatWadRatio } from "../src/core/format";
+import {
+  formatBlockTime,
+  formatHealthFactor,
+  formatWadAsMultiple,
+  formatWadAsPercent,
+  formatWadRatio,
+} from "../src/core/format";
 import { hfWadValue, riskState } from "../src/core/health-factor";
 import { valueOf } from "../src/core/provenance";
-import { simulate } from "../src/core/risk";
-import { PINNED_BLOCK, PINNED_TS } from "../src/lib/recorded-reads/reads-log";
+import { rateKindLabel, simulate } from "../src/core/risk";
+import { PINNED_BLOCK, PINNED_TS, WINDOW_BLOCK, WINDOW_TS } from "../src/lib/recorded-reads/reads-log";
 import { sandboxSnapshot } from "../src/lib/recorded-reads/sandbox-snapshot";
 import { SHARE_PARAM, decodeShareGraph } from "../src/lib/share/encode";
 import { leveragedRestakeLoop } from "../src/lib/strategy/templates";
@@ -34,6 +40,12 @@ interface Expected {
   readonly liquidationRatio: string;
   readonly supplyApy: string;
   readonly borrowApy: string;
+  readonly stakingApy: string;
+  readonly leverage: string;
+  readonly stakingKind: string;
+  readonly supplyKind: string;
+  readonly borrowKind: string;
+  readonly netApy: string;
   readonly isWarning: boolean;
 }
 
@@ -43,28 +55,43 @@ function expectedAt(borrowBps: number): Expected {
   const hf = valueOf(result.minHealthFactor);
   if (hf.status !== "healthy") throw new Error(`fixture has no healthy HF at ${borrowBps}bps`);
   const ratio = result.liquidationRatioWad;
-  const supply = result.blockValues["supply1"]?.apyWad;
-  const borrow = result.blockValues["borrow"]?.apyWad;
-  if (ratio == null || supply == null || borrow == null) {
+  const supply = result.blockValues["supply1"]?.rate;
+  const borrow = result.blockValues["borrow"]?.rate;
+  const staking = result.blockValues["stake1"]?.rate;
+  const leverage = result.leverageWad;
+  const net = result.netApyWad;
+  if (
+    ratio == null ||
+    supply == null ||
+    borrow == null ||
+    staking == null ||
+    net == null ||
+    leverage == null
+  ) {
     throw new Error(`fixture is missing a quantity the demo script asserts at ${borrowBps}bps`);
   }
   return {
     healthFactor: formatHealthFactor(hfWadValue(hf)),
     liquidationRatio: formatWadRatio(valueOf(ratio)),
-    supplyApy: formatWadAsPercent(valueOf(supply)),
-    borrowApy: formatWadAsPercent(valueOf(borrow)),
+    supplyApy: formatWadAsPercent(valueOf(supply.wad)),
+    supplyKind: rateKindLabel(supply.kind),
+    borrowApy: formatWadAsPercent(valueOf(borrow.wad)),
+    borrowKind: rateKindLabel(borrow.kind),
+    stakingApy: formatWadAsPercent(valueOf(staking.wad)),
+    leverage: formatWadAsMultiple(valueOf(leverage)),
+    stakingKind: rateKindLabel(staking.kind),
+    netApy: formatWadAsPercent(valueOf(net)),
     isWarning: riskState(hf) === "warning",
   };
 }
 
 /**
- * The staking leg has NO rate on this snapshot, and that is the current truth rather than a
- * gap in the test: SPEC §5.1's staking APR is a trailing seven-day exchange-rate delta, which
- * needs two archive reads at two blocks, and a single block-pinned snapshot carries one
- * (`core/risk.ts`, ruling Q1). The script therefore asserts the HONEST state — an explicit
- * unavailable slot — and would fail if a number appeared there.
+ * SPEC §5.1's staking APR is a trailing seven-day exchange-rate delta, so it is two archive
+ * reads at TWO blocks — the one quantity in v1 that legitimately crosses. The snapshot now
+ * carries that window, so the slot resolves, and its citation must show BOTH read points
+ * plus the reason the crossing is correct.
  */
-const STAKING_UNAVAILABLE = "rate unavailable";
+const WINDOW_CITATION = "cross-block window:";
 
 function node(page: Page, id: string): Locator {
   return page.locator(`.react-flow__node[data-id="${id}"]`);
@@ -89,16 +116,42 @@ async function citationOf(slot: Locator): Promise<{ label: string; lines: string
   return { label, lines };
 }
 
-/** Asserts the §3 step-2 contract over a whole derivation tree, not a sample of it. */
-function expectEveryReadCited(lines: readonly string[]): void {
+/**
+ * The panel's surface: click the figure and the evidence expands INSIDE the panel, in its
+ * flow. A sixty-line derivation tree in a floating box is unusable at any width — it cannot
+ * scroll with its container and it covers what it explains — so the panel discloses instead.
+ */
+async function disclosureOf(slot: Locator, name: string): Promise<string[]> {
+  await slot.click();
+  const section = slot.page().getByRole("group", { name: `${name} provenance` });
+  await expect(section).toBeVisible();
+  return section.locator("span[style]").allTextContents();
+}
+
+/**
+ * Asserts the §3 step-2 contract over a whole derivation tree, not a sample of it.
+ *
+ * `allowWindow` is the ONE sanctioned exception: a trailing rate has two endpoints, so the
+ * staking APR and the compositions containing it cite the window's start block as well as the
+ * pin. Every such line still carries a method, a block and a block time — the exception is
+ * about WHICH block a read may name, never about whether it must name one.
+ */
+function expectEveryReadCited(lines: readonly string[], allowWindow = false): void {
   const observed = lines.map((line) => line.trim()).filter((line) => line.startsWith("observed"));
   // A derived figure with no chain read underneath it would be a number with no source.
   expect(observed.length).toBeGreaterThan(0);
-  const blockTime = formatBlockTime(Number(PINNED_TS));
+  const pinned = `@ block ${PINNED_BLOCK} · ${formatBlockTime(Number(PINNED_TS))}`;
+  const windowCitation = `@ block ${WINDOW_BLOCK} · ${formatBlockTime(Number(WINDOW_TS))}`;
+  const permitted = allowWindow ? [pinned, windowCitation] : [pinned];
   for (const line of observed) {
     // observed <method> @ block <n> · <block time>
     expect(line).toMatch(/^observed \S+ @ block \d+ · /);
-    expect(line).toContain(`@ block ${PINNED_BLOCK} · ${blockTime}`);
+    expect(permitted.some((citation) => line.includes(citation)), line).toBe(true);
+  }
+  if (allowWindow) {
+    // The exception has to be USED, or this would silently degrade to the ordinary rule.
+    expect(observed.some((line) => line.includes(windowCitation)), "no window read cited").toBe(true);
+    expect(observed.some((line) => line.includes(pinned)), "no pinned read cited").toBe(true);
   }
 }
 
@@ -170,6 +223,7 @@ test.describe("SPEC §3 step 2 — every number is sourced, or says it is not", 
     const supplySlot = node(page, "supply1").getByRole("button", { name: expected.supplyApy });
     await expect(supplySlot).toBeVisible();
     const supply = await citationOf(supplySlot);
+    expect(expected.supplyKind).toBe("APY");
     expect(supply.label).toContain("Supply APY");
     expectEveryReadCited(supply.lines);
     // The APY is DERIVED, and the tooltip opens into the equation rather than asserting a
@@ -180,6 +234,7 @@ test.describe("SPEC §3 step 2 — every number is sourced, or says it is not", 
     const borrowSlot = node(page, "borrow").getByRole("button", { name: expected.borrowApy });
     await expect(borrowSlot).toBeVisible();
     const borrow = await citationOf(borrowSlot);
+    expect(expected.borrowKind).toBe("APY");
     expect(borrow.label).toContain("Borrow APY");
     expectEveryReadCited(borrow.lines);
     expect(borrow.lines.join(" ")).toContain("BorrowRate");
@@ -190,20 +245,191 @@ test.describe("SPEC §3 step 2 — every number is sourced, or says it is not", 
     await expect(node(page, "borrow")).toContainText("current-rate run-rate");
   });
 
-  test("the staking-APR slot renders its explicit unavailable state, never a placeholder", async ({
+  test("the staking APR resolves and cites BOTH ends of its trailing window", async ({
     page,
   }) => {
     await openComposerFromLanding(page);
+    const expected = expectedAt(TEMPLATE_BORROW_BPS);
     const stake = node(page, "stake1");
 
-    await expect(stake).toContainText("Staking APY");
-    await expect(stake).toContainText(STAKING_UNAVAILABLE);
+    // APR, not APY: the trailing window annualizes linearly and compounds nothing, so the
+    // label must not claim otherwise. The kind travels with the figure from core/risk.ts.
+    expect(expected.stakingKind).toBe("APR");
+    await expect(stake).toContainText("Staking APR");
+    await expect(stake).not.toContainText("Staking APY");
+    // The framing rides with the figure, in the same micro tier the Aave legs use.
+    await expect(stake).toContainText("trailing 7-day window");
+    const slot = stake.getByRole("button", { name: expected.stakingApy });
+    await expect(slot).toBeVisible();
 
-    // The three ways a missing rate is usually faked. None of them may appear.
+    // Read the SETTLED block before opening anything: the assertions below are about what the
+    // slot renders, and an open tooltip would fold its explanatory prose into the same text.
     const text = (await stake.textContent()) ?? "";
+
+    const citation = await citationOf(slot);
+    expect(citation.label).toContain("Staking APR");
+    // Two blocks, both fully cited — the sanctioned exception to the single-block rule.
+    expectEveryReadCited(citation.lines, true);
+    // …and the tooltip SAYS why the crossing is correct rather than leaving a reader to
+    // wonder why two block numbers appear under one figure.
+    expect(citation.lines.join(" ")).toContain(WINDOW_CITATION);
+    expect(citation.lines.join(" ")).toContain("getRate");
+    // SPEC §3 step 2 stays fully proven under the canvas tooltip's depth-1 cap: the trailing
+    // APR's three reads ARE its immediate inputs, so nothing about it is deferred.
+    expect(citation.lines.join(" ")).not.toContain("more derivation");
+
+    // The rate is real, so none of the ways a missing rate is faked may appear.
+    expect(text).not.toContain("rate unavailable");
     expect(text).not.toContain("0.00%");
     expect(text).not.toContain("—");
     expect(text).not.toContain("…");
+  });
+
+  test("the yield breakdown is complete, and the net APY is composed from all three legs", async ({
+    page,
+  }) => {
+    await openComposerFromLanding(page);
+    const expected = expectedAt(TEMPLATE_BORROW_BPS);
+    const panel = page.getByRole("complementary", { name: "Simulation" });
+
+    // Complete or empty, never partial: the refusal prose must be gone.
+    await expect(panel.getByText(/Breakdown unavailable/)).toHaveCount(0);
+    await expect(panel.getByRole("button", { name: expected.netApy })).toBeVisible();
+
+    // All three legs on screen, each showing the rate its own block shows.
+    for (const rate of [expected.stakingApy, expected.supplyApy, expected.borrowApy]) {
+      await expect(panel.getByRole("button", { name: rate }).first()).toBeVisible();
+    }
+
+    // The net APY inherits the window, so its citation crosses too — and says so. It is read
+    // from the PANEL's disclosure, which carries the whole tree rather than a capped view.
+    const net = await disclosureOf(panel.getByRole("button", { name: expected.netApy }), "Net APY");
+    expectEveryReadCited(net, true);
+    expect(net.join(" ")).toContain(WINDOW_CITATION);
+    // The breakdown row's suffix is READ from the leg's kind: the staking row discloses as
+    // an APR, which is the defect this round closed at the panel as well as on the block.
+    // Scoped to the breakdown: the gross APY happens to render the same 2.36%, because the
+    // supply leg contributes almost nothing to the collateral rate at this block.
+    const sources = page.getByLabel("Yield sources");
+    await sources.getByRole("button", { name: expected.stakingApy }).click();
+    await expect(page.getByRole("group", { name: "etherfi stake APR provenance" })).toBeVisible();
+    await expect(page.getByRole("group", { name: /etherfi stake APY/ })).toHaveCount(0);
+  });
+
+  /**
+   * GEOMETRY, not DOM presence. `Row` used to be a fixed 36px box, so a disclosure opening
+   * inside one overlapped the rows beneath at their closed positions — the tree was in the
+   * document and on top of the next row. Only a box comparison catches that.
+   */
+  test("an open row disclosure pushes the following row down instead of covering it", async ({
+    page,
+  }) => {
+    await openComposerFromLanding(page);
+    const expected = expectedAt(TEMPLATE_BORROW_BPS);
+    const panel = page.getByRole("complementary", { name: "Simulation" });
+
+    // Leverage and the row directly beneath it in the Position section.
+    const leverage = panel.getByRole("button", { name: expected.leverage });
+    const nextRowLabel = panel.getByText("Equity in", { exact: true });
+
+    // A CLOSED row is still exactly the 36px box it always was.
+    const closedRow = await leverage.locator("xpath=ancestor::div[1]").boundingBox();
+    expect(closedRow?.height).toBe(36);
+    const before = await nextRowLabel.boundingBox();
+
+    await leverage.click();
+    const section = page.getByRole("group", { name: "Leverage provenance" });
+    await expect(section).toBeVisible();
+
+    const sectionBox = await section.boundingBox();
+    const after = await nextRowLabel.boundingBox();
+    if (sectionBox === null || after === null || before === null) {
+      throw new Error("expected measurable geometry for the row, the section and its neighbour");
+    }
+
+    const geometry = JSON.stringify({
+      closedRowHeight: closedRow?.height,
+      neighbourTopBefore: Math.round(before.y),
+      disclosureTop: Math.round(sectionBox.y),
+      disclosureBottom: Math.round(sectionBox.y + sectionBox.height),
+      neighbourTopAfter: Math.round(after.y),
+    });
+    test.info().annotations.push({ type: "row-disclosure-geometry", description: geometry });
+    // Playwright's in-memory annotations never reach a green CI run (the configured
+    // reporters drop them and artifacts upload only on failure), so the evidence is
+    // also emitted as a GitHub Actions notice: the runner parses `::notice` from any
+    // stdout line, making the measured numbers durable in the run log of every pass.
+    // GH workflow-command escaping: % CR LF must be %-encoded in the message.
+    const escaped = geometry.replace(/%/g, "%25").replace(/\r/g, "%0D").replace(/\n/g, "%0A");
+    console.log(`::notice title=row-disclosure-geometry::${escaped}`);
+
+    // The neighbour moved DOWN, and its top clears the disclosure's bottom edge: the row grew
+    // rather than the tree spilling over what follows it.
+    expect(after.y).toBeGreaterThan(before.y);
+    expect(after.y).toBeGreaterThanOrEqual(sectionBox.y + sectionBox.height);
+  });
+
+  test("the sticky header keeps the FIGURE when the subject is too long for the panel", async ({
+    page,
+  }) => {
+    await openComposerFromLanding(page);
+    const expected = expectedAt(TEMPLATE_BORROW_BPS);
+    const panel = page.getByRole("complementary", { name: "Simulation" });
+
+    // The longest label on the w-80 panel — the one that used to clip the number.
+    await panel.getByRole("button", { name: expected.healthFactor }).click();
+    const section = page.getByRole("group", { name: /Minimum health factor.*provenance/ });
+    const header = section.locator("> span").first();
+
+    // The subject may truncate; the figure is a sibling that never shrinks, so it is whole.
+    const figure = header.locator("span").nth(1);
+    await expect(figure).toHaveText(expected.healthFactor);
+    const figureBox = await figure.boundingBox();
+    const headerBox = await header.boundingBox();
+    if (figureBox === null || headerBox === null) throw new Error("header is not measurable");
+    // Fully inside the header's box — not clipped off its right edge.
+    expect(figureBox.x + figureBox.width).toBeLessThanOrEqual(headerBox.x + headerBox.width + 1);
+    expect(figureBox.width).toBeGreaterThan(0);
+  });
+
+  test("the panel discloses provenance in its own flow, and the keyboard can leave again", async ({
+    page,
+  }) => {
+    await openComposerFromLanding(page);
+    const expected = expectedAt(TEMPLATE_BORROW_BPS);
+    const panel = page.getByRole("complementary", { name: "Simulation" });
+    const hero = panel.getByRole("button", { name: expected.healthFactor });
+
+    await expect(hero).toHaveAttribute("aria-expanded", "false");
+    await hero.click();
+    const section = page.getByRole("group", { name: /Minimum health factor.*provenance/ });
+    await expect(section).toBeVisible();
+    await expect(hero).toHaveAttribute("aria-expanded", "true");
+
+    // In the panel's FLOW, not floating over it: no tooltip is involved at all.
+    await expect(page.getByRole("tooltip")).toHaveCount(0);
+    // Focus moved in, so a screen reader lands on the evidence rather than being told it
+    // exists; Escape returns to the trigger.
+    await expect(section).toBeFocused();
+    await page.keyboard.press("Escape");
+    await expect(section).toHaveCount(0);
+    await expect(hero).toBeFocused();
+    await expect(hero).toHaveAttribute("aria-expanded", "false");
+  });
+
+  test("a rate too small to render at 2dp states its bound instead of claiming zero", async ({
+    page,
+  }) => {
+    await openComposerFromLanding(page);
+    const expected = expectedAt(TEMPLATE_BORROW_BPS);
+
+    // The recorded weETH supply APY really is ~2.6e-7. "0.00%" would assert it is ZERO;
+    // the bound form is the honest rendering, and `core/format.ts` owns the decision.
+    expect(expected.supplyApy).toBe("<0.01%");
+    await expect(
+      node(page, "supply1").getByRole("button", { name: expected.supplyApy }),
+    ).toBeVisible();
+    expect((await node(page, "supply1").textContent()) ?? "").not.toContain("0.00%");
   });
 
   test("no number renders before its source resolves — nothing is left busy or blank", async ({

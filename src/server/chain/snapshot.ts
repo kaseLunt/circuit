@@ -13,7 +13,12 @@
  */
 import { getAddress, parseAbi, type Address, type PublicClient } from "viem";
 import { observationMinter, type ObservationMinter } from "../../core/provenance";
-import type { ChainSnapshot, EModeCategorySnapshot, ReserveSnapshot } from "../../core/plan";
+import type {
+  ChainSnapshot,
+  EModeCategorySnapshot,
+  ReserveSnapshot,
+  StakingRateWindow,
+} from "../../core/plan";
 import readsLog from "../../../docs/protocol-matrix-reads.json";
 
 const LOG_ANCHORS = (
@@ -68,6 +73,7 @@ const ABI = {
   weeth: parseAbi([
     "function eETH() view returns (address)",
     "function liquidityPool() view returns (address)",
+    "function getRate() view returns (uint256)",
   ]),
   eeth: parseAbi(["function totalShares() view returns (uint256)"]),
   lp: parseAbi([
@@ -82,6 +88,68 @@ export interface CaptureOptions {
   readonly blockNumber?: bigint;
   /** Fail the capture unless the pinned block's hash matches (fixture identity). */
   readonly expectBlockHash?: `0x${string}`;
+}
+
+/**
+ * Seven days of 12-second slots. The APR annualizes the span the two block HEADERS report,
+ * not this count — missed slots make a block offset an approximation, and the rate must be
+ * about the time that actually elapsed.
+ */
+const STAKING_WINDOW_BLOCKS = 50_400n;
+
+/**
+ * The trailing staking-APR window (SPEC §5.1), or `null` when the earlier endpoint cannot be
+ * read.
+ *
+ * The second read is HISTORICAL, so it needs an archive-capable endpoint; a node with a short
+ * state window answers it with an error rather than a number. That is a designed degradation
+ * and not a silent fallback: the field goes null, `core/risk.ts` drops the staking leg, and
+ * §5.2's complete-or-nothing rule takes gross APY, net APY and the whole yield breakdown with
+ * it. Nothing is invented, and the failure is visible on screen as an unavailable slot.
+ *
+ * The catch is deliberately narrow — it wraps only the two archive calls, so a bug in the
+ * minting below still throws rather than being reported as "no archive endpoint".
+ */
+async function captureStakingWindow(
+  client: PublicClient,
+  weETH: Address,
+  blockNumber: bigint,
+  blockTimestamp: bigint,
+  mint: ObservationMinter,
+): Promise<StakingRateWindow | null> {
+  const windowNumber = blockNumber - STAKING_WINDOW_BLOCKS;
+  if (windowNumber <= 0n) return null;
+  let windowBlock;
+  let rateBefore: bigint;
+  let rateNow: bigint;
+  try {
+    [rateNow, windowBlock, rateBefore] = await Promise.all([
+      client.readContract({ address: weETH, abi: ABI.weeth, functionName: "getRate", blockNumber }),
+      client.getBlock({ blockNumber: windowNumber }),
+      client.readContract({
+        address: weETH,
+        abi: ABI.weeth,
+        functionName: "getRate",
+        blockNumber: windowNumber,
+      }),
+    ]);
+  } catch {
+    return null;
+  }
+  const secondsElapsed = blockTimestamp - windowBlock.timestamp;
+  if (secondsElapsed <= 0n) return null;
+  const windowMint = observationMinter(windowNumber, Number(windowBlock.timestamp));
+  return {
+    rateNow: mint.observe(rateNow, "weETH.getRate"),
+    // Minted against the block it was READ at, never against the snapshot's block: the
+    // quantity is a claim about the span between two blocks, so a wrapper that named one
+    // block twice would erase the only thing it says.
+    rateBefore: windowMint.observe(rateBefore, "weETH.getRate"),
+    secondsElapsed: windowMint.observe(
+      secondsElapsed,
+      "eth_getBlockByNumber.timestampDelta(pinned,window)",
+    ),
+  };
 }
 
 interface ReadCtx {
@@ -350,6 +418,13 @@ export async function captureChainSnapshot(
       { address: getAddress(pool), abi: ABI.pool, functionName: "getUserEMode", args: [options.user] },
     ],
   });
+  const stakingWindow = await captureStakingWindow(
+    client,
+    weETH,
+    blockNumber,
+    block.timestamp,
+    mint,
+  );
   const hasFootprint = await captureFootprint(
     ctx,
     getAddress(dataProvider),
@@ -369,6 +444,7 @@ export async function captureChainSnapshot(
       weETH,
       totalPooledEther: mint.observe(totalPooledEther, "LP.getTotalPooledEther"),
       totalShares: mint.observe(totalShares, "eETH.totalShares"),
+      rateWindow: stakingWindow,
     },
     user: {
       address: options.user,

@@ -67,9 +67,14 @@ const GOLDEN = {
   finalHealthFactorWad: 2_307_142_857_144_167_216n,
   liquidationRatioWad: 810_405_201_682_850_969n,
   leverageWad: 1_699_999_999_998_440_640n,
-  /** SPEC §5.1: the staking APR needs a trailing window this single-block snapshot has no
-   *  second read for, so §5.2's complete-or-nothing rule takes the whole yield surface. */
-  absentByTheCompleteOrNothingRule: ["grossApyWad", "netApyWad", "gasCostBase"],
+  /** SPEC §5.1's trailing staking APR, over the window's two recorded blocks. */
+  stakingAprWad: 23_614_925_307_064_831n,
+  grossApyWad: 23_615_196_239_051_092n,
+  netApyWad: 25_065_397_570_968_204n,
+  /** §5.2 exposure weights: the collateral legs share (1 + b), the debt leg carries −b. */
+  yieldWeightsBps: [16_999, 1, -7_000],
+  /** Gas needs a provider (P3a); it is the one thing still absent by design. */
+  absentByTheCompleteOrNothingRule: ["gasCostBase"],
 } as const;
 
 /** Both snapshots must satisfy the SAME independent goldens — that is what makes the
@@ -91,12 +96,24 @@ describe.each([
     expect(valueOf(result.liquidationRatioWad!)).toBe(GOLDEN.liquidationRatioWad);
     expect(valueOf(result.leverageWad!)).toBe(GOLDEN.leverageWad);
 
-    // Absent, and absent for a stated reason — asserted so a future rate source cannot
-    // quietly start filling these without anyone revisiting the honesty rule.
+    // Absent, and absent for a stated reason — asserted so a future source cannot quietly
+    // start filling these without anyone revisiting the honesty rule.
     for (const field of GOLDEN.absentByTheCompleteOrNothingRule) {
       expect(result[field], field).toBeNull();
     }
-    expect(result.yieldSources).toEqual([]);
+
+    // The §5.2 composition, complete: the staking leg's trailing APR over the window's two
+    // blocks, compounded with the supply leg, then levered against the debt leg.
+    expect(valueOf(result.blockValues["stake1"]!.rate!.wad)).toBe(GOLDEN.stakingAprWad);
+    expect(valueOf(result.grossApyWad!)).toBe(GOLDEN.grossApyWad);
+    expect(valueOf(result.netApyWad!)).toBe(GOLDEN.netApyWad);
+    expect(result.yieldSources.map((y) => `${y.protocol}/${y.type}`)).toEqual([
+      "etherfi/stake",
+      "aave-v3/supply",
+      "aave-v3/borrow",
+    ]);
+    expect(result.yieldSources.map((y) => y.weightBps)).toEqual([...GOLDEN.yieldWeightsBps]);
+    expect(result.yieldSources.reduce((total, y) => total + y.weightBps, 0)).toBe(10_000);
 
     // The block the fork suite's borrow assertion is about, reached through `simulate`.
     expect(valueOf(result.blockValues["borrow"]!.outputAmountWei!)).toBe(GOLDEN.borrowWei);

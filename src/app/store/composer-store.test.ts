@@ -9,7 +9,7 @@ import {
 } from "../../core/graph";
 import { flagshipGraph } from "../../../tests/helpers/graphs";
 import { fixtureSnapshot } from "../../../tests/helpers/chain-snapshot";
-import { provenanceTrail, valueOf, type Provenanced } from "../../core/provenance";
+import { provenanceTrailText, valueOf, type Provenanced } from "../../core/provenance";
 import { simulate } from "../../core/risk";
 import type { SimulationResult } from "../../lib/strategy/types";
 import {
@@ -1016,7 +1016,7 @@ describe("param origin — Configured until the user touches it (SPEC §5)", () 
 
 /** Every provenance line behind the health factor, flattened. */
 function trailOf(result: SimulationResult): string {
-  return provenanceTrail(result.minHealthFactor).join(" | ");
+  return provenanceTrailText(result.minHealthFactor).join(" | ");
 }
 
 
@@ -1062,7 +1062,7 @@ describe("param origin — the wrap pass preserves lineage, not just novelty", (
     expect(result.isValid).toBe(true);
     const supplied = result.blockValues["supply1"]?.outputAmountWei;
     if (supplied === undefined || supplied === null) throw new Error("expected a supply value");
-    const trail = provenanceTrail(supplied).join(" | ");
+    const trail = provenanceTrailText(supplied).join(" | ");
     expect(trail).toContain("floor(producerOutput × 6000 / 10^4)");
     expect(trail).not.toContain("FULL_ALLOCATION_BPS");
   });

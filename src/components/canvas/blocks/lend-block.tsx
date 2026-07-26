@@ -2,6 +2,7 @@
 
 import { PiggyBank } from "lucide-react";
 import { formatWadAsPercent } from "../../../core/format";
+import { rateKindLabel } from "../../../core/risk";
 import type { LendBlockData, LendProtocol } from "../../../lib/strategy/types";
 import { AssetChip } from "../../shared/asset-chip";
 import { SourcedValue, slotClassName, type SlotRamp } from "../../shared/sourced-value";
@@ -39,7 +40,8 @@ export const PROTOCOL_LABEL: Readonly<Record<LendProtocol, string>> = { "aave-v3
 export function LendBlock({ id, data, selected }: NodePropsFor<LendBlockData>) {
   const runtime = useBlockRuntime();
   const blockValue = runtime.blockValues[id] ?? null;
-  const apyWad = blockValue === null ? null : blockValue.apyWad;
+  const rate = blockValue === null ? null : blockValue.rate;
+  const kindLabel = rateKindLabel(rate === null ? "apy" : rate.kind);
 
   const unconnected = data.asset === null;
   const state: BlockState = !data.isValid ? "error" : unconnected ? "warning" : "valid";
@@ -70,20 +72,20 @@ export function LendBlock({ id, data, selected }: NodePropsFor<LendBlockData>) {
 
       <div className="flex items-baseline gap-2">
         <span className="flex flex-col">
-          <span className="text-xs text-muted-foreground">Supply APY</span>
+          <span className="text-xs text-muted-foreground">{`Supply ${kindLabel}`}</span>
           <span className="text-micro uppercase tracking-wider text-muted-foreground">
             current-rate run-rate
           </span>
         </span>
         <span className="ml-auto">
           <SourcedValue
-            value={apyWad}
+            value={rate === null ? null : rate.wad}
             pending={runtime.pending}
-            label="Supply APY, current-rate run-rate"
+            label={`Supply ${kindLabel}, current-rate run-rate`}
             chars={RATE_SLOT_CHARS}
             format={formatWadAsPercent}
             unavailableReason="rate unavailable"
-            className={slotClassName(apyWad !== null, runtime.pending, RATE_RAMP)}
+            className={slotClassName(rate !== null, runtime.pending, RATE_RAMP)}
           />
         </span>
       </div>
