@@ -124,6 +124,50 @@ export function configured<T>(value: T, name: string, definedAt: string): Config
   return { kind: "configured", value, name, definedAt };
 }
 
+// ————————————————————— user-editable param origins —————————————————————
+
+/**
+ * The citation a `Configured` param carries: a named author's default and where it lives.
+ */
+export interface ConfiguredOrigin {
+  readonly name: string;
+  readonly definedAt: string;
+}
+
+/**
+ * Where each user-editable param came from, keyed by `paramOriginKey`.
+ *
+ * ABSENCE MEANS ENTERED, and the asymmetry is deliberate. A template default is a specific
+ * claim — this exact named constant, at this exact file — so it must be recorded to be
+ * made. "A human chose this" is the residual case, and it is also the honest default for
+ * every caller that does not track origins at all (the live path, the fork suite), whose
+ * params really do come from a person.
+ *
+ * This map lives BESIDE the document, never inside it. The document is transported in share
+ * URLs, hashed for fixture identity and compared byte-for-byte by the template identity
+ * gate; origin is a fact about how the session reached a value, not part of the value.
+ */
+export type ParamOrigins = Readonly<Record<string, ConfiguredOrigin>>;
+
+/** Namespaced so an edge id can never collide with a block id. */
+export function paramOriginKey(owner: "block" | "edge", id: string, param: string): string {
+  return `${owner}:${id}.${param}`;
+}
+
+/**
+ * The ONE place a user-editable param becomes provenanced — used by the store's display
+ * readers and by `core/plan.ts`'s calldata boundary, so the tooltip and the derivation tree
+ * cannot disagree about the same number.
+ *
+ * Until the user touches it, a template's allocation is `Configured("DEFAULT_...", ...)`:
+ * claiming `Entered` for a value nobody entered is the same class of dishonesty as claiming
+ * `Observed` for a value nobody read, and it is the easier one to ship by accident because
+ * the number is already sitting in the document.
+ */
+export function wrapParam<T>(value: T, origin: ConfiguredOrigin | undefined): Provenanced<T> {
+  return origin === undefined ? entered(value) : configured(value, origin.name, origin.definedAt);
+}
+
 /** Unwrap the underlying value regardless of provenance kind. */
 export function valueOf<T>(p: Provenanced<T>): T {
   return p.value;

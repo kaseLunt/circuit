@@ -53,7 +53,13 @@ import {
   type ReserveKey,
   type ReserveSnapshot,
 } from "./plan";
-import { derived, type AnyProvenanced, type Observed, type Provenanced } from "./provenance";
+import {
+  derived,
+  type AnyProvenanced,
+  type Observed,
+  type ParamOrigins,
+  type Provenanced,
+} from "./provenance";
 import {
   aTokenBalance,
   accruedLiquidityIndexRay,
@@ -865,8 +871,13 @@ function refusal(errors: readonly PlanError[]): SimulationResult {
  * are not trusted to have validated it, so "validated strategy document" is a post-condition
  * of a successful result rather than a pre-condition of the call.
  */
-export function simulate(graph: StrategyGraph, snapshot: ChainSnapshot): SimulationResult {
-  const plan = buildPlan(graph, snapshot);
+export function simulate(
+  graph: StrategyGraph,
+  snapshot: ChainSnapshot,
+  /** How each user param reached the document — see `buildPlan`. Empty ⇒ all entered. */
+  origins: ParamOrigins = {},
+): SimulationResult {
+  const plan = buildPlan(graph, snapshot, origins);
   if (!plan.ok) return refusal(plan.errors);
 
   const ledger = ledgerFrom(plan, snapshot);

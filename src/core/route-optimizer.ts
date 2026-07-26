@@ -270,6 +270,26 @@ export interface OptimizedRoute {
    * that fails without it — do not reconstruct it by parsing block-id strings.
    */
   readonly autoInsertedBlockIds: readonly string[];
+  /**
+   * The edges this pass SYNTHESISED, each naming the edge it descends from — the typed
+   * record the note above invited, added because the store now needs lineage and must not
+   * recover it by parsing id suffixes.
+   *
+   * The distinction is provenance-bearing, which is why it is a field and not a convention:
+   * the INBOUND replacement carries the replaced edge's own `allocationBps` (a partial
+   * allocation the user set stays that user's number), while the OUTBOUND one is a
+   * genuinely generated full-allocation edge nobody chose. Marking both as the store's
+   * configured constant would display a user's entered 60% as a configured 100% default.
+   */
+  readonly insertedEdges: readonly InsertedEdge[];
+}
+
+export interface InsertedEdge {
+  readonly id: string;
+  /** The edge this one replaced; gone from `graph`, still reachable through undo. */
+  readonly replacedEdgeId: string;
+  /** True for the inbound leg, which inherits the replaced edge's allocation AND origin. */
+  readonly carriesReplacedAllocation: boolean;
 }
 
 /** A wrap block passes on everything it receives. */
@@ -297,7 +317,7 @@ function isRoutable(i: RouteIncompatibility): i is RoutableIncompatibility {
  */
 export function optimizeRoute(graph: StrategyGraph): OptimizedRoute {
   const routable = analyzeRouteCompatibility(graph).filter(isRoutable);
-  if (routable.length === 0) return { graph, autoInsertedBlockIds: [] };
+  if (routable.length === 0) return { graph, autoInsertedBlockIds: [], insertedEdges: [] };
 
   const byEdgeId = new Map(routable.map((i) => [i.edgeId, i] as const));
   const usedBlockIds = new Set(graph.blocks.map((b) => b.id));
@@ -306,6 +326,7 @@ export function optimizeRoute(graph: StrategyGraph): OptimizedRoute {
   const blocks: Block[] = [...graph.blocks];
   const edges: Edge[] = [];
   const autoInsertedBlockIds: string[] = [];
+  const insertedEdges: InsertedEdge[] = [];
 
   for (const edge of graph.edges) {
     const incompat = byEdgeId.get(edge.id);
@@ -345,9 +366,13 @@ export function optimizeRoute(graph: StrategyGraph): OptimizedRoute {
       allocationBps: FULL_ALLOCATION_BPS,
     });
     autoInsertedBlockIds.push(blockId);
+    insertedEdges.push(
+      { id: inEdgeId, replacedEdgeId: edge.id, carriesReplacedAllocation: true },
+      { id: outEdgeId, replacedEdgeId: edge.id, carriesReplacedAllocation: false },
+    );
   }
 
-  return { graph: { blocks, edges }, autoInsertedBlockIds };
+  return { graph: { blocks, edges }, autoInsertedBlockIds, insertedEdges };
 }
 
 export interface UnroutableEdge {
