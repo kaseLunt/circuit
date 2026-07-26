@@ -36,11 +36,20 @@ import {
   type Edge,
   type StrategyGraph,
 } from "../../core/graph";
-import { derived, entered, type Derived, type Entered } from "../../core/provenance";
+import {
+  derived,
+  paramOriginKey,
+  wrapParam,
+  type ConfiguredOrigin,
+  type Derived,
+  type ParamOrigins,
+  type Provenanced,
+} from "../../core/provenance";
 import {
   WRAP_PAIRS,
   optimizeRoute,
   outputAssetOf,
+  type InsertedEdge,
   type OptimizedRoute,
 } from "../../core/route-optimizer";
 import {
@@ -57,6 +66,113 @@ import { FULL_ALLOCATION_BPS, type BlockView } from "../../lib/strategy/types";
 const HISTORY_LIMIT = 50;
 
 const EMPTY_GRAPH: StrategyGraph = { blocks: [], edges: [] };
+
+// —————————————————— param origins (SPEC §5: Configured vs Entered) ——————————————————
+
+/**
+ * The three author defaults a document can arrive carrying, each naming the constant a
+ * tooltip will cite. They are declared here rather than imported as values because what is
+ * recorded is the CITATION, not the number — the store must not re-import a default and
+ * thereby gain a second opinion about what the document says.
+ */
+const CONFIGURED_INPUT_AMOUNT: ConfiguredOrigin = {
+  name: "DEFAULT_INPUT_ETH",
+  definedAt: "src/lib/strategy/templates.ts",
+};
+const CONFIGURED_BORROW_ALLOCATION: ConfiguredOrigin = {
+  name: "DEFAULT_BORROW_ALLOCATION_BPS",
+  definedAt: "src/lib/strategy/templates.ts",
+};
+const CONFIGURED_EDGE_ALLOCATION: ConfiguredOrigin = {
+  name: "FULL_ALLOCATION_BPS",
+  definedAt: "src/lib/strategy/types.ts",
+};
+
+export const inputAmountOriginKey = (blockId: string): string =>
+  paramOriginKey("block", blockId, "amount");
+export const borrowAllocationOriginKey = (blockId: string): string =>
+  paramOriginKey("block", blockId, "allocationBps");
+export const edgeAllocationOriginKey = (edgeId: string): string =>
+  paramOriginKey("edge", edgeId, "allocationBps");
+
+/**
+ * Every user-editable param a TEMPLATE arrives carrying, stamped with the constant it came
+ * from. A share URL or a restored draft gets none of this: those numbers were chosen by a
+ * person, which is exactly what an absent origin means.
+ */
+function templateParamOrigins(graph: StrategyGraph): ParamOrigins {
+  const origins: Record<string, ConfiguredOrigin> = {};
+  for (const block of graph.blocks) {
+    if (block.type === "input" && block.params["amount"] !== undefined) {
+      origins[inputAmountOriginKey(block.id)] = CONFIGURED_INPUT_AMOUNT;
+    }
+    if (block.type === "borrow" && block.params["allocationBps"] !== undefined) {
+      origins[borrowAllocationOriginKey(block.id)] = CONFIGURED_BORROW_ALLOCATION;
+    }
+  }
+  for (const edge of graph.edges) {
+    origins[edgeAllocationOriginKey(edge.id)] = CONFIGURED_EDGE_ALLOCATION;
+  }
+  return origins;
+}
+
+/**
+ * A user edit RETIRES an origin: the value is now theirs. Returning the same object when
+ * there was nothing to retire matters — zustand compares by reference, and a fresh map on
+ * every keystroke would re-render every consumer subscribed to origins.
+ *
+ * Deliberately NOT undone by `undo`. Origin is a fact about what the user did, and dragging
+ * the slider back to 5000 does not un-drag it — value equality is not origin. This is why
+ * origins live outside the history stacks rather than inside `HistoryEntry`.
+ */
+function retireOrigin(origins: ParamOrigins, key: string): ParamOrigins {
+  if (!(key in origins)) return origins;
+  const next = { ...origins };
+  delete next[key];
+  return next;
+}
+
+function withEdgeOrigins(origins: ParamOrigins, edgeIds: readonly string[]): ParamOrigins {
+  if (edgeIds.length === 0) return origins;
+  const next = { ...origins };
+  for (const id of edgeIds) next[edgeAllocationOriginKey(id)] = CONFIGURED_EDGE_ALLOCATION;
+  return next;
+}
+
+/**
+ * Origins for the wrap pass, decided per edge by LINEAGE rather than by "it is new".
+ *
+ * Inserting a wrap does not change whose number the allocation is. The inbound replacement
+ * carries the replaced edge's own `allocationBps` — a 60% the user dragged is still theirs
+ * after a wrap lands in front of it — so it inherits that edge's origin verbatim: entered
+ * stays entered, a template's configured constant stays configured. Only the outbound leg
+ * is genuinely this pass's invention, and only it cites the full-allocation constant.
+ *
+ * Getting this wrong is not cosmetic: `core/plan.ts` wraps a partial edge allocation as
+ * `entered` in its own derivation tree, so stamping the inbound edge configured would put
+ * the block's tooltip and the health factor's provenance trail in direct contradiction
+ * about the same number.
+ */
+function withInsertedEdgeOrigins(
+  origins: ParamOrigins,
+  inserted: readonly InsertedEdge[],
+): ParamOrigins {
+  if (inserted.length === 0) return origins;
+  const next = { ...origins };
+  for (const edge of inserted) {
+    const key = edgeAllocationOriginKey(edge.id);
+    if (!edge.carriesReplacedAllocation) {
+      next[key] = CONFIGURED_EDGE_ALLOCATION;
+      continue;
+    }
+    const inheritedFrom = origins[edgeAllocationOriginKey(edge.replacedEdgeId)];
+    // Absent means the replaced edge was the user's; the heir must be absent too, not
+    // whatever a previous occupant of this id left behind.
+    if (inheritedFrom === undefined) delete next[key];
+    else next[key] = inheritedFrom;
+  }
+  return next;
+}
 
 /** A drop/drag coordinate. Narrower than `BlockView` so a caller placing a block never
  *  has to claim anything about auto-insertion — that flag is the store's to set. */
@@ -114,6 +230,12 @@ export interface ComposerState {
   /** Canvas-only, keyed by block id: coordinates plus the auto-wrap badge. Never
    *  money-bearing, never transported, never undoable (§7). */
   readonly view: Readonly<Record<string, BlockView>>;
+  /**
+   * SPEC §5 provenance for user-editable params, BESIDE the document rather than inside it:
+   * the doc is transported, hashed and compared byte-for-byte, and origin is a fact about
+   * the session, not about the graph. Absent key ⇒ the user entered it.
+   */
+  readonly paramOrigins: ParamOrigins;
   readonly selectedBlockIds: readonly string[];
 
   readonly loadedFrom: LoadSource;
@@ -254,6 +376,10 @@ function loadedState(
     // that arrived in the payload is indistinguishable from a user-placed one and
     // deliberately carries no "Auto" badge.
     view: layoutGraph(graph),
+    // A template arrives carrying the author's defaults; a share URL or a restored draft
+    // carries numbers a person chose. Decided here, in the one helper every load goes
+    // through, so no arrival path can forget to say which it is.
+    paramOrigins: from.kind === "template" ? templateParamOrigins(graph) : {},
     selectedBlockIds: [],
     loadedFrom: from,
     overrideGateArmed: false,
@@ -378,10 +504,43 @@ function withInferredStructure(
  * names the blocks in `doc`, so the "Auto" badge is carried by `view[id].isAutoInserted`
  * over the CANONICAL ids returned here.
  */
+/**
+ * Every edge id any REACHABLE document holds — the current one, every entry in both history
+ * stacks, and an open gesture's base.
+ *
+ * `paramOrigins` deliberately does not unwind with undo (origin is a fact about what the
+ * user did, and undoing an edit does not un-do the doing). That makes an edge id a durable
+ * key across time, so minting a fresh edge under an id some restorable document also uses
+ * lets a stamp written now land on a different edge later. Reserving against the immediate
+ * predecessor is not enough: disconnect an edge, insert a wrap, then undo twice, and the
+ * colliding document is two steps back.
+ *
+ * The walk is over a bounded history (`HISTORY_LIMIT`), so completeness is cheaper than an
+ * argument about which stack survives this particular transition — and an argument like
+ * that is exactly what went wrong the first time. Over-reserving costs one id suffix;
+ * under-reserving corrupts provenance.
+ */
+function reservedEdgeIds(state: ComposerState): ReadonlySet<string> {
+  const ids = new Set<string>();
+  const collect = (graph: StrategyGraph): void => {
+    for (const edge of graph.edges) ids.add(edge.id);
+  };
+  collect(state.doc);
+  for (const entry of state.past) collect(entry.doc);
+  for (const entry of state.future) collect(entry.doc);
+  if (state.pendingEdit !== null) collect(state.pendingEdit.base);
+  return ids;
+}
+
 function canonicalizeInserted(
   route: OptimizedRoute,
   usedBlockIds: ReadonlySet<string>,
-): { readonly graph: StrategyGraph; readonly insertedBlockIds: readonly string[] } {
+  reserved: ReadonlySet<string>,
+): {
+  readonly graph: StrategyGraph;
+  readonly insertedBlockIds: readonly string[];
+  readonly insertedEdges: readonly InsertedEdge[];
+} {
   const inserted = new Set(route.autoInsertedBlockIds);
   const blockIds = new Set(usedBlockIds);
   const rename = new Map<string, string>();
@@ -400,18 +559,41 @@ function canonicalizeInserted(
     rename.has(source) || rename.has(target);
 
   const blocks = route.graph.blocks.map((b) => (rename.has(b.id) ? { ...b, id: renamed(b.id) } : b));
-  const edgeIds = new Set(
-    route.graph.edges.filter((e) => !touched(e.source, e.target)).map((e) => e.id),
-  );
+  const edgeIds = new Set([
+    ...route.graph.edges.filter((e) => !touched(e.source, e.target)).map((e) => e.id),
+    /**
+     * `allocateEdgeId` derives an id from the target block, so the outbound replacement
+     * (`wrap1 → supply1`) naturally wants `e:supply1` — exactly the id the edge it replaced
+     * would have had if `connect` created it. Two reservations keep that id from being
+     * handed out twice with two different meanings:
+     *
+     * 1. the ids this pass REPLACED, which this function owns unconditionally, and
+     * 2. `reserved` — every id any document the caller can still reach holds (see
+     *    `reservedEdgeIds`), which is what makes multi-level undo safe.
+     */
+    ...route.insertedEdges.map((e) => e.replacedEdgeId),
+    ...reserved,
+  ]);
+  const edgeRename = new Map<string, string>();
   const edges = route.graph.edges.map((e) => {
     if (!touched(e.source, e.target)) return e;
     const target = renamed(e.target);
     const id = allocateEdgeId(target, edgeIds);
     edgeIds.add(id);
+    edgeRename.set(e.id, id);
     return { id, source: renamed(e.source), target, allocationBps: e.allocationBps };
   });
 
-  return { graph: { blocks, edges }, insertedBlockIds: [...rename.values()] };
+  return {
+    graph: { blocks, edges },
+    insertedBlockIds: [...rename.values()],
+    // Lineage survives the rename: the store needs to know which of these carries a user's
+    // number and which one this pass invented.
+    insertedEdges: route.insertedEdges.map((e) => ({
+      ...e,
+      id: edgeRename.get(e.id) ?? e.id,
+    })),
+  };
 }
 
 const INITIAL_STATE: ComposerState = {
@@ -421,6 +603,7 @@ const INITIAL_STATE: ComposerState = {
   future: [],
   pendingEdit: null,
   view: {},
+  paramOrigins: {},
   selectedBlockIds: [],
   loadedFrom: { kind: "blank" },
   overrideGateArmed: false,
@@ -483,7 +666,11 @@ export function createComposerStore(): ComposerStoreApi {
         const blocks = state.doc.blocks.map((b) =>
           b.id === id ? { ...b, params: { ...b.params, [key]: value } } : b,
         );
-        set(commitDoc(state, { blocks, edges: state.doc.edges }, `set ${key}`));
+        set({
+          ...commitDoc(state, { blocks, edges: state.doc.edges }, `set ${key}`),
+          // The value is the user's now, whatever it was before.
+          paramOrigins: retireOrigin(state.paramOrigins, paramOriginKey("block", id, key)),
+        });
         return { ok: true };
       },
 
@@ -509,7 +696,10 @@ export function createComposerStore(): ComposerStoreApi {
         const blocks = state.doc.blocks.map((b) =>
           b.id === id ? { ...b, params: { ...b.params, allocationBps: bps } } : b,
         );
-        set(commitDoc(state, { blocks, edges: state.doc.edges }, "set borrow allocation"));
+        set({
+          ...commitDoc(state, { blocks, edges: state.doc.edges }, "set borrow allocation"),
+          paramOrigins: retireOrigin(state.paramOrigins, borrowAllocationOriginKey(id)),
+        });
         return { ok: true };
       },
 
@@ -527,7 +717,10 @@ export function createComposerStore(): ComposerStoreApi {
         if (edge === undefined) return { ok: false, reason: `no edge ${edgeId}` };
         if (edge.allocationBps === bps) return { ok: true };
         const edges = state.doc.edges.map((e) => (e.id === edgeId ? { ...e, allocationBps: bps } : e));
-        set(commitDoc(state, { blocks: state.doc.blocks, edges }, "set edge allocation"));
+        set({
+          ...commitDoc(state, { blocks: state.doc.blocks, edges }, "set edge allocation"),
+          paramOrigins: retireOrigin(state.paramOrigins, edgeAllocationOriginKey(edgeId)),
+        });
         return { ok: true };
       },
 
@@ -535,13 +728,28 @@ export function createComposerStore(): ComposerStoreApi {
         const state = get();
         const rejection = connectRejection(state.doc, source, target);
         if (rejection !== null) return { ok: false, rejection };
-        const id = allocateEdgeId(target, new Set(state.doc.edges.map((e) => e.id)));
+        // Reserved against every REACHABLE document, not just the live one — the same
+        // completeness rule the wrap pass uses, and for the same reason: this action stamps
+        // a configured origin on the id it mints, `paramOrigins` does not unwind with undo,
+        // and so reusing an id some restorable document also holds would leave that stamp
+        // sitting on a different edge. Disconnect an edge and reconnect the same endpoints
+        // and the live document alone says the id is free; the undo stack disagrees.
+        const id = allocateEdgeId(target, reservedEdgeIds(state));
         const edges: Edge[] = [
           ...state.doc.edges,
           { id, source, target, allocationBps: FULL_ALLOCATION_BPS },
         ];
         const blocks = withInferredStructure(state.doc.blocks, source, target);
-        set(commitDoc(state, { blocks, edges }, "connect blocks"));
+        const added = edges.filter((e) => !state.doc.edges.some((prev) => prev.id === e.id));
+        set({
+          ...commitDoc(state, { blocks, edges }, "connect blocks"),
+          // The user chose to connect; they did not choose the allocation. It is the
+          // store's FULL_ALLOCATION_BPS default until they open the popover.
+          paramOrigins: withEdgeOrigins(
+            state.paramOrigins,
+            added.map((e) => e.id),
+          ),
+        });
         return { ok: true };
       },
 
@@ -572,7 +780,11 @@ export function createComposerStore(): ComposerStoreApi {
         const state = get();
         const route = optimizeRoute(state.doc);
         if (route.autoInsertedBlockIds.length === 0) return { inserted: 0 };
-        const canonical = canonicalizeInserted(route, new Set(state.doc.blocks.map((b) => b.id)));
+        const canonical = canonicalizeInserted(
+          route,
+          new Set(state.doc.blocks.map((b) => b.id)),
+          reservedEdgeIds(state),
+        );
         const inserted = new Set(canonical.insertedBlockIds);
         const positions = layoutGraph(canonical.graph);
         const view: Record<string, BlockView> = {};
@@ -586,7 +798,11 @@ export function createComposerStore(): ComposerStoreApi {
           const wasAuto = previous !== undefined && previous.isAutoInserted === true;
           view[b.id] = viewEntry(base, inserted.has(b.id) || wasAuto);
         }
-        set({ ...commitDoc(state, canonical.graph, "insert required wraps"), view });
+        set({
+          ...commitDoc(state, canonical.graph, "insert required wraps"),
+          view,
+          paramOrigins: withInsertedEdgeOrigins(state.paramOrigins, canonical.insertedEdges),
+        });
         return { inserted: canonical.insertedBlockIds.length };
       },
 
@@ -667,6 +883,7 @@ export function createComposerStore(): ComposerStoreApi {
           // would make the provenance chip lie. View entries survive so undo restores
           // positions along with the blocks.
           loadedFrom: { kind: "blank" },
+          paramOrigins: {},
         });
       },
 
@@ -777,24 +994,32 @@ export function overAllocatedSourceIds(doc: StrategyGraph): readonly string[] {
  * They exist so the display boundary receives `Provenanced<T>` rather than a bare number —
  * a store value is `Entered`, and nothing here can launder one into `Observed`.
  */
-export function readInputAmount(doc: StrategyGraph, blockId: string): Entered<string> | null {
-  const block = doc.blocks.find((b) => b.id === blockId);
+/** What a provenanced param reader needs: the document, and how its params got there. */
+export type ParamReadState = Pick<ComposerState, "doc" | "paramOrigins">;
+
+export function readInputAmount(
+  state: ParamReadState,
+  blockId: string,
+): Provenanced<string> | null {
+  const block = state.doc.blocks.find((b) => b.id === blockId);
   if (block === undefined || block.type !== "input") return null;
+  const origin = state.paramOrigins[inputAmountOriginKey(blockId)];
   const raw = block.params["amount"];
-  if (typeof raw === "string") return entered(raw);
+  if (typeof raw === "string") return wrapParam(raw, origin);
   // A transported amount may arrive as a bounded number; String() is lossless for it.
-  if (typeof raw === "number") return entered(String(raw));
+  if (typeof raw === "number") return wrapParam(String(raw), origin);
   return null;
 }
 
 export function readBorrowAllocationBps(
-  doc: StrategyGraph,
+  state: ParamReadState,
   blockId: string,
-): Entered<number> | null {
-  const block = doc.blocks.find((b) => b.id === blockId);
+): Provenanced<number> | null {
+  const block = state.doc.blocks.find((b) => b.id === blockId);
   if (block === undefined || block.type !== "borrow") return null;
   const raw = block.params["allocationBps"];
-  return typeof raw === "number" ? entered(raw) : null;
+  if (typeof raw !== "number") return null;
+  return wrapParam(raw, state.paramOrigins[borrowAllocationOriginKey(blockId)]);
 }
 
 /**
@@ -808,7 +1033,7 @@ export function readBorrowAllocationBps(
  * block sends nothing out — an absence, never a zero.
  */
 export function readOutgoingAllocationBps(
-  state: Pick<ComposerState, "doc">,
+  state: ParamReadState,
   blockId: string,
 ): Derived<number> | null {
   const outgoing = state.doc.edges.filter((e) => e.source === blockId);
@@ -816,6 +1041,10 @@ export function readOutgoingAllocationBps(
   return derived(
     outgoingBps(state.doc.edges, blockId),
     `sum of outgoing edge allocationBps out of ${blockId}`,
-    outgoing.map((e) => entered(e.allocationBps)),
+    // Each leg cites its OWN origin: a sum over one default and one dragged value must not
+    // claim the user entered both.
+    outgoing.map((e) =>
+      wrapParam(e.allocationBps, state.paramOrigins[edgeAllocationOriginKey(e.id)]),
+    ),
   );
 }
