@@ -1,0 +1,207 @@
+/* React Flow chrome (canvas treatment §0 item 4). Imported by canvas.tsx immediately
+   after `@xyflow/react/dist/base.css`; `dist/style.css` is never imported anywhere,
+   because it carries the default look this file exists to replace.
+
+   UNLAYERED ON PURPOSE. base.css ships unlayered, and an unlayered rule outranks every
+   cascade layer no matter the layer order — a `@layer components` block here would lose
+   to the very stylesheet it overrides. Equal specificity plus later source order is what
+   makes these rules win.
+
+   Zero literal colors: every declaration resolves through a globals.css token. Nothing
+   here paints --primary except the four sanctioned field sites (connection line, marquee,
+   valid-target handle ring, executing frame); edge particles are the fifth and are filled
+   from the token in the same way. */
+
+.react-flow {
+  background-color: hsl(var(--background));
+}
+
+/* ——— nodes ——— */
+
+.react-flow__node {
+  color: hsl(var(--card-foreground));
+  font-family: var(--font-sans);
+  cursor: default;
+  /* base.css sets `user-select: none` on nodes, the edge-label layer and the viewport
+     portal. The a11y floor forbids it: a user must be able to select and copy an amount
+     or an address off a block. Drag still works — React Flow drags on pointer capture. */
+  -webkit-user-select: text;
+  -moz-user-select: text;
+  user-select: text;
+}
+
+.react-flow__node.dragging {
+  cursor: grabbing;
+}
+
+.react-flow__edgelabel-renderer,
+.react-flow__viewport-portal {
+  -webkit-user-select: text;
+  -moz-user-select: text;
+  user-select: text;
+}
+
+/* ——— handles ——— */
+
+.react-flow__handle {
+  width: 8px;
+  height: 8px;
+  min-width: 8px;
+  min-height: 8px;
+  border-radius: 9999px;
+  background-color: hsl(var(--muted-foreground));
+  border: 1px solid hsl(var(--background));
+  transition-property: box-shadow;
+  transition-duration: var(--motion-fast);
+  transition-timing-function: var(--ease-standard);
+}
+
+/* A valid drop target telegraphs on the handle. An invalid one says nothing chromatic —
+   mechanical refusal is not an emergency, and the typed status strip carries the reason. */
+.react-flow__handle.connectingto.valid {
+  box-shadow: 0 0 0 2px hsl(var(--primary) / 0.5);
+}
+
+.react-flow__handle.connectingto:not(.valid) {
+  cursor: not-allowed;
+}
+
+/* ——— edges ——— */
+
+.flow-edge__path {
+  stroke: hsl(var(--muted-foreground) / 0.45);
+  stroke-width: 1.5;
+  transition-property: stroke;
+  transition-duration: var(--motion-fast);
+  transition-timing-function: var(--ease-standard);
+}
+
+/* Hover/focus steps the ramp. WIDTH NEVER CHANGES: a thickening line reads as a state
+   change, and hover is not a state.
+
+   The focus arms are written `.react-flow__edge.selectable:focus` rather than
+   `:focus-within`: base.css ships that exact selector at (0,4,0) against
+   `.react-flow__edge-path`, which BaseEdge puts on the same element as
+   `.flow-edge__path`. At (0,3,0) our rule lost the cascade and a keyboard-focused
+   edge painted base.css's literal #555 — and a focused PARTIAL edge lost its
+   --warning stroke, which is a semantic state, not chrome. */
+.react-flow__edge:hover .flow-edge__path,
+.react-flow__edge.selected .flow-edge__path,
+.react-flow__edge.selectable:focus .flow-edge__path,
+.react-flow__edge.selectable:focus-visible .flow-edge__path {
+  stroke: hsl(var(--muted-foreground) / 0.8);
+  stroke-width: 1.5;
+}
+
+/* Partial allocation is the only edge-level semantic state. Full allocation renders
+   NEUTRAL: completeness is the rest state, not an achievement. */
+.flow-edge__path--partial,
+.react-flow__edge:hover .flow-edge__path--partial,
+.react-flow__edge.selected .flow-edge__path--partial,
+.react-flow__edge.selectable:focus .flow-edge__path--partial,
+.react-flow__edge.selectable:focus-visible .flow-edge__path--partial {
+  stroke: hsl(var(--warning));
+  stroke-dasharray: 6 4;
+}
+
+.flow-edge__particle {
+  fill: hsl(var(--primary));
+}
+
+/* Mid-drag connection line. Never red: --destructive is reserved for money risk. */
+.react-flow__connection-path {
+  stroke: hsl(var(--primary));
+  stroke-width: 1.5;
+  fill: none;
+}
+
+/* ——— field chrome ——— */
+
+/* The marquee only. It is transient — drawn during the drag and gone on release — which
+   is what makes it one of the sanctioned --primary field sites. */
+.react-flow__selection {
+  background-color: hsl(var(--primary) / 0.08);
+  border: 1px solid hsl(var(--primary) / 0.4);
+}
+
+/* The PERSISTENT box React Flow draws around a settled multi-selection is not the
+   marquee: it rests on screen, so a primary tint there is a sixth at-rest --primary
+   site sitting on top of the sanctioned --ring per-member rings. The members already
+   carry the selection; this rect only needs to say they move together. */
+.react-flow__nodesselection-rect {
+  background-color: transparent;
+  border: 1px solid hsl(var(--border));
+}
+
+.react-flow__attribution {
+  background: transparent;
+  padding: 0 4px;
+  /* base.css ships 10px here. The micro tier is legal for UPPERCASE label chrome only;
+     this is prose, and prose never goes below text-xs. */
+  font-size: var(--text-xs);
+}
+
+.react-flow__attribution a {
+  color: hsl(var(--muted-foreground));
+}
+
+/* The built-in <Controls> is not rendered (canvas.tsx ships a custom Panel), but these
+   selectors stay so the default look can never reach the screen if any consumer mounts
+   it. Same reason the minimap rules are absent: the minimap is deleted, not restyled. */
+.react-flow__controls {
+  background-color: hsl(var(--card));
+  border: 1px solid hsl(var(--border));
+  border-radius: var(--radius-md);
+  box-shadow: none;
+}
+
+.react-flow__controls-button {
+  background-color: transparent;
+  border: none;
+  border-bottom: 1px solid hsl(var(--border));
+  color: hsl(var(--muted-foreground));
+}
+
+.react-flow__controls-button:hover {
+  background-color: hsl(var(--card-hover));
+  color: hsl(var(--foreground));
+}
+
+.react-flow__controls-button svg {
+  fill: currentColor;
+}
+
+/* ——— block frame + selection (consumed by the block components) ——— */
+
+/* `.block-frame` is a HOOK, not a paint. Width, surface, radius and the state border
+   are Tailwind utilities on the same element, and this stylesheet is unlayered — a
+   `border:` shorthand here would outrank `border-warning` and silently delete every
+   state colour the family owns. Nothing is declared on it but the selection ring
+   below and the reduced-motion arm. */
+
+/* Same two-layer grammar as .focus-ring, at full strength: one ring for every block type.
+   The descendant form covers a block that renders the frame without threading `selected`. */
+.block-selected,
+.react-flow__node.selected .block-frame {
+  box-shadow:
+    0 0 0 2px hsl(var(--background)),
+    0 0 0 4px hsl(var(--ring));
+}
+
+@media (prefers-reduced-motion: reduce) {
+  /* Particles carry direction and activity; with motion off, a static dash carries the
+     same two facts and nothing animates. */
+  .flow-edge__particles {
+    display: none;
+  }
+
+  .flow-edge__path {
+    stroke-dasharray: 6 4;
+  }
+
+  .react-flow__handle,
+  .flow-edge__path,
+  .block-frame {
+    transition-duration: 0s;
+  }
+}
