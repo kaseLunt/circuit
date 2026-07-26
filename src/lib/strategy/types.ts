@@ -13,6 +13,12 @@
  * and protocol vocabularies stay assignable to core's. Contract addresses never
  * appear here: the share URL is untrusted input (§5.6), so execution targets are
  * resolved at plan time from the block-pinned ChainSnapshot, never from graph data.
+ *
+ * No template contract and no authored risk label live here. A template is prose
+ * plus a `graph()` in ./templates.ts, and risk is core's `RiskState` derived once
+ * from a block-pinned health factor — an editorial `riskLevel` beside it is a
+ * second scale that can disagree with the number on screen, the same defect
+ * `SimulationResult` below is written to avoid.
  */
 import type { Node, Edge } from "@xyflow/react";
 import type { HealthFactor } from "../../core/health-factor";
@@ -143,6 +149,29 @@ export interface StrategyEdgeData {
 
 export type StrategyEdge = Edge<StrategyEdgeData>;
 
+/**
+ * Where one block sits on the canvas, as produced by the deterministic layout
+ * pass in ./layout.ts.
+ *
+ * View state, never money and never transported: the share payload carries blocks
+ * and edges only, so positions are recomputed on load rather than trusted from an
+ * untrusted document (§5.6) — which is what keeps NaN/±Infinity/absurd-extent
+ * coordinates out of the canvas entirely. Nothing rate-, risk- or selection-
+ * bearing belongs here: selection lives in the composer store, and every number on
+ * screen is a read.
+ */
+export interface BlockView {
+  readonly x: number;
+  readonly y: number;
+  /**
+   * Set when the route optimizer placed this block rather than the user (§2
+   * auto-wrap). The canvas's "Auto" badge reads this and nothing else; it is view
+   * state because the graph itself must stay identical whether a wrap was typed
+   * or inserted.
+   */
+  readonly isAutoInserted?: boolean;
+}
+
 export interface Strategy {
   id: string;
   name: string;
@@ -154,14 +183,6 @@ export interface Strategy {
   createdAt: number;
   updatedAt: number;
 }
-
-/**
- * Editorial shape label on a template card (§3) — an author's claim about the
- * strategy's character, never a computed quantity. Runtime risk is core's
- * tri-state RiskState, derived from a block-pinned health factor at the display
- * boundary; it is deliberately not stored on a simulation result.
- */
-export type RiskLevel = "low" | "medium" | "high" | "extreme";
 
 export interface YieldSource {
   protocol: string;
@@ -227,16 +248,6 @@ export interface ComputedBlockValue {
   outputValueBase: Provenanced<bigint> | null;
   gasCostBase: Provenanced<bigint> | null;
   apyWad: Provenanced<bigint> | null;
-}
-
-export interface StrategyTemplate {
-  id: string;
-  name: string;
-  description: string;
-  riskLevel: RiskLevel;
-  blocks: Partial<StrategyBlock>[];
-  edges: Partial<StrategyEdge>[];
-  tags: string[];
 }
 
 export interface SavedSystem {
