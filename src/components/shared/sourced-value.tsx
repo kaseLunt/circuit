@@ -62,7 +62,12 @@ interface SourcedValueProps<T> {
   chars: number;
   /** This quantity's formatter from core/format.ts. Components never format inline. */
   format: (value: T) => string;
-  /** Prose for a source that settled without a value. Never a dash, never a zero. */
+  /**
+   * Prose for a source that settled without a value. Never a dash, never a zero.
+   * When the gap is STRUCTURAL (nothing attempts the read yet, e.g. gas before a
+   * provider exists) rather than a per-instance failure: keep this terse and name
+   * WHAT is missing ("not quoted"); the owning container states WHY, once.
+   */
   unavailableReason?: string;
   /**
    * The slot sits INSIDE a sentence rather than in a column. Drops the resolved value's

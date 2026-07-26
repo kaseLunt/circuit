@@ -11,15 +11,12 @@
  * colour and `ok` is `text-foreground` — safety is the baseline, not an achievement, and
  * spending green on it would leave nothing louder for the warning.
  *
- * PROVENANCE GAP, stated rather than papered over: `SimulationResult.minHealthFactor` is
- * a bare `HealthFactor`, so the health-factor hero cannot go through `SourcedValue` —
- * this component would have to mint the `Provenanced` wrapper itself, which is exactly
- * the laundering SPEC §5 forbids. It therefore renders the union's three states directly
- * and carries no provenance tooltip. Every genuinely provenanced quantity on this panel
- * (net/gross APY, leverage, gas, equity, liquidation ratio, each yield source's rate)
- * goes through `SourcedValue`. Closing the gap is core/risk.ts's job: it mints the
- * `Provenanced` health factor at the derivation site, and this hero moves onto
- * `SourcedValue` in that commit.
+ * The health-factor hero goes through `SourcedValue` like every other quantity here:
+ * `core/risk.ts` mints its `Provenanced` wrapper at the derivation site, so the hero can
+ * cite the oracle reads behind the number without this component minting anything. Only the
+ * union's non-numeric branches stay authored prose — `SourcedValue`'s unavailable branch
+ * prints at `text-xs`, and "we cannot tell you your health factor" must not rank below the
+ * APY directly above it.
  *
  * No `.value-up` / `.value-down` anywhere: the flash is for a discrete external change of
  * an already-shown value, and this panel cannot tell one from a drag frame — only the
@@ -36,15 +33,24 @@ import {
   formatWadAsPercent,
   formatWadRatio,
 } from "../../core/format";
-import { HF_WARN_WAD, riskState, type HealthFactor } from "../../core/health-factor";
+import { HF_WARN_WAD, hfWadValue, riskState, type HealthFactor } from "../../core/health-factor";
+import { valueOf } from "../../core/provenance";
 import type { SimulationResult } from "../../lib/strategy/types";
 import { InlineError } from "../shared/error-boundary";
 import { SourcedValue, slotClassName, type SlotRamp } from "../shared/sourced-value";
 import { SkeletonValue } from "../ui/skeleton";
-import { cn } from "../../lib/utils";
 
 const HERO_RAMP: SlotRamp = {
   resolved: "text-2xl font-semibold text-foreground",
+  size: "text-2xl",
+};
+/**
+ * The hero ramp in its warning state. A separate ramp rather than an appended class because
+ * `slotClassName` hands the resolved string over only where a figure renders — a warning
+ * colour bolted on outside that guard would paint the unavailable prose too.
+ */
+const HERO_WARNING_RAMP: SlotRamp = {
+  resolved: "text-2xl font-semibold text-warning",
   size: "text-2xl",
 };
 const ROW_RAMP: SlotRamp = { resolved: "text-sm", size: "text-sm" };
@@ -80,6 +86,19 @@ function Row({ label, children }: RowProps) {
   );
 }
 
+/** "12.34" — five characters, the widest form `formatHealthFactor` produces for a live HF. */
+const HF_SLOT_CHARS = 5;
+
+/**
+ * A composition, not a formatter: `formatHealthFactor` owns every digit, the sentinel and
+ * the rounding, and `hfWadValue` owns the unwrapping. It is restated here rather than shared
+ * with the borrow block because core/format.ts cannot import core/health-factor.ts — the
+ * dependency runs one way — so there is no module either component could take it from.
+ */
+function formatMinHealthFactor(hf: HealthFactor): string {
+  return formatHealthFactor(hfWadValue(hf));
+}
+
 /** Prose for a health factor outside the healthy branch — never a dash, never "∞". */
 function healthFactorText(hf: HealthFactor): string {
   if (hf.status === "healthy") return formatHealthFactor(hf.hfWad);
@@ -94,7 +113,7 @@ function healthFactorText(hf: HealthFactor): string {
  */
 function announcementFor(result: SimulationResult | null, pending: boolean): string {
   if (result === null || pending) return "";
-  const hf = result.minHealthFactor;
+  const hf = valueOf(result.minHealthFactor);
   if (hf.status === "unknown") return "Health factor unavailable — the data source failed.";
   if (hf.status === "no-debt") return "No borrow — no liquidation risk.";
   const value = formatHealthFactor(hf.hfWad);
@@ -125,8 +144,11 @@ export function SimulationPanel({ result, pending }: SimulationPanelProps) {
   }
 
   const settledEmpty = result === null && !pending;
+  // The wrapper feeds the hero's `SourcedValue`; the unwrapped union decides which of the
+  // three branches renders. Both come from one field, so they cannot disagree.
   const hf = result === null ? null : result.minHealthFactor;
-  const risk = hf === null ? null : riskState(hf);
+  const hfValue = hf === null ? null : valueOf(hf);
+  const risk = hfValue === null ? null : riskState(hfValue);
   const invalidMessage =
     result !== null && !result.isValid
       ? result.errorMessage === undefined
@@ -209,25 +231,31 @@ export function SimulationPanel({ result, pending }: SimulationPanelProps) {
               ) : null}
             </p>
 
-            {/* A bare <p>, not SourcedValue, and deliberately so: `minHealthFactor` reaches
-                this component as a plain `HealthFactor`, so wrapping it here would mint
-                provenance nothing observed. core/risk.ts is where the health factor is
-                derived and therefore where its `Provenanced` belongs; this hero moves onto
-                SourcedValue in the same commit that lands it. */}
-            {hf === null ? (
+            {/* The figure goes through SourcedValue, so the hero cites the oracle reads
+                behind it. The other two branches deliberately do NOT: SourcedValue's
+                unavailable branch prints its reason at text-xs, and this slot holds the hero
+                ramp in every state. */}
+            {hf === null || hfValue === null ? (
               <div className="mt-1 text-2xl font-semibold">
                 <SkeletonValue label="Minimum health factor" chars={5} />
               </div>
-            ) : hf.status === "healthy" ? (
-              <p
-                className={cn(
-                  "transition-fast mt-1 text-2xl font-semibold tabular-nums",
-                  risk === "warning" ? "text-warning" : "text-foreground",
-                )}
-              >
-                {formatHealthFactor(hf.hfWad)}
-              </p>
-            ) : hf.status === "no-debt" ? (
+            ) : hfValue.status === "healthy" ? (
+              <div className="mt-1">
+                <SourcedValue
+                  value={hf}
+                  pending={pending}
+                  label="Minimum health factor during execution"
+                  chars={HF_SLOT_CHARS}
+                  format={formatMinHealthFactor}
+                  unavailableReason="health factor unavailable"
+                  className={slotClassName(
+                    true,
+                    pending,
+                    risk === "warning" ? HERO_WARNING_RAMP : HERO_RAMP,
+                  )}
+                />
+              </div>
+            ) : hfValue.status === "no-debt" ? (
               // The hero slot keeps the hero ramp in every state. Risk may follow yield in
               // reading order; it never ranks below it typographically — and "we cannot
               // tell you your health factor" is the loudest thing this panel can say. The
@@ -241,12 +269,12 @@ export function SimulationPanel({ result, pending }: SimulationPanelProps) {
               <>
                 <p className="mt-1 text-2xl font-semibold text-muted-foreground">Unavailable</p>
                 <p className="mt-1 text-xs text-muted-foreground">
-                  Data source failed — {hf.reason}.
+                  Data source failed — {hfValue.reason}.
                 </p>
               </>
             )}
 
-            {hf !== null && hf.status === "healthy" ? (
+            {hfValue !== null && hfValue.status === "healthy" ? (
               <p className="mt-1 flex flex-wrap items-baseline gap-1 text-xs text-muted-foreground">
                 <span>Liquidates when the collateral/debt oracle ratio reaches</span>
                 <SourcedValue
@@ -263,15 +291,25 @@ export function SimulationPanel({ result, pending }: SimulationPanelProps) {
 
             {result === null ? null : (
               <Row label="Health factor after execution">
-                <span
-                  className={cn(
-                    result.finalHealthFactor.status === "healthy"
-                      ? "text-foreground"
-                      : "text-muted-foreground",
-                  )}
-                >
-                  {healthFactorText(result.finalHealthFactor)}
-                </span>
+                {/* Same rule as the hero: the FIGURE is provenanced, so it renders through
+                    SourcedValue and can be traced back to its reads. The other two branches
+                    are authored prose, because SourcedValue's unavailable branch would print
+                    a reason where this row states a fact about the position. */}
+                {valueOf(result.finalHealthFactor).status === "healthy" ? (
+                  <SourcedValue
+                    value={result.finalHealthFactor}
+                    pending={pending}
+                    label="Health factor after execution"
+                    chars={HF_SLOT_CHARS}
+                    format={formatMinHealthFactor}
+                    unavailableReason="unavailable"
+                    className={slotClassName(true, pending, ROW_RAMP)}
+                  />
+                ) : (
+                  <span className="text-muted-foreground">
+                    {healthFactorText(valueOf(result.finalHealthFactor))}
+                  </span>
+                )}
               </Row>
             )}
           </section>
@@ -327,6 +365,14 @@ export function SimulationPanel({ result, pending }: SimulationPanelProps) {
                 className={slotClassName(gasCostBase !== null, pending, ROW_RAMP)}
               />
             </Row>
+            {/* The WHY for every "not quoted" gas slot, stated once at the owning
+                container (per-slot copy names WHAT is missing). Self-retires when
+                a provider can quote (P3a). */}
+            {gasCostBase === null && !pending ? (
+              <p className="text-xs text-muted-foreground">
+                Gas is not quoted in sandbox — quoting needs a provider.
+              </p>
+            ) : null}
           </section>
 
           {result === null ? null : (

@@ -579,6 +579,30 @@ export interface StrategyCanvasProps {
   executingBlockId?: string | null;
 }
 
+/**
+ * The whole money seam between the simulation and the block family, in one place.
+ *
+ * A null simulation means there is NO RESULT AT ALL, which is a different fact from a
+ * result whose quantity did not resolve — so the three fields go absent together and none
+ * is substituted with an empty or a zero. Nothing is minted here: the wrappers arrive
+ * already provenanced from `core/risk.ts`, and this adapter observes nothing.
+ *
+ * Exported because it is the one part of the runtime memo a component render cannot
+ * interrogate, and because it is the seam taste finding S-1 was about.
+ */
+export function runtimeRiskFields(
+  simulation: SimulationResult | null,
+): Pick<BlockRuntime, "blockValues" | "minHealthFactor" | "liquidationRatioWad"> {
+  if (simulation === null) {
+    return { blockValues: {}, minHealthFactor: null, liquidationRatioWad: null };
+  }
+  return {
+    blockValues: simulation.blockValues,
+    minHealthFactor: simulation.minHealthFactor,
+    liquidationRatioWad: simulation.liquidationRatioWad,
+  };
+}
+
 function CanvasInner({
   simulation,
   simulationPending,
@@ -754,12 +778,7 @@ function CanvasInner({
       inputAmounts,
       borrowAllocations,
       executingBlockId,
-      blockValues: simulation === null ? {} : simulation.blockValues,
-      // Deliberately null until core/risk.ts mints the wrapper at the derivation site.
-      // `SimulationResult.minHealthFactor` is a bare HealthFactor, and wrapping it here
-      // would be this file claiming a provenance it did not observe (W05 ruling R-G).
-      minHealthFactor: null,
-      liquidationRatioWad: simulation === null ? null : simulation.liquidationRatioWad,
+      ...runtimeRiskFields(simulation),
       pending: simulationPending,
       pendingEdit,
       docRev: rev,
