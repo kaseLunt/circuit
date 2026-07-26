@@ -24,16 +24,19 @@
     --border: 220 13% 91%;
     --input: 220 13% 91%;
     --ring: 173 80% 40%;
-    --radius: 0.875rem;
 
-    --brand-cyan: 173 80% 40%;
-    --brand-teal: 170 70% 35%;
-    --brand-amber: 38 92% 50%;
+    /* Control-scale radius: sm 4 / md 6 / lg 8 / xl 12. The ported 0.875rem put a
+       14px curve on a 28px control, which reads as a pill rather than a button;
+       the radius zones (controls sm, floating chrome md, frames lg) are written
+       against this scale. */
+    --radius: 0.5rem;
+
     --success: 152 69% 40%;
     --warning: 38 92% 50%;
 
     --motion-fast: 120ms;
     --motion-slow: 240ms;
+    --motion-shimmer: 2s;
     --ease-standard: cubic-bezier(0.2, 0, 0, 1);
   }
 
@@ -58,14 +61,20 @@
     --input: 220 12% 12%;
     --ring: 173 80% 45%;
 
-    --brand-cyan: 173 80% 50%;
-    --brand-teal: 170 70% 40%;
-    --brand-amber: 42 95% 55%;
     --success: 152 76% 45%;
     --warning: 42 95% 55%;
 
+    /* Depth is a step along the neutral surface ramp — background 5% → popover 7%
+       → card 8% → card-elevated 10% → card-hover 12% — plus --border. The Tailwind
+       shadow scale is black at 10% and draws nothing over a 5% background, so
+       --shadow-overlay is the one sanctioned shadow and belongs to floating chrome
+       only (tooltip/popover, the P3 dialog, the selection action bar).
+       These five are declared on .dark alone: v1 is dark-only, and a light theme
+       would need its own elevation values rather than an inherited one. */
     --card-elevated: 220 14% 10%;
     --card-hover: 220 14% 12%;
+    --shadow-color: 220 15% 2%;
+    --shadow-overlay: 0 8px 24px hsl(var(--shadow-color) / 0.55);
   }
 }
 
@@ -74,6 +83,8 @@
   --color-foreground: hsl(var(--foreground));
   --color-card: hsl(var(--card));
   --color-card-foreground: hsl(var(--card-foreground));
+  --color-card-elevated: hsl(var(--card-elevated));
+  --color-card-hover: hsl(var(--card-hover));
   --color-popover: hsl(var(--popover));
   --color-popover-foreground: hsl(var(--popover-foreground));
   --color-primary: hsl(var(--primary));
@@ -82,8 +93,6 @@
   --color-secondary-foreground: hsl(var(--secondary-foreground));
   --color-muted: hsl(var(--muted));
   --color-muted-foreground: hsl(var(--muted-foreground));
-  --color-accent: hsl(var(--accent));
-  --color-accent-foreground: hsl(var(--accent-foreground));
   --color-destructive: hsl(var(--destructive));
   --color-destructive-foreground: hsl(var(--destructive-foreground));
   --color-border: hsl(var(--border));
@@ -91,6 +100,20 @@
   --color-ring: hsl(var(--ring));
   --color-success: hsl(var(--success));
   --color-warning: hsl(var(--warning));
+
+  /* --accent is deliberately NOT mapped. In this token set --accent is byte-identical
+     to --primary and --ring, both of which mean something (executing state, focus and
+     selection). Leaving it unmapped makes `bg-accent` fail to compile, so a ported
+     component cannot paint a hover affordance in a state colour by accident. */
+
+  --shadow-overlay: 0 8px 24px hsl(var(--shadow-color) / 0.55);
+
+  /* Label tiers below text-xs. Legal only for label-grade chrome: UPPERCASE
+     tracking-wide section labels and badges, and the asset chip's monospace symbol.
+     Prose, values and numbers never go below text-xs. */
+  --text-micro: 0.625rem;
+  --text-label: 0.6875rem;
+
   --radius-sm: calc(var(--radius) - 4px);
   --radius-md: calc(var(--radius) - 2px);
   --radius-lg: var(--radius);
@@ -102,10 +125,6 @@
 @layer base {
   * {
     @apply border-border;
-  }
-
-  html {
-    scroll-behavior: smooth;
   }
 
   body {
@@ -133,13 +152,14 @@
   }
 
   ::-webkit-scrollbar-thumb {
-    background: hsl(var(--muted-foreground) / 0.2);
+    background: hsl(var(--border));
     border-radius: 3px;
   }
 }
 
 @layer utilities {
-  .shimmer {
+  .shimmer,
+  .skeleton-value {
     background: linear-gradient(
       100deg,
       hsl(var(--muted)) 0%,
@@ -148,7 +168,7 @@
       hsl(var(--muted)) 100%
     );
     background-size: 300% 100%;
-    animation: shimmer 2s infinite;
+    animation: shimmer var(--motion-shimmer) infinite;
   }
 
   @keyframes shimmer {
@@ -160,17 +180,39 @@
     }
   }
 
+  /* A pending value slot holds the exact line box its number will occupy, so
+     resolution moves nothing. Width is set per slot in `ch`, from the widest form
+     the slot's formatter can produce. */
+  .skeleton-value {
+    display: inline-block;
+    min-height: 1lh;
+    vertical-align: middle;
+    border-radius: var(--radius-sm);
+  }
+
   .tabular-nums {
     font-variant-numeric: tabular-nums;
     font-feature-settings: "tnum" on;
   }
 
+  .transition-fast {
+    transition-property: color, background-color, border-color, box-shadow, opacity;
+    transition-duration: var(--motion-fast);
+    transition-timing-function: var(--ease-standard);
+  }
+
+  .transition-slow {
+    transition-property: color, background-color, border-color, box-shadow, opacity;
+    transition-duration: var(--motion-slow);
+    transition-timing-function: var(--ease-standard);
+  }
+
   .value-up {
-    animation: value-flash-up 0.6s var(--ease-standard);
+    animation: value-flash-up var(--motion-slow) var(--ease-standard);
   }
 
   .value-down {
-    animation: value-flash-down 0.6s var(--ease-standard);
+    animation: value-flash-down var(--motion-slow) var(--ease-standard);
   }
 
   @keyframes value-flash-up {
@@ -200,9 +242,8 @@
   }
 
   .focus-ring:focus-visible {
-    box-shadow:
-      0 0 0 2px hsl(var(--background)),
-      0 0 0 4px hsl(var(--primary) / 0.5);
+    outline: 2px solid hsl(var(--ring));
+    outline-offset: 2px;
   }
 
   .status-dot {
@@ -225,11 +266,8 @@
 }
 
 @media (prefers-reduced-motion: reduce) {
-  html {
-    scroll-behavior: auto;
-  }
-
-  .shimmer {
+  .shimmer,
+  .skeleton-value {
     animation: none;
     background: hsl(var(--muted));
   }
@@ -237,5 +275,10 @@
   .value-up,
   .value-down {
     animation: none;
+  }
+
+  .transition-fast,
+  .transition-slow {
+    transition-duration: 0s;
   }
 }
