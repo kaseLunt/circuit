@@ -17,6 +17,7 @@
  * palette rows. The chrome is a row like any other and does not get to be taller.
  */
 
+import type { ReactNode } from "react";
 import { AlertTriangle } from "lucide-react";
 import { formatBlockTime } from "../../core/format";
 import { cn } from "../../lib/utils";
@@ -24,6 +25,12 @@ import type { SnapshotState } from "./simulation-host";
 
 interface SandboxChromeProps {
   readonly snapshot: SnapshotState;
+  /**
+   * Session-level controls, as a node. A slot rather than a direct import keeps this
+   * component store-free: it renders what the session IS, and a control that reads the
+   * document would make the chrome a store consumer for one button.
+   */
+  readonly actions?: ReactNode;
 }
 
 /**
@@ -37,7 +44,7 @@ function citation(ready: Extract<SnapshotState, { status: "ready" }>): string {
   )}`;
 }
 
-export function SandboxChrome({ snapshot }: SandboxChromeProps) {
+export function SandboxChrome({ snapshot, actions }: SandboxChromeProps) {
   return (
     <header className="flex h-9 shrink-0 items-center gap-3 border-b border-border bg-card px-4">
       <span className="text-sm font-medium text-foreground">Circuit</span>
@@ -59,10 +66,15 @@ export function SandboxChrome({ snapshot }: SandboxChromeProps) {
           <span className="text-foreground">Read set unavailable — {snapshot.reason}</span>
         </div>
       ) : (
-        <p className={cn("ml-auto truncate text-xs tabular-nums text-muted-foreground")}>
+        // `shrink-0`, deliberately: when the band runs out of width, flex must take it from
+        // the transient beside this, never from the citation. A truncated provenance claim
+        // is a provenance claim that no longer says which block the numbers came from.
+        <p className={cn("ml-auto shrink-0 text-xs tabular-nums text-muted-foreground")}>
           {snapshot.status === "loading" ? "Reading the block-pinned set…" : citation(snapshot)}
         </p>
       )}
+
+      {actions}
     </header>
   );
 }

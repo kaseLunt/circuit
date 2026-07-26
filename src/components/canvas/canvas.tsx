@@ -115,10 +115,11 @@ import {
 import { CanvasEmptyState } from "./canvas-empty-state";
 import { FlowEdge, type AllocationEdge } from "./flow-edge";
 import { SelectionActionBar } from "./selection-action-bar";
+import { NOTICE_DURATION_MS } from "../shared/notice";
 import { cn } from "../../lib/utils";
 
-/** How long a refused-drop notice stays on screen. */
-export const REJECTION_NOTICE_MS = 4_000;
+/** How long a refused-drop notice stays on screen — the composer's one dwell time. */
+export const REJECTION_NOTICE_MS = NOTICE_DURATION_MS;
 
 /** --motion-slow, in the numeric form React Flow's viewport helpers take. */
 export const FIT_VIEW_DURATION_MS = 240;
@@ -764,7 +765,10 @@ function CanvasInner({
   const [seenLoad, setSeenLoad] = useState(loadedFrom);
   if (seenLoad !== loadedFrom) {
     setSeenLoad(loadedFrom);
-    announce(loadAnnouncement(loadedFrom));
+    // A load that FAILED does not also get to announce what is now on the canvas. A refused
+    // share arrival lands on an empty document, and "Canvas cleared." beside "that strategy
+    // could not be loaded" reports an action nobody took.
+    if (lastLoadProblem === null) announce(loadAnnouncement(loadedFrom));
   }
   const [seenProblem, setSeenProblem] = useState(lastLoadProblem);
   if (seenProblem !== lastLoadProblem) {
