@@ -106,3 +106,15 @@ export function formatRayRateAsPct(ratePerAnnumRay: bigint, displayDecimals = 2)
 export function formatAddress(address: string, chars = 4): string {
   return `${address.slice(0, chars + 2)}…${address.slice(-chars)}`;
 }
+
+/**
+ * Format a block timestamp (Unix seconds) as an absolute UTC instant:
+ * "2025-07-23 03:14:11 UTC". Deliberately never a locale string and never
+ * relative time — a provenance citation must not go stale on screen or
+ * render differently per viewer. (SPEC §3: tooltip cites method + block +
+ * source-fetch timestamp.)
+ */
+export function formatBlockTime(unixSeconds: number): string {
+  const iso = new Date(unixSeconds * 1000).toISOString();
+  return `${iso.slice(0, 10)} ${iso.slice(11, 19)} UTC`;
+}

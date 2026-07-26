@@ -10,6 +10,8 @@
  * Pure: no I/O, no React.
  */
 
+import { formatBlockTime } from "./format";
+
 /** A value read directly from chain state at a specific block. */
 export interface Observed<T> {
   readonly kind: "observed";
@@ -135,7 +137,9 @@ export function provenanceTrail(p: AnyProvenanced, depth = 0): string[] {
   const indent = "  ".repeat(depth);
   switch (p.kind) {
     case "observed":
-      return [`${indent}observed ${p.source} @ block ${p.block}`];
+      return [
+        `${indent}observed ${p.source} @ block ${p.block} · ${formatBlockTime(p.fetchedAt)}`,
+      ];
     case "configured":
       return [`${indent}configured ${p.name} (${p.definedAt})`];
     case "entered":
