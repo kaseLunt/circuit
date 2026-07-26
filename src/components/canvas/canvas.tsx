@@ -39,9 +39,11 @@ import {
   useCallback,
   useEffect,
   useMemo,
+  useRef,
   useState,
   type DragEvent,
   type KeyboardEvent,
+  type RefObject,
 } from "react";
 import {
   Background,
@@ -50,6 +52,7 @@ import {
   ReactFlow,
   ReactFlowProvider,
   SelectionMode,
+  useNodesInitialized,
   useReactFlow,
   useViewport,
   type Connection,
@@ -72,14 +75,16 @@ import {
   type StrategyGraph,
 } from "../../core/graph";
 import { expectedInputAssetOf, outputAssetOf } from "../../core/route-optimizer";
-import { valueOf, type Derived, type Entered } from "../../core/provenance";
+import { valueOf, type Derived, type Provenanced } from "../../core/provenance";
 import {
   connectRejection,
   overAllocatedSourceIds,
   readBorrowAllocationBps,
   readInputAmount,
   readOutgoingAllocationBps,
+  type BlockPosition,
   type ComposerState,
+  type ParamReadState,
   type ComposerStoreApi,
   type ConnectRejection,
   type LoadSource,
@@ -287,13 +292,13 @@ function baseFields(label: string, isConfigured: boolean, paramError: string | u
  * provenanced readers, so no number is re-derived from `params` at the display boundary.
  */
 export function blockDataOf(
-  doc: StrategyGraph,
+  state: ParamReadState,
   block: Block,
   paramError: string | undefined,
 ): BlockData {
   switch (block.type) {
     case "input": {
-      const entered = readInputAmount(doc, block.id);
+      const entered = readInputAmount(state, block.id);
       const amount = entered === null ? "" : valueOf(entered);
       const isConfigured = amount.trim().length > 0;
       return {
@@ -337,7 +342,7 @@ export function blockDataOf(
       };
     }
     case "borrow": {
-      const allocation = readBorrowAllocationBps(doc, block.id);
+      const allocation = readBorrowAllocationBps(state, block.id);
       return {
         ...baseFields("Borrow", allocation !== null, paramError),
         type: "borrow",
@@ -361,11 +366,11 @@ export function blockDataOf(
  * where a share of money is edited.
  */
 export function blockLabelsOf(
-  doc: StrategyGraph,
+  state: ParamReadState,
   paramErrors: Readonly<Record<string, string>>,
 ): Readonly<Record<string, string>> {
   return Object.fromEntries(
-    doc.blocks.map((b) => [b.id, blockDataOf(doc, b, paramErrors[b.id]).label]),
+    state.doc.blocks.map((b) => [b.id, blockDataOf(state, b, paramErrors[b.id]).label]),
   );
 }
 
@@ -537,6 +542,68 @@ function fitDurationMs(): number {
 }
 
 /**
+ * The legibility floor for an ARRIVAL fit — a formal amendment to treatment §3, which
+ * specified the fit but not a floor.
+ *
+ * Derived, not chosen: block body copy is `text-xs` (12px), and below roughly 9px effective
+ * a number stops being readable, so 9/12 = 0.75 is where a fit stops explaining the graph
+ * and starts presenting a diagram of one. The nine-block flagship free-fits to ~0.32, which
+ * put every rate, health factor and amount in SPEC §3's opening frame under 4px — steps 1
+ * and 2 ask the reader to SEE that the numbers are sourced.
+ *
+ * Applied to arrivals ONLY (mount, and a template/share load). The "Fit strategy to view"
+ * button stays unfloored: that one is the user asking to see the whole graph, and answering
+ * a direct request with a partial view would be the control refusing its own job.
+ */
+const ARRIVAL_FIT_MIN_ZOOM = 0.75;
+
+/** Breathing room around an arrival fit, in screen px. */
+const ARRIVAL_FIT_PADDING_PX = 24;
+
+const MIN_ZOOM = 0.2;
+const MAX_ZOOM = 2;
+
+/**
+ * Where an arrival puts the viewport — pure, so the anchoring rule is a unit test rather
+ * than a screenshot someone has to remember to take.
+ *
+ * Centring is right when the graph FITS. It is wrong when it does not: with the legibility
+ * floor applied, the nine-block flagship is far wider than the field (it free-fits to ~0.26,
+ * a third of the floor), and centring a graph that overflows clips BOTH ends — which put the
+ * Input Capital block, the entry point of the whole story, entirely off the left edge of
+ * SPEC §3's opening frame. Measured: `in` at x −361..−180 against a field starting at 256.
+ *
+ * So when the graph cannot fit legibly, the fit anchors the HEAD instead. You cannot show
+ * thirteen steps legibly at once; you can show the reader where the strategy STARTS, at a
+ * size where the sourced numbers are readable, and let them pan. Each axis decides
+ * independently — a graph that fits vertically still centres vertically.
+ */
+export function arrivalViewport(
+  bounds: { readonly x: number; readonly y: number; readonly width: number; readonly height: number },
+  field: { readonly width: number; readonly height: number },
+  padding: number = ARRIVAL_FIT_PADDING_PX,
+): Viewport {
+  const usableWidth = Math.max(field.width - padding * 2, 1);
+  const usableHeight = Math.max(field.height - padding * 2, 1);
+  const natural = Math.min(usableWidth / bounds.width, usableHeight / bounds.height);
+  const zoom = Math.min(MAX_ZOOM, Math.max(ARRIVAL_FIT_MIN_ZOOM, Math.max(natural, MIN_ZOOM)));
+
+  const scaledWidth = bounds.width * zoom;
+  const scaledHeight = bounds.height * zoom;
+  return {
+    zoom,
+    x:
+      scaledWidth <= usableWidth
+        ? (field.width - scaledWidth) / 2 - bounds.x * zoom
+        : padding - bounds.x * zoom,
+    y:
+      scaledHeight <= usableHeight
+        ? (field.height - scaledHeight) / 2 - bounds.y * zoom
+        : padding - bounds.y * zoom,
+  };
+}
+
+/**
  * The refusal strip.
  *
  * Persistently mounted with its text swapped, never created together with its content: a
@@ -577,7 +644,25 @@ export interface StrategyCanvasProps {
   simulationPending: boolean;
   /** The block currently executing (P3). Null outside an execution. */
   executingBlockId?: string | null;
+  /**
+   * Filled by the canvas with a resolver for "the middle of what the user is looking at",
+   * in flow coordinates. The shell's keyboard-add path needs a position at the moment of
+   * the keystroke and only the canvas knows the live viewport — but the canvas owns its
+   * `ReactFlowProvider`, so a host outside it cannot ask `useReactFlow`.
+   *
+   * A ref rather than a callback prop because the resolver is invoked inside an event
+   * handler and never during render: nothing re-renders when the viewport moves, which is
+   * the whole point — panning must not re-render the composer.
+   */
+  dropPositionRef?: RefObject<(() => BlockPosition) | null>;
 }
+
+/**
+ * Where a block lands when the canvas has not measured yet — the flow origin, which is
+ * where an unpanned viewport already looks. A coordinate, not a quantity: a block must be
+ * placed somewhere to exist at all, and no money rule is in play.
+ */
+export const CANVAS_ORIGIN: BlockPosition = { x: 0, y: 0 };
 
 /**
  * The whole money seam between the simulation and the block family, in one place.
@@ -607,16 +692,38 @@ function CanvasInner({
   simulation,
   simulationPending,
   executingBlockId = null,
+  dropPositionRef,
 }: StrategyCanvasProps) {
   const api = useComposerStoreApi();
-  const { fitView, screenToFlowPosition, zoomIn, zoomOut } = useReactFlow();
+  const fieldRef = useRef<HTMLDivElement>(null);
+  // `getNodesBounds` from the hook, not the standalone export: the module-level one warns
+  // that it cannot see the flow's node lookup, and a console warning is not something this
+  // app ships.
+  const {
+    fitView,
+    getNodes,
+    getNodesBounds,
+    screenToFlowPosition,
+    setViewport,
+    zoomIn,
+    zoomOut,
+  } = useReactFlow();
   const viewport = useViewport();
 
-  const { doc, rev, view, selectedBlockIds, pendingEdit, loadedFrom, lastLoadProblem } =
-    useComposerStore(
+  const {
+    doc,
+    rev,
+    view,
+    paramOrigins,
+    selectedBlockIds,
+    pendingEdit,
+    loadedFrom,
+    lastLoadProblem,
+  } = useComposerStore(
       useShallow((state) => ({
         doc: state.doc,
         rev: state.rev,
+        paramOrigins: state.paramOrigins,
         view: state.view,
         selectedBlockIds: state.selectedBlockIds,
         pendingEdit: state.pendingEdit === null ? null : state.pendingEdit.label,
@@ -717,17 +824,20 @@ function CanvasInner({
           type: NODE_TYPE_FOR[b.type],
           position: { x: at.x, y: at.y },
           selected: selected.has(b.id),
-          data: blockDataOf(doc, b, paramErrors[b.id]),
+          data: blockDataOf({ doc, paramOrigins }, b, paramErrors[b.id]),
         };
         const size = measured[b.id];
         return [size === undefined ? node : { ...node, measured: size }];
       }),
-    [blocks, doc, positions, selected, paramErrors, measured],
+    [blocks, doc, paramOrigins, positions, selected, paramErrors, measured],
   );
 
   // Memoised on the document — NOT derived from `nodes`, whose identity changes on every
   // drag frame — so a gesture never rebuilds every edge.
-  const blockLabels = useMemo(() => blockLabelsOf(doc, paramErrors), [doc, paramErrors]);
+  const blockLabels = useMemo(
+    () => blockLabelsOf({ doc, paramOrigins }, paramErrors),
+    [doc, paramOrigins, paramErrors],
+  );
 
   const edges = useMemo(
     () => allocationEdgesOf(docEdges, blockLabels, selectedEdgeIds),
@@ -760,15 +870,16 @@ function CanvasInner({
    * quantity from being re-minted sixty times a second during a drag.
    */
   const runtime = useMemo<BlockRuntime>(() => {
-    const inputAmounts: Record<string, Entered<string>> = {};
-    const borrowAllocations: Record<string, Entered<number>> = {};
+    const inputAmounts: Record<string, Provenanced<string>> = {};
+    const borrowAllocations: Record<string, Provenanced<number>> = {};
     const outgoingAllocationBps: Record<string, Derived<number>> = {};
+    const paramState = { doc, paramOrigins };
     for (const block of doc.blocks) {
-      const amount = readInputAmount(doc, block.id);
+      const amount = readInputAmount(paramState, block.id);
       if (amount !== null) inputAmounts[block.id] = amount;
-      const allocation = readBorrowAllocationBps(doc, block.id);
+      const allocation = readBorrowAllocationBps(paramState, block.id);
       if (allocation !== null) borrowAllocations[block.id] = allocation;
-      const outgoing = readOutgoingAllocationBps({ doc }, block.id);
+      const outgoing = readOutgoingAllocationBps(paramState, block.id);
       if (outgoing !== null) outgoingAllocationBps[block.id] = outgoing;
     }
     return {
@@ -787,7 +898,17 @@ function CanvasInner({
       beginEdit: (label) => api.getState().beginEdit(label),
       endEdit: () => api.getState().endEdit(),
     };
-  }, [api, doc, autoInsertedIds, rev, pendingEdit, simulation, simulationPending, executingBlockId]);
+  }, [
+    api,
+    doc,
+    paramOrigins,
+    autoInsertedIds,
+    rev,
+    pendingEdit,
+    simulation,
+    simulationPending,
+    executingBlockId,
+  ]);
 
   const isValidConnection = useMemo(() => makeIsValidConnection(doc), [doc]);
 
@@ -1011,36 +1132,73 @@ function CanvasInner({
   );
 
   /**
-   * The first paint is fitted by the `fitView` prop (React Flow waits for measurement);
-   * this covers every later load. The counter is what the effect depends on: a boolean
-   * "should refit" derived during render is already false by the time effects run, since
-   * the render-time adjustment that set it re-rendered first.
+   * BOTH arrivals — the first paint and every later template/share load — go through the one
+   * function, so the mount cannot centre while a load anchors. That is also why the
+   * `fitView` prop is gone from `<ReactFlow>`: it solves its own viewport with its own rule,
+   * and two rules for one moment is how the opening frame drifts from the reviewed one.
+   *
+   * The counter is what the effect depends on: a boolean "should refit" derived during render
+   * is already false by the time effects run, since the render-time adjustment that set it
+   * re-rendered first.
    */
   const [fit, setFit] = useState({ nonce: 0, from: loadedFrom });
   if (fit.from !== loadedFrom) {
     setFit((previous) => ({ nonce: previous.nonce + 1, from: loadedFrom }));
   }
   const fitNonce = fit.nonce;
+  const nodesInitialized = useNodesInitialized();
   useEffect(() => {
-    if (fitNonce === 0) return;
-    // A frame of delay lets the newly arrived nodes measure before the viewport solves.
+    // Measured dimensions are what `getNodesBounds` needs; unmeasured nodes would solve a
+    // viewport for a graph of zero-sized boxes.
+    if (!nodesInitialized) return;
     const frame = requestAnimationFrame(() => {
-      void fitView({ duration: fitDurationMs() });
+      const rect = fieldRef.current?.getBoundingClientRect();
+      const placed = getNodes();
+      if (rect === undefined || placed.length === 0) return;
+      const bounds = getNodesBounds(placed);
+      if (bounds.width <= 0 || bounds.height <= 0) return;
+      void setViewport(
+        arrivalViewport(bounds, { width: rect.width, height: rect.height }),
+        { duration: fitDurationMs() },
+      );
     });
     return () => cancelAnimationFrame(frame);
-  }, [fitNonce, fitView]);
+  }, [fitNonce, nodesInitialized, getNodes, getNodesBounds, setViewport]);
 
   const barPosition = useMemo(
     () => selectionBarPosition(nodes, selected, viewport),
     [nodes, selected, viewport],
   );
 
+  /**
+   * The keyboard-add position, published to the host (treatment §4: "Enter adds at canvas
+   * center" — drag-only is an a11y failure). The resolver reads the rect and the transform
+   * at CALL time rather than closing over them, so a pan between keystrokes cannot make it
+   * stale, and it is torn down on unmount so a host holding the ref cannot call into a
+   * dead canvas.
+   */
+  useEffect(() => {
+    if (dropPositionRef === undefined) return;
+    dropPositionRef.current = () => {
+      const rect = fieldRef.current?.getBoundingClientRect();
+      if (rect === undefined) return CANVAS_ORIGIN;
+      return screenToFlowPosition({
+        x: rect.left + rect.width / 2,
+        y: rect.top + rect.height / 2,
+      });
+    };
+    const ref = dropPositionRef;
+    return () => {
+      ref.current = null;
+    };
+  }, [dropPositionRef, screenToFlowPosition]);
+
   return (
     // Every node component renders inside React Flow, so the runtime that carries the
     // provenanced quantities has to wrap it: a provider mounted beside the flow would be
     // invisible to the very components it exists for.
     <BlockRuntimeProvider value={runtime}>
-      <div className="relative h-full w-full bg-background">
+      <div ref={fieldRef} className="relative h-full w-full bg-background">
         {/* One live region for the whole canvas, mounted before its first message. The
             keyed span is the remount that makes an identical repeat announce again. */}
         <p aria-live="polite" className="sr-only">
@@ -1073,9 +1231,8 @@ function CanvasInner({
           onDrop={onDrop}
           onPaneClick={onPaneClick}
           defaultEdgeOptions={{ type: "allocation" }}
-          fitView
-          minZoom={0.2}
-          maxZoom={2}
+          minZoom={MIN_ZOOM}
+          maxZoom={MAX_ZOOM}
           selectionKeyCode="Shift"
           // multiSelectionKeyCode is deliberately NOT set: overriding it to Shift removed
           // the platform default (Meta on macOS, Control elsewhere) and left the canvas

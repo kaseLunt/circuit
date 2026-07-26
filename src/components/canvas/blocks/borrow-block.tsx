@@ -176,7 +176,20 @@ export function BorrowBlock({ id, data, selected }: NodePropsFor<BorrowBlockData
       selected={selected}
       message={message}
       headerRight={<AssetChip symbol={data.asset} />}
-      valueSlot={<BlockValueZone subject={TITLE} value={blockValue} pending={runtime.pending} />}
+      valueSlot={
+        <BlockValueZone
+          subject={TITLE}
+          value={blockValue}
+          pending={runtime.pending}
+          // A borrow opens debt against collateral it does not consume; there is no input
+          // flow to report. `core/plan.ts` says so already — a borrow flow carries
+          // `inputWei: null` by construction — and rendering the row anyway turned that
+          // structural absence into "amount unavailable", which is a claim that a source
+          // failed. Core stays untouched: `inputAsset` is load-bearing for the liquidation
+          // pair and is not a promise that an input amount exists.
+          showInput={false}
+        />
+      }
     >
       <div className="space-y-1">
         <div className="flex items-baseline gap-2">

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { toFunctionSelector } from "viem";
-import { validateGraph } from "../../core/graph";
+import { validateGraph, type StrategyGraph } from "../../core/graph";
 import {
   buildPlan,
   type ChainSnapshot,
@@ -9,7 +9,13 @@ import {
 } from "../../core/plan";
 import { optimizeRoute, validateRoute } from "../../core/route-optimizer";
 import { canonicalStepAddresses, fixtureSnapshot } from "../../../tests/helpers/chain-snapshot";
-import { CANONICAL_STEPS, EXPECTED_BORROW_WEI, flagshipGraph } from "../../../tests/helpers/graphs";
+import {
+  CANONICAL_STEPS,
+  EXPECTED_BORROW_WEI,
+  FORK_PROVEN_BORROW_BPS,
+  flagshipGraph,
+} from "../../../tests/helpers/graphs";
+import { createComposerStore } from "../../app/store/composer-store";
 import { FULL_ALLOCATION_BPS } from "./types";
 import {
   FLAGSHIP_TEMPLATE_ID,
@@ -72,8 +78,44 @@ function reparse(value: unknown): unknown {
 // ————————————————————————— the fixture-identity gate —————————————————————————
 
 describe("flagship template is the SPEC §2 expanded DAG", () => {
-  it("is byte-identical to the canonical plan fixture graph", () => {
-    expect(leveragedRestakeLoop()).toEqual(flagshipGraph());
+  /**
+   * The identity gate, restated rather than relaxed.
+   *
+   * The shipped template opens at 5000 bps so the SPEC §3 step-3 drag can cross the warning
+   * threshold; the fork fixture stays at `FORK_PROVEN_BORROW_BPS`, the point W03's anvil run
+   * actually executed. Weakening this to "equal except the borrow" would let the two drift in
+   * ways nothing catches, so the claim is made stronger instead: the template is byte-identical
+   * to the fork-proven graph in EVERY other respect, and ONE `setBorrowAllocationBps` — the same
+   * store action the demo's slider calls — carries it exactly onto the proven point.
+   */
+  it("is byte-identical to the fork-proven fixture but for the borrow allocation", () => {
+    const shipped = leveragedRestakeLoop();
+    const proven = flagshipGraph();
+
+    // Every block, every edge, every id, every other param — identical.
+    expect(shipped.edges).toEqual(proven.edges);
+    expect(shipped.blocks.map((b) => ({ ...b, params: { ...b.params, allocationBps: null } }))).toEqual(
+      proven.blocks.map((b) => ({ ...b, params: { ...b.params, allocationBps: null } })),
+    );
+
+    // The one difference is the one the demo script asks for, and it is the borrow's.
+    const borrowOf = (g: StrategyGraph) =>
+      g.blocks.find((b) => b.type === "borrow")!.params["allocationBps"];
+    expect(borrowOf(shipped)).toBe(5_000);
+    expect(borrowOf(proven)).toBe(FORK_PROVEN_BORROW_BPS);
+  });
+
+  it("reaches the fork-proven graph in one slider move, byte-identically", () => {
+    const store = createComposerStore();
+    expect(store.getState().loadTemplate(FLAGSHIP_TEMPLATE_ID)).toBe(true);
+
+    expect(store.getState().setBorrowAllocationBps("borrow", FORK_PROVEN_BORROW_BPS)).toEqual({
+      ok: true,
+    });
+
+    // Not "close enough": the document the user is holding after one drag IS the graph the
+    // fork suite proved, so every number W03 pinned is one slider move from the screen.
+    expect(store.getState().doc).toEqual(flagshipGraph());
   });
 
   it("pins the block ids every TransactionStep id is derived from", () => {
@@ -172,16 +214,22 @@ describe("flagship template → buildPlan: the 13 enumerated steps (SPEC §2)", 
   it("plans identically to the canonical fixture graph, step for step", () => {
     // The strongest form of the identity claim: same steps, same ids, same order,
     // same ABIs, same amount specs, same provenance trees.
-    expect(planOf(getTemplate(FLAGSHIP_TEMPLATE_ID)!)).toEqual(
+    //
+    // Taken AT the fork-proven allocation, not at the shipped default: this asserts the
+    // template reproduces W03's evidence, and evidence is pinned to the b it was executed
+    // at. The shipped default's own graph is gated by the identity test above.
+    expect(buildPlan(leveragedRestakeLoop("10", FORK_PROVEN_BORROW_BPS), snapshot)).toEqual(
       buildPlan(flagshipGraph(), snapshot),
     );
   });
 
   it("derives the borrow amount to the pinned wei", () => {
-    const result = planOf(getTemplate(FLAGSHIP_TEMPLATE_ID)!);
+    const result = buildPlan(leveragedRestakeLoop("10", FORK_PROVEN_BORROW_BPS), snapshot);
     expectOk(result);
     const borrow = result.steps.find((s) => s.id === "borrow:borrow")!;
     if (borrow.amount.kind !== "derived") throw new Error("borrow amount must be derived");
+    // EXPECTED_BORROW_WEI is a fork-proven quantity: it belongs to b = FORK_PROVEN_BORROW_BPS
+    // and to no other b.
     expect(borrow.amount.amount.value).toBe(EXPECTED_BORROW_WEI);
   });
 });
@@ -230,7 +278,10 @@ describe("every template in the roster can be explained", () => {
     expect(new Set(ids).size).toBe(ids.length);
     expect(ids.every((id) => /^[a-z][a-z0-9-]*$/.test(id))).toBe(true);
     expect(ids).toContain(FLAGSHIP_TEMPLATE_ID);
-    expect(getTemplate(FLAGSHIP_TEMPLATE_ID)!.graph()).toEqual(flagshipGraph());
+    // The roster resolves the SAME graph the exported builder does — the registry is a
+    // lookup, not a second definition. (Its relationship to the fork-proven fixture is the
+    // identity gate's business, above.)
+    expect(getTemplate(FLAGSHIP_TEMPLATE_ID)!.graph()).toEqual(leveragedRestakeLoop());
   });
 
   it("returns undefined for an unknown id instead of substituting a strategy", () => {

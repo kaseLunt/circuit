@@ -6,7 +6,7 @@ import { AlertTriangle } from "lucide-react";
 import type { ActionResult } from "../../../app/store/composer-store";
 import { formatBpsAsPercent } from "../../../core/format";
 import type { HealthFactor } from "../../../core/health-factor";
-import { valueOf, type Derived, type Entered, type Provenanced } from "../../../core/provenance";
+import { valueOf, type Derived, type Provenanced } from "../../../core/provenance";
 import type { BlockType, ComputedBlockValue } from "../../../lib/strategy/types";
 import { SourcedValue } from "../../shared/sourced-value";
 import { cn } from "../../../lib/utils";
@@ -62,10 +62,14 @@ export interface BlockRuntime {
   readonly overAllocatedIds: ReadonlySet<string>;
   /** Total outgoing allocation per source, derived over the entered edge allocations. */
   readonly outgoingAllocationBps: Readonly<Record<string, Derived<number>>>;
-  /** The amount the DOCUMENT holds for an input block, as the user entered it. */
-  readonly inputAmounts: Readonly<Record<string, Entered<string>>>;
-  /** Debt opened as a fraction of collateral (SPEC §5.2 `b`), as the user entered it. */
-  readonly borrowAllocations: Readonly<Record<string, Entered<number>>>;
+  /**
+   * The amount the DOCUMENT holds for an input block, wrapped in the provenance it actually
+   * has: `Configured` while it is still the template's named default, `Entered` once the
+   * user has typed one. The store decides which; nothing here may assume.
+   */
+  readonly inputAmounts: Readonly<Record<string, Provenanced<string>>>;
+  /** Debt opened as a fraction of collateral (SPEC §5.2 `b`), with the same two origins. */
+  readonly borrowAllocations: Readonly<Record<string, Provenanced<number>>>;
   /** The block currently executing (P3). Null outside an execution. */
   readonly executingBlockId: string | null;
   /** Per-block computed values from the block-pinned simulation. */
@@ -258,14 +262,20 @@ export function BaseBlock({
   const showMessage =
     reason !== undefined && (effectiveState === "warning" || effectiveState === "error");
 
-  // ONE polite live region per block. Individual value slots carry aria-busy and no role,
-  // so a block with six unresolved numbers announces once instead of six times.
+  // ONE polite live region per block, carrying only PER-BLOCK FACTS: this block's warning
+  // or error, and this block's outgoing allocation. Both are about this block's identity
+  // and both change rarely.
+  //
+  // Pending is deliberately NOT announced (taste finding S-2a). `runtime.pending` is one
+  // shared flag across the whole canvas, so "values loading" was six simultaneous
+  // announcements for one simulation cycle — and it dragged each block's warning back
+  // through the region alongside it. Loading is already conveyed where it belongs: each
+  // unresolved slot carries `aria-busy` on the element whose value is missing.
   const announcements: string[] = [];
   if (showMessage) announcements.push(`${title}: ${reason}`);
   if (outgoingBps !== null) {
     announcements.push(`${title} allocates ${formatBpsAsPercent(valueOf(outgoingBps))} of its output.`);
   }
-  if (runtime.pending) announcements.push(`${title} values loading.`);
 
   return (
     <div

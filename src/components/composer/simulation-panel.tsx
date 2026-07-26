@@ -123,24 +123,46 @@ function announcementFor(result: SimulationResult | null, pending: boolean): str
   return `Minimum health factor ${value}.`;
 }
 
+/**
+ * WHAT the region is announcing ABOUT — the risk transition, not the number.
+ *
+ * The §3 step-3 drag recomputes the health factor on every frame, so keying the region on
+ * the SENTENCE made every frame a new string, a new nonce and a fresh announcement: a
+ * screen-reader user got a torrent where the treatment specifies exactly one line at the
+ * crossing (taste finding S-2b). This key changes only when the panel's risk STATE changes
+ * — absent/pending, `hf.status`, or the ok↔warning band — and the sentence is composed from
+ * the current value at that moment, so the announcement still reports the real number, just
+ * once. Dragging deeper into the warning band is not a new event and does not speak again.
+ */
+function announcementKey(result: SimulationResult | null, pending: boolean): string {
+  if (result === null || pending) return "silent";
+  const hf = valueOf(result.minHealthFactor);
+  return hf.status === "healthy" ? `healthy:${riskState(hf)}` : hf.status;
+}
+
 /** Message plus the count of messages before it — see the sidebar's identical contract. */
 interface Announcement {
+  readonly key: string;
   readonly text: string;
   readonly nonce: number;
 }
 
 export function SimulationPanel({ result, pending }: SimulationPanelProps) {
   const baseId = useId();
-  const [announced, setAnnounced] = useState<Announcement>({ text: "", nonce: 0 });
+  const [announced, setAnnounced] = useState<Announcement>({ key: "silent", text: "", nonce: 0 });
 
   // Render-time state adjustment (the same pattern SourcedValue uses): a synchronous
   // setState in an effect body trips the compiler's cascading-render lint, and the guard
-  // below is what makes this converge in one extra render. Falling back to "" is what
+  // below is what makes this converge in one extra render. The "silent" key is what
   // clears the region when the panel empties — a live region holding the last settled
   // sentence would re-announce it against an empty panel.
-  const message = announcementFor(result, pending);
-  if (message !== announced.text) {
-    setAnnounced((previous) => ({ text: message, nonce: previous.nonce + 1 }));
+  const key = announcementKey(result, pending);
+  if (key !== announced.key) {
+    setAnnounced((previous) => ({
+      key,
+      text: announcementFor(result, pending),
+      nonce: previous.nonce + 1,
+    }));
   }
 
   const settledEmpty = result === null && !pending;

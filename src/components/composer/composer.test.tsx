@@ -135,6 +135,62 @@ describe("SimulationPanel — designed states", () => {
     expect(regions[0]?.textContent).toContain("1.50");
   });
 
+  it("announces the risk transition, not every recomputed frame of the drag", () => {
+    // Taste finding S-2b. The §3 step-3 drag recomputes the health factor per frame; keying
+    // the region on the SENTENCE made each frame a new announcement. The keyed span is the
+    // instrument: an unchanged key means React kept the same DOM node, which is exactly
+    // "assistive technology was not interrupted".
+    const atHf = (hundredths: bigint) =>
+      simulation({ minHealthFactor: hf({ status: "healthy", hfWad: (WAD * hundredths) / 100n }) });
+    const spanOf = (container: HTMLElement) =>
+      container.querySelector('[role="status"]')?.firstElementChild ?? null;
+
+    const { container, rerender } = render(<SimulationPanel result={atHf(185n)} pending={false} />);
+    const first = spanOf(container);
+    expect(first?.textContent).toContain("1.85");
+
+    // Six recomputes, all safely above the 1.50 threshold — the drag before the crossing.
+    for (const hundredths of [180n, 175n, 170n, 165n, 160n, 155n]) {
+      rerender(<SimulationPanel result={atHf(hundredths)} pending={false} />);
+    }
+    expect(spanOf(container)).toBe(first);
+    // The hero moved every frame even though the region did not — the number IS the drama.
+    expect(screen.getByText("1.55")).not.toBeNull();
+
+    // The crossing: exactly one new announcement, carrying the value at the moment it crossed.
+    rerender(<SimulationPanel result={atHf(140n)} pending={false} />);
+    const crossed = spanOf(container);
+    expect(crossed).not.toBe(first);
+    expect(crossed?.textContent).toContain("1.40");
+    expect(crossed?.textContent).toContain("1.50");
+
+    // And deeper into the warning band is not a new event.
+    rerender(<SimulationPanel result={atHf(120n)} pending={false} />);
+    expect(spanOf(container)).toBe(crossed);
+  });
+
+  it("re-announces when the health factor's status changes, not merely its value", () => {
+    const spanOf = (container: HTMLElement) =>
+      container.querySelector('[role="status"]')?.firstElementChild ?? null;
+    const { container, rerender } = render(
+      <SimulationPanel
+        result={simulation({ minHealthFactor: hf({ status: "healthy", hfWad: (WAD * 185n) / 100n }) })}
+        pending={false}
+      />,
+    );
+    const healthy = spanOf(container);
+
+    rerender(
+      <SimulationPanel
+        result={simulation({ minHealthFactor: hf({ status: "unknown", reason: "no price" }) })}
+        pending={false}
+      />,
+    );
+    const unknown = spanOf(container);
+    expect(unknown).not.toBe(healthy);
+    expect(unknown?.textContent).toContain("unavailable");
+  });
+
   it("empties the live region when the panel empties, rather than holding stale prose", () => {
     const { container, rerender } = render(
       <SimulationPanel result={simulation()} pending={false} />,
