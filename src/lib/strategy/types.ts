@@ -192,15 +192,3 @@ export interface Strategy {
   createdAt: number;
   updatedAt: number;
 }
-
-export interface SavedSystem {
-  id: string;
-  name: string;
-  description?: string;
-  /** Positions relative to the first block. */
-  blocks: StrategyBlock[];
-  edges: StrategyEdge[];
-  blockCount: number;
-  createdAt: number;
-  updatedAt: number;
-}

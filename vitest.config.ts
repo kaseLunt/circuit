@@ -20,6 +20,17 @@ export default defineConfig({
         "src/lib/strategy/templates.ts",
         "src/lib/strategy/layout.ts",
         "src/app/store/composer-store.ts",
+        // W05 close (ledger D6): the canvas/composer families were the largest
+        // surface carrying zero coverage weight. Enrolled deliberately, per the
+        // rule above — each entry is a file this phase shipped and tested.
+        "src/app/store/composer-provider.tsx",
+        "src/lib/recorded-reads/reads-log.ts",
+        "src/lib/recorded-reads/recorded-snapshot.ts",
+        "src/lib/recorded-reads/sandbox-snapshot.ts",
+        "src/lib/strategy/types.ts",
+        "src/components/shared/sourced-value.tsx",
+        "src/components/composer/arrival.ts",
+        "src/components/composer/simulation-host.tsx",
       ],
       exclude: ["src/**/*.test.{ts,tsx}"],
       thresholds: { lines: 95, branches: 90, functions: 95, statements: 95 },
