@@ -22,6 +22,7 @@ import {
   type Derived,
   type Entered,
   type Observed,
+  type Provenanced,
 } from "./provenance";
 import {
   accruedLiquidityIndexRay,
@@ -30,6 +31,7 @@ import {
   rayDivFloor,
   rayMulCeil,
   rayMulFloor,
+  type RateStrategyBps,
 } from "./rates";
 import {
   topologicalOrder,
@@ -77,6 +79,16 @@ export interface ReserveSnapshot {
   readonly virtualUnderlyingBalance: Observed<bigint>;
   /** AaveOracle price in BASE_CURRENCY units. */
   readonly priceBase: Observed<bigint>;
+  /**
+   * DefaultReserveInterestRateStrategyV2.getInterestRateDataBps, read as one struct off the
+   * strategy address the data provider reports for this reserve (the address is READ, never
+   * assumed). Feeds the §5.1 post-action rate recompute in core/risk.ts.
+   */
+  readonly rateStrategy: Observed<RateStrategyBps>;
+  /** getReserveConfigurationData.reserveFactor (tuple index 4). */
+  readonly reserveFactorBps: Observed<number>;
+  /** getReserveDeficit — v3.7 feeds this as the strategy's `unbacked` param. */
+  readonly deficit: Observed<bigint>;
 }
 
 export interface EModeCategorySnapshot {
@@ -164,6 +176,7 @@ export type PlanConstraint =
   | "emode-active-category-rejects-plan"
   | "collateral-not-allowed"
   | "existing-footprint"
+  | "oracle-price-unavailable"
   | "input-amount";
 
 export type PlanError =
@@ -177,10 +190,43 @@ export type PlanError =
       readonly detail: string;
     };
 
+/** The two reserves the pinned Core market exposes to v1. */
+export type ReserveKey = keyof ChainSnapshot["reserves"];
+
+/**
+ * What one block moved, as the SAME pass that derives the borrow amount already computed it.
+ *
+ * This is a RECORDING, not a second derivation: every amount and every wrapper below is the
+ * object `buildPlan` put in scope for its own share-model arithmetic, handed out rather than
+ * recomputed. `core/risk.ts` consumes it so the canvas's numbers and the calldata's numbers
+ * are the same numbers — re-deriving the share model beside it would create exactly the
+ * second source of truth the fork gate exists to rule out.
+ */
+export interface BlockFlow {
+  readonly blockId: string;
+  readonly type: Block["type"];
+  /**
+   * Asset consumed. `null` for `input` (nothing precedes it) and for `borrow`, whose producer
+   * edge is a collateral dependency rather than a token flow.
+   */
+  readonly inputAsset: Asset | null;
+  readonly inputWei: Provenanced<bigint> | null;
+  /**
+   * Token produced. `null` for `lend`: a supply has no consumable token output, which is what
+   * `outputAssetOf` already states and what governs asset flow BETWEEN blocks.
+   */
+  readonly outputAsset: Asset | null;
+  readonly outputWei: Provenanced<bigint> | null;
+  /** The Aave reserve this block touches, for `lend`/`borrow`; null otherwise. */
+  readonly reserve: ReserveKey | null;
+}
+
 export interface PlanSuccess {
   readonly ok: true;
   readonly steps: readonly TransactionStep[];
   readonly targetEModeCategoryId: number | null;
+  /** Every block's predicted in/out amount with its provenance, in topological order. */
+  readonly flows: readonly BlockFlow[];
 }
 
 export interface PlanFailure {
@@ -343,8 +389,6 @@ function parseInputAmount(raw: string | number | undefined): ParsedInput {
 
 // ————————————————————————— P1 phase gate + flow semantics —————————————————————————
 
-type ReserveKey = keyof ChainSnapshot["reserves"];
-
 function unsupportedDetail(b: Block): string | null {
   switch (b.type) {
     case "input":
@@ -437,9 +481,23 @@ export function effectiveLiquidationThresholdBps(
   cat: EModeCategorySnapshot | null,
 ): number {
   if (cat === null) return reserve.liquidationThresholdBps.value;
-  return bitSet(cat.collateralBitmap.value, reserve.reserveIndex.value)
+  return inCollateralBitmap(reserve, cat)
     ? cat.liquidationThresholdBps.value
     : reserve.liquidationThresholdBps.value;
+}
+
+/**
+ * The membership test `effectiveLiquidationThresholdBps` branches on, exported so a caller
+ * that must cite WHICH observation the branch selected reads the same predicate instead of
+ * restating it. Comparing the two thresholds for equality would misattribute whenever the
+ * category and the reserve happen to agree, which is why this is a predicate and not a
+ * value comparison.
+ */
+export function inCollateralBitmap(
+  reserve: ReserveSnapshot,
+  cat: EModeCategorySnapshot,
+): boolean {
+  return bitSet(cat.collateralBitmap.value, reserve.reserveIndex.value);
 }
 
 function categoryAdmits(
@@ -592,30 +650,69 @@ export function buildPlan(graph: StrategyGraph, snapshot: ChainSnapshot): PlanRe
   }
   if (emodeErrors.length > 0) return { ok: false, errors: emodeErrors };
 
+  // Oracle DENOMINATORS, validated before any arithmetic consumes them. The borrow converts
+  // a base-currency amount back into token wei by DIVIDING by the asset's price, so a price
+  // of zero is a refusal with a sentence — never a division by zero (which would throw
+  // straight through `simulate`'s total contract) and never a defaulted number (SPEC §5).
+  // Collateral prices are numerators and are not denominators anywhere in this module; a
+  // missing one surfaces downstream as an explicit unknown rather than as a refusal.
+  const priceErrors: PlanError[] = [];
+  for (const b of borrowBlocks) {
+    const key = reserveOf(String(b.params["asset"]));
+    if (snapshot.reserves[key].priceBase.value <= 0n) {
+      priceErrors.push({
+        kind: "constraint",
+        blockId: b.id,
+        constraint: "oracle-price-unavailable",
+        detail: `the oracle reports no usable price for ${key}, so the borrow amount cannot be denominated`,
+      });
+    }
+  }
+  if (priceErrors.length > 0) return { ok: false, errors: priceErrors };
+
   // Predicted flows (floor at every division; matrix §7 share model) — these
   // drive the borrow derivation and the cap validation. Execution amounts stay
   // step-output attributions; predictions never become calldata except for the
   // borrow, whose amount is Derived by contract (W03 §Amount-provenance).
   const predictedOut = new Map<string, bigint>();
-  const provOut = new Map<string, AnyProvenanced>();
+  const provOut = new Map<string, Provenanced<bigint>>();
   let pooled = snapshot.etherfi.totalPooledEther.value;
   let shares = snapshot.etherfi.totalShares.value;
   const pooledObs = snapshot.etherfi.totalPooledEther;
   const sharesObs = snapshot.etherfi.totalShares;
-  const supplies: Array<{ blockId: string; reserve: ReserveKey; amountWei: bigint; prov: AnyProvenanced }> = [];
+  const supplies: Array<{ blockId: string; reserve: ReserveKey; amountWei: bigint; prov: Provenanced<bigint> }> = [];
   const borrowDerivations = new Map<string, Derived<bigint>>();
+  // Recorded, never recomputed: each push below hands out the wrapper this loop just built
+  // for its own arithmetic. Asset and reserve come from the landed flow semantics
+  // (`expectedInputAssetOf` / `outputAssetOf`) rather than a second reading of the params.
+  const flows: BlockFlow[] = [];
+  const flowOf = (
+    b: Block,
+    amounts: { input: Provenanced<bigint> | null; output: Provenanced<bigint> | null },
+  ): BlockFlow => ({
+    blockId: b.id,
+    type: b.type,
+    inputAsset: expectedInputAssetOf(b),
+    inputWei: amounts.input,
+    outputAsset: outputAssetOf(b),
+    outputWei: amounts.output,
+    reserve:
+      b.type === "lend" || b.type === "borrow" ? reserveOf(String(b.params["asset"])) : null,
+  });
 
   for (const id of order) {
     const b = blockById.get(id)!;
     if (b.type === "input") {
+      const prov = entered(inputWei);
       predictedOut.set(id, inputWei);
-      provOut.set(id, entered(inputWei));
+      provOut.set(id, prov);
+      flows.push(flowOf(b, { input: null, output: prov }));
       continue;
     }
     const edge = producerEdge.get(id)!;
     const parentOut = predictedOut.get(edge.source);
     const parentProv = provOut.get(edge.source);
-    const inflow = (): { wei: bigint; prov: AnyProvenanced } => {
+    const inflow = (): { wei: bigint; prov: Provenanced<bigint> } => {
       if (parentOut === undefined || parentProv === undefined) {
         throw new Error(`unreachable: producer ${edge.source} has no predicted output`);
       }
@@ -641,36 +738,41 @@ export function buildPlan(graph: StrategyGraph, snapshot: ChainSnapshot): PlanRe
         pooled += wei;
         shares += minted;
         const out = (minted * pooled) / shares;
-        predictedOut.set(id, out);
-        provOut.set(
-          id,
-          derived(out, "floor(sharesMinted × totalPooledEtherAfter / totalSharesAfter) — eETH balance", [
-            mintedProv,
-          ]),
+        const outProv = derived(
+          out,
+          "floor(sharesMinted × totalPooledEtherAfter / totalSharesAfter) — eETH balance",
+          [mintedProv],
         );
+        predictedOut.set(id, out);
+        provOut.set(id, outProv);
+        flows.push(flowOf(b, { input: prov, output: outProv }));
         break;
       }
       case "wrap": {
         const { wei, prov } = inflow();
         const out = (wei * shares) / pooled;
-        predictedOut.set(id, out);
-        provOut.set(
-          id,
-          derived(out, "floor(eETHAmount × totalShares / totalPooledEther) — sharesForAmount, weETH minted", [
-            prov,
-          ]),
+        const outProv = derived(
+          out,
+          "floor(eETHAmount × totalShares / totalPooledEther) — sharesForAmount, weETH minted",
+          [prov],
         );
+        predictedOut.set(id, out);
+        provOut.set(id, outProv);
+        flows.push(flowOf(b, { input: prov, output: outProv }));
         break;
       }
       case "unwrap": {
         const { wei, prov } = inflow();
         predictedOut.set(id, wei);
         provOut.set(id, prov);
+        // WETH→ETH is 1:1, so the output IS the input — one wrapper, not a restatement.
+        flows.push(flowOf(b, { input: prov, output: prov }));
         break;
       }
       case "lend": {
         const { wei, prov } = inflow();
         supplies.push({ blockId: id, reserve: reserveOf(String(b.params["asset"])), amountWei: wei, prov });
+        flows.push(flowOf(b, { input: prov, output: null }));
         break;
       }
       case "borrow": {
@@ -703,6 +805,7 @@ export function buildPlan(graph: StrategyGraph, snapshot: ChainSnapshot): PlanRe
         borrowDerivations.set(id, borrowProv);
         predictedOut.set(id, borrowWei);
         provOut.set(id, borrowProv);
+        flows.push(flowOf(b, { input: null, output: borrowProv }));
         break;
       }
     }
@@ -863,13 +966,23 @@ export function buildPlan(graph: StrategyGraph, snapshot: ChainSnapshot): PlanRe
     steps.push({ ...step, index });
   };
 
+  const flowByBlockId = new Map(flows.map((f) => [f.blockId, f] as const));
+
   const inflowSpecOf = (b: Block): AmountSpec => {
     const edge = producerEdge.get(b.id)!;
     const producer = blockById.get(edge.source)!;
     if (producer.type === "input") {
-      const wei =
-        edge.allocationBps === 10_000 ? inputWei : (inputWei * BigInt(edge.allocationBps)) / 10_000n;
-      return { kind: "literal", amount: entered(wei) };
+      // An input-funded amount is fixed at plan time, so it becomes calldata directly — and
+      // it becomes the EXACT wrapper the prediction pass already recorded, not a second
+      // computation of the same number wearing fresh provenance. `literal` is reserved for
+      // the wrapper that genuinely is the user's entered figure; a partial allocation is
+      // `floor(entered × bps / 1e4)`, which is a derivation and must say so.
+      const recorded = flowByBlockId.get(b.id)!.inputWei!;
+      if (recorded.kind === "entered") return { kind: "literal", amount: recorded };
+      if (recorded.kind === "derived") return { kind: "derived", amount: recorded };
+      throw new Error(
+        `unreachable: input-funded flow for ${b.id} is ${recorded.kind}, not entered or derived`,
+      );
     }
     return {
       kind: "step-output",
@@ -1022,5 +1135,10 @@ export function buildPlan(graph: StrategyGraph, snapshot: ChainSnapshot): PlanRe
     }
   }
 
-  return { ok: true, steps, targetEModeCategoryId: targetCategory === null ? null : targetCategory.id };
+  return {
+    ok: true,
+    steps,
+    targetEModeCategoryId: targetCategory === null ? null : targetCategory.id,
+    flows,
+  };
 }

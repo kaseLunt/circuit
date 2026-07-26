@@ -18,6 +18,7 @@
 import type { Address } from "viem";
 import { observationMinter } from "../../src/core/provenance";
 import type { ChainSnapshot } from "../../src/core/plan";
+import type { RateStrategyBps } from "../../src/core/rates";
 import {
   PINNED_BLOCK,
   PINNED_TS,
@@ -59,6 +60,9 @@ export interface RawReserve {
   lastUpdateTimestamp: bigint;
   virtualUnderlyingBalance: bigint;
   priceBase: bigint;
+  rateStrategy: RateStrategyBps;
+  reserveFactorBps: number;
+  deficit: bigint;
 }
 
 export interface RawEMode {
@@ -85,6 +89,30 @@ export interface RawFixture {
     totalShares: bigint;
   };
   user: { address: Address; eModeCategoryId: number; hasAaveFootprint: boolean };
+}
+
+/**
+ * The interest-rate strategy struct, shape-checked rather than cast: the reads log is
+ * generated, so a field that silently went missing must fail the fixture here instead of
+ * arriving in the rate math as `undefined`.
+ */
+function rateStrategyRead(label: string): RateStrategyBps {
+  const raw = readResult(label);
+  if (typeof raw !== "object" || raw === null) throw new Error(`read ${label} is not a struct`);
+  const record = raw as Record<string, unknown>;
+  const field = (name: string): number => {
+    const v: unknown = record[name];
+    if (typeof v !== "number" || !Number.isInteger(v)) {
+      throw new Error(`read ${label}.${name} is not an integer`);
+    }
+    return v;
+  };
+  return {
+    optimalUsageRatio: field("optimalUsageRatio"),
+    baseVariableBorrowRate: field("baseVariableBorrowRate"),
+    variableRateSlope1: field("variableRateSlope1"),
+    variableRateSlope2: field("variableRateSlope2"),
+  };
 }
 
 function rawReserve(sym: "WETH" | "weETH"): RawReserve {
@@ -122,6 +150,9 @@ function rawReserve(sym: "WETH" | "weETH"): RawReserve {
     lastUpdateTimestamp: tupleBig(rd, 11),
     virtualUnderlyingBalance: bigRead(`${sym}.getVirtualUnderlyingBalance`),
     priceBase: bigRead(`Oracle.getAssetPrice(${sym})`),
+    rateStrategy: rateStrategyRead(`${sym}.strategy.getInterestRateDataBps`),
+    reserveFactorBps: Number(tupleBig(cfg, 4)),
+    deficit: bigRead(`${sym}.getReserveDeficit`),
   };
 }
 
@@ -201,6 +232,12 @@ export function snapshotFrom(raw: RawFixture): ChainSnapshot {
     lastUpdateTimestamp: mint.observe(r.lastUpdateTimestamp, `${sym}.getReserveData.lastUpdateTimestamp`),
     virtualUnderlyingBalance: mint.observe(r.virtualUnderlyingBalance, `${sym}.getVirtualUnderlyingBalance`),
     priceBase: mint.observe(r.priceBase, `Oracle.getAssetPrice(${sym})`),
+    rateStrategy: mint.observe(r.rateStrategy, `${sym}.strategy.getInterestRateDataBps`),
+    reserveFactorBps: mint.observe(
+      r.reserveFactorBps,
+      `${sym}.getReserveConfigurationData.reserveFactor`,
+    ),
+    deficit: mint.observe(r.deficit, `${sym}.getReserveDeficit`),
   });
   return {
     block: PINNED_BLOCK,
