@@ -39,8 +39,24 @@ function linearEdges(chain: readonly string[]): StrategyGraph["edges"] {
   }));
 }
 
+/**
+ * The borrow allocation W03's fork evidence executed against — the point every pinned
+ * plan number, every `EXPECTED_BORROW_WEI` and every anvil assertion in
+ * `tests/fork/flagship-plan.test.ts` is proven at.
+ *
+ * Named, not typed twice: the shipped template's default moved to 5000 for the SPEC §3
+ * demo script (it must OPEN safe and cross into warning on the step-3 drag), and the
+ * moment those two numbers diverged, the fixture's value stopped being "the default" and
+ * became a specific claim about what has been executed on a fork. A claim like that gets
+ * a name, so the identity gate can say which one it means.
+ */
+export const FORK_PROVEN_BORROW_BPS = 7000;
+
 /** SPEC §2 Leveraged Restake Loop — the canonical 13-step fixture graph. */
-export function flagshipGraph(amount: string | number = "10", allocationBps = 7000): StrategyGraph {
+export function flagshipGraph(
+  amount: string | number = "10",
+  allocationBps: number = FORK_PROVEN_BORROW_BPS,
+): StrategyGraph {
   const blocks: Block[] = [
     { id: "in", type: "input", params: { asset: "ETH", amount } },
     { id: "stake1", type: "stake", params: { protocol: "etherfi" } },

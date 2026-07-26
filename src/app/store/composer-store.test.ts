@@ -8,17 +8,22 @@ import {
   type StrategyGraph,
 } from "../../core/graph";
 import { flagshipGraph } from "../../../tests/helpers/graphs";
+import { fixtureSnapshot } from "../../../tests/helpers/chain-snapshot";
+import { provenanceTrail, valueOf, type Provenanced } from "../../core/provenance";
+import { simulate } from "../../core/risk";
+import type { SimulationResult } from "../../lib/strategy/types";
 import {
   SHARE_VERSION,
   decodeShareGraph,
   encodeShareGraph,
   isAllowedParamValue,
 } from "../../lib/share/encode";
-import { STRATEGY_TEMPLATES } from "../../lib/strategy/templates";
+import { FLAGSHIP_TEMPLATE_ID, STRATEGY_TEMPLATES } from "../../lib/strategy/templates";
 import { FULL_ALLOCATION_BPS } from "../../lib/strategy/types";
 import {
   connectRejection,
   createComposerStore,
+  edgeAllocationOriginKey,
   overAllocatedSourceIds,
   readBorrowAllocationBps,
   readInputAmount,
@@ -26,6 +31,7 @@ import {
   selectGraph,
   selectRedoLabel,
   selectUndoLabel,
+  type ComposerStore,
   type ComposerStoreApi,
 } from "./composer-store";
 
@@ -153,7 +159,7 @@ describe("composer store — allocation edits", () => {
   it("does not clamp to any LTV ceiling — the over-limit value stays representable (§3.4)", () => {
     const store = seeded();
     expect(store.getState().setBorrowAllocationBps("borrow", 9500)).toEqual({ ok: true });
-    expect(readBorrowAllocationBps(store.getState().doc, "borrow")).toEqual({
+    expect(readBorrowAllocationBps(store.getState(), "borrow")).toEqual({
       kind: "entered",
       value: 9500,
     });
@@ -719,18 +725,18 @@ describe("composer store — gate, provenance and transport invariants", () => {
     };
     walk(store.getState());
 
-    expect(readInputAmount(store.getState().doc, "in")).toEqual({ kind: "entered", value: "10" });
-    expect(readInputAmount(store.getState().doc, "borrow")).toBeNull();
-    expect(readInputAmount(store.getState().doc, "nope")).toBeNull();
-    expect(readBorrowAllocationBps(store.getState().doc, "borrow")).toEqual({
+    expect(readInputAmount(store.getState(), "in")).toEqual({ kind: "entered", value: "10" });
+    expect(readInputAmount(store.getState(), "borrow")).toBeNull();
+    expect(readInputAmount(store.getState(), "nope")).toBeNull();
+    expect(readBorrowAllocationBps(store.getState(), "borrow")).toEqual({
       kind: "entered",
       value: 7000,
     });
-    expect(readBorrowAllocationBps(store.getState().doc, "in")).toBeNull();
+    expect(readBorrowAllocationBps(store.getState(), "in")).toBeNull();
 
     // A numeric transported amount is read losslessly rather than coerced to a float.
     const numeric = seeded(flagshipGraph(100_000));
-    expect(readInputAmount(numeric.getState().doc, "in")).toEqual({
+    expect(readInputAmount(numeric.getState(), "in")).toEqual({
       kind: "entered",
       value: "100000",
     });
@@ -778,9 +784,54 @@ describe("composer store — gate, provenance and transport invariants", () => {
         expect(round.ok).toBe(true);
         expect(round.ok && round.graph).toEqual(doc);
       }
+
+      expectCoherentOrigins(store.getState(), `step ${i} (action ${pick})`);
     }
   });
 });
+
+/**
+ * The generic form of the id-aliasing defect, checkable after ANY action.
+ *
+ * A `Configured` wrapper does not merely say "an author chose this" — it names the exact
+ * constant, so it is a claim that can be checked against that constant's value. Every
+ * corruption of this class produced the same signature: a stamp reading
+ * `configured FULL_ALLOCATION_BPS` sitting on a 6000- or 5000-bps value. This asserts the
+ * claim rather than the mechanism, so it catches the next door as well as the two known
+ * ones — it fails on the unfixed `connect` within the randomized walk above.
+ */
+const CONSTANT_VALUES: Readonly<Record<string, unknown>> = {
+  FULL_ALLOCATION_BPS: 10_000,
+  DEFAULT_BORROW_ALLOCATION_BPS: 5_000,
+  DEFAULT_INPUT_ETH: "10",
+};
+
+/**
+ * A walk shaped to REACH the aliasing sequence, because the general property test above
+ * rarely does: the corruption needs an id to be minted, given a non-default allocation,
+ * disconnected, and then minted again for a different edge — four specific actions in
+ * order. Weighted toward connect/disconnect/re-allocate/undo so the sequence actually
+ * occurs, and verified to fail against the unfixed `connect`.
+ */
+function expectCoherentOrigins(state: ComposerStore, where: string): void {
+  const check = (wrapped: Provenanced<unknown> | null): void => {
+    if (wrapped === null || wrapped.kind !== "configured") return;
+    expect(Object.keys(CONSTANT_VALUES), `${where}: unknown constant ${wrapped.name}`).toContain(
+      wrapped.name,
+    );
+    // The value MUST be the constant's. Anything else means this stamp was written for a
+    // different quantity and drifted onto this one.
+    expect(wrapped.value, `${where}: ${wrapped.name} cites ${String(wrapped.value)}`).toEqual(
+      CONSTANT_VALUES[wrapped.name],
+    );
+  };
+
+  for (const block of state.doc.blocks) {
+    check(readInputAmount(state, block.id));
+    check(readBorrowAllocationBps(state, block.id));
+    for (const leg of readOutgoingAllocationBps(state, block.id)?.inputs ?? []) check(leg);
+  }
+}
 
 describe("composer store — outgoing allocation reaches the display provenanced", () => {
   it("says nothing about a block that routes nothing out", () => {
@@ -846,5 +897,381 @@ describe("composer store — outgoing allocation reaches the display provenanced
         .doc.edges.filter((e) => e.source === source)
         .reduce((sum, e) => sum + e.allocationBps, 0),
     );
+  });
+});
+
+
+describe("param origin — Configured until the user touches it (SPEC §5)", () => {
+  function flagship(): ComposerStoreApi {
+    const store = createComposerStore();
+    expect(store.getState().loadTemplate(FLAGSHIP_TEMPLATE_ID)).toBe(true);
+    return store;
+  }
+
+  it("cites the named constant for a template's untouched allocation, not the user", () => {
+    // The defect this exists to prevent: the document holds 5000 the moment the template
+    // loads, so wrapping it as `Entered` claims the user chose a number they have never
+    // seen a control for.
+    const allocation = readBorrowAllocationBps(flagship().getState(), "borrow");
+    expect(allocation).toEqual({
+      kind: "configured",
+      value: 5_000,
+      name: "DEFAULT_BORROW_ALLOCATION_BPS",
+      definedAt: "src/lib/strategy/templates.ts",
+    });
+  });
+
+  it("cites the input amount's own constant too", () => {
+    expect(readInputAmount(flagship().getState(), "in")).toEqual({
+      kind: "configured",
+      value: "10",
+      name: "DEFAULT_INPUT_ETH",
+      definedAt: "src/lib/strategy/templates.ts",
+    });
+  });
+
+  it("becomes entered after ONE slider move, and stays that way", () => {
+    const store = flagship();
+    expect(store.getState().setBorrowAllocationBps("borrow", 7000)).toEqual({ ok: true });
+    expect(readBorrowAllocationBps(store.getState(), "borrow")).toEqual({
+      kind: "entered",
+      value: 7000,
+    });
+  });
+
+  it("does NOT revert origin when undo restores the default VALUE", () => {
+    // Value equality is not origin. The user did enter this number; undoing the edit puts
+    // the number back, not the ignorance of it. Re-claiming `Configured` here would cite a
+    // constant for a figure the user has demonstrably chosen.
+    const store = flagship();
+    store.getState().setBorrowAllocationBps("borrow", 7000);
+    store.getState().undo();
+
+    const doc = store.getState().doc.blocks.find((b) => b.id === "borrow")!;
+    expect(doc.params["allocationBps"]).toBe(5_000);
+    expect(readBorrowAllocationBps(store.getState(), "borrow")).toEqual({
+      kind: "entered",
+      value: 5_000,
+    });
+  });
+
+  it("treats a shared link's numbers as entered — a human chose them", () => {
+    const store = seeded(flagshipGraph());
+    expect(readBorrowAllocationBps(store.getState(), "borrow")?.kind).toBe("entered");
+    expect(readInputAmount(store.getState(), "in")?.kind).toBe("entered");
+  });
+
+  it("keeps origin OUT of the document, so share bytes and fixture identity are untouched", () => {
+    const template = flagship();
+    const edited = flagship();
+    edited.getState().setBorrowAllocationBps("borrow", 7000);
+    edited.getState().setBorrowAllocationBps("borrow", 5000);
+
+    // Same bytes, different origin: the document cannot carry the distinction, which is
+    // precisely why it is tracked beside it.
+    expect(edited.getState().doc).toEqual(template.getState().doc);
+    expect(readBorrowAllocationBps(edited.getState(), "borrow")?.kind).toBe("entered");
+    expect(readBorrowAllocationBps(template.getState(), "borrow")?.kind).toBe("configured");
+    for (const block of template.getState().doc.blocks) {
+      expect(Object.keys(block.params)).not.toContain("origin");
+    }
+  });
+
+  it("cites each edge leg's own origin in the outgoing sum", () => {
+    const store = flagship();
+    const source = store.getState().doc.edges[0]!;
+    const sum = readOutgoingAllocationBps(store.getState(), source.source);
+    expect(sum?.inputs.every((i) => i.kind === "configured")).toBe(true);
+
+    store.getState().setEdgeAllocationBps(source.id, 6000);
+    const afterEdit = readOutgoingAllocationBps(store.getState(), source.source);
+    expect(afterEdit?.inputs.every((i) => i.kind === "entered")).toBe(true);
+  });
+
+  it("carries the origin into the derivation tree, so the tooltip and the math agree", () => {
+    // The finding's other half: a Configured display over an Entered derivation is one
+    // number telling two stories.
+    const store = flagship();
+    const untouched = simulate(
+      store.getState().doc,
+      fixtureSnapshot(),
+      store.getState().paramOrigins,
+    );
+    expect(trailOf(untouched)).toContain("configured DEFAULT_BORROW_ALLOCATION_BPS");
+
+    store.getState().setBorrowAllocationBps("borrow", 7000);
+    const edited = simulate(store.getState().doc, fixtureSnapshot(), store.getState().paramOrigins);
+    expect(trailOf(edited)).not.toContain("configured DEFAULT_BORROW_ALLOCATION_BPS");
+  });
+
+  it("defaults to entered for a caller that tracks no origins — the live path is unchanged", () => {
+    const store = flagship();
+    const withOrigins = simulate(store.getState().doc, fixtureSnapshot(), store.getState().paramOrigins);
+    const without = simulate(store.getState().doc, fixtureSnapshot());
+    expect(trailOf(without)).not.toContain("configured DEFAULT_BORROW_ALLOCATION_BPS");
+    // Same numbers either way: origin changes the citation, never the arithmetic.
+    expect(valueOf(without.minHealthFactor)).toEqual(valueOf(withOrigins.minHealthFactor));
+  });
+});
+
+/** Every provenance line behind the health factor, flattened. */
+function trailOf(result: SimulationResult): string {
+  return provenanceTrail(result.minHealthFactor).join(" | ");
+}
+
+
+/** Needs a wrap (stake1 emits eETH, supply1 wants weETH) AND carries a partial allocation
+ *  the user owns. The inbound edge id is deliberately the one `allocateEdgeId` would hand
+ *  the generated outbound edge, which is the aliasing case. */
+function partialAndUnwrapped(): StrategyGraph {
+  return {
+    blocks: [
+      { id: "in", type: "input", params: { asset: "ETH", amount: "10" } },
+      { id: "stake1", type: "stake", params: { protocol: "etherfi" } },
+      { id: "supply1", type: "lend", params: { protocol: "aave-v3", asset: "weETH" } },
+    ],
+    edges: [
+      { id: "e0", source: "in", target: "stake1", allocationBps: FULL_ALLOCATION_BPS },
+      { id: "e:supply1", source: "stake1", target: "supply1", allocationBps: 6_000 },
+    ],
+  };
+}
+
+describe("param origin — the wrap pass preserves lineage, not just novelty", () => {
+  function optimized(): ComposerStoreApi {
+    const store = seeded(partialAndUnwrapped());
+    expect(store.getState().insertRequiredWraps()).toEqual({ inserted: 1 });
+    return store;
+  }
+
+  it("keeps a user's partial allocation ENTERED after a wrap lands in front of it", () => {
+    // Inserting a wrap does not change whose number 60% is. The inbound replacement carries
+    // that exact allocation, so it inherits that edge's origin rather than being treated as
+    // something this pass invented.
+    const store = optimized();
+    const inbound = readOutgoingAllocationBps(store.getState(), "stake1");
+    expect(inbound?.value).toBe(6_000);
+    expect(inbound?.inputs.map((i) => i.kind)).toEqual(["entered"]);
+  });
+
+  it("agrees with the derivation tree about that same 60%", () => {
+    // `core/plan.ts` wraps a partial edge allocation as `entered` in its own tree. If the
+    // display said "configured", one number would carry two contradictory citations.
+    const store = optimized();
+    const result = simulate(store.getState().doc, fixtureSnapshot(), store.getState().paramOrigins);
+    expect(result.isValid).toBe(true);
+    const supplied = result.blockValues["supply1"]?.outputAmountWei;
+    if (supplied === undefined || supplied === null) throw new Error("expected a supply value");
+    const trail = provenanceTrail(supplied).join(" | ");
+    expect(trail).toContain("floor(producerOutput × 6000 / 10^4)");
+    expect(trail).not.toContain("FULL_ALLOCATION_BPS");
+  });
+
+  it("cites the configured constant for the generated outbound edge only", () => {
+    const store = optimized();
+    const outbound = readOutgoingAllocationBps(store.getState(), "wrap1");
+    expect(outbound?.value).toBe(FULL_ALLOCATION_BPS);
+    expect(outbound?.inputs).toEqual([
+      {
+        kind: "configured",
+        value: FULL_ALLOCATION_BPS,
+        name: "FULL_ALLOCATION_BPS",
+        definedAt: "src/lib/strategy/types.ts",
+      },
+    ]);
+  });
+
+  it("never gives a generated edge an id the undo stack can restore underneath it", () => {
+    // `allocateEdgeId` derives from the target, so the outbound edge wants `e:supply1` —
+    // the id the replaced edge already holds on the undo stack. Origins deliberately do not
+    // unwind, so reusing it would leave a "configured 100%" stamp sitting on the key undo
+    // refills with the user's entered 60%.
+    const store = optimized();
+    const ids = store.getState().doc.edges.map((e) => e.id);
+    expect(ids).not.toContain("e:supply1");
+    expect(new Set(ids).size).toBe(ids.length);
+  });
+
+  it("restores value AND origin coherently when the insert is undone", () => {
+    const store = optimized();
+    store.getState().undo();
+
+    const restored = store.getState().doc.edges.find((e) => e.source === "stake1");
+    expect(restored?.id).toBe("e:supply1");
+    expect(restored?.allocationBps).toBe(6_000);
+    // The user's number, still theirs — not a constant that does not even hold this value.
+    expect(readOutgoingAllocationBps(store.getState(), "stake1")?.inputs).toEqual([
+      { kind: "entered", value: 6_000 },
+    ]);
+  });
+
+  it("never mints an edge id a MULTI-LEVEL undo can restore underneath it", () => {
+    /**
+     * The reachable-history repro. Two branches so the document stays single-producer and
+     * valid; `e:supply1-2` is already taken in the live document, and `e:supply1` is taken
+     * only by a document two undos back.
+     *
+     * Reserving against the current doc plus the immediately replaced ids is NOT enough:
+     * `e:supply1` is free at insert time, so the generated outbound edge claims it and
+     * stamps the configured constant on that key. Undo the insertion, undo the disconnect,
+     * and the user's entered 5000 comes back under a stamp that says "configured
+     * FULL_ALLOCATION_BPS" — a named 10000-bps constant citing a 5000-bps value.
+     */
+    const twoBranches: StrategyGraph = {
+      blocks: [
+        { id: "in", type: "input", params: { asset: "ETH", amount: "10" } },
+        { id: "stake1", type: "stake", params: { protocol: "etherfi" } },
+        { id: "stake2", type: "stake", params: { protocol: "etherfi" } },
+        { id: "supply1", type: "lend", params: { protocol: "aave-v3", asset: "weETH" } },
+        { id: "supply2", type: "lend", params: { protocol: "aave-v3", asset: "weETH" } },
+      ],
+      edges: [
+        { id: "e0", source: "in", target: "stake1", allocationBps: 5_000 },
+        { id: "e1", source: "in", target: "stake2", allocationBps: 5_000 },
+        { id: "e:supply1-2", source: "stake1", target: "supply1", allocationBps: 5_000 },
+        { id: "e:supply1", source: "stake2", target: "supply2", allocationBps: 5_000 },
+      ],
+    };
+
+    const store = seeded(twoBranches);
+    const historic = store.getState().doc.edges.map((e) => e.id);
+    store.getState().disconnect("e:supply1");
+    expect(store.getState().insertRequiredWraps()).toEqual({ inserted: 1 });
+
+    // The generated edge aliased nothing any reachable document holds.
+    const generated = store
+      .getState()
+      .doc.edges.map((e) => e.id)
+      .filter((id) => !historic.includes(id));
+    expect(generated).not.toContain("e:supply1");
+    for (const id of Object.keys(store.getState().paramOrigins)) {
+      expect(id).not.toBe(edgeAllocationOriginKey("e:supply1"));
+    }
+
+    store.getState().undo(); // the wrap insertion
+    store.getState().undo(); // the disconnect
+
+    const restored = store.getState().doc.edges.find((e) => e.id === "e:supply1");
+    expect(restored?.allocationBps).toBe(5_000);
+    // Value AND origin coherent: the user's number, still attributed to the user.
+    expect(readOutgoingAllocationBps(store.getState(), "stake2")?.inputs).toEqual([
+      { kind: "entered", value: 5_000 },
+    ]);
+  });
+
+  it("closes the same hole in connect() — reconnecting must not reuse a historical id", () => {
+    /**
+     * Codex's second repro, and the reason the reservation rule belongs to every id-minting
+     * door rather than to the wrap pass alone: `connect` also stamps a configured origin on
+     * the id it mints. Disconnect an edge and reconnect the same endpoints — the live
+     * document says `e:supply1` is free, the undo stack does not.
+     *
+     * This also covers PASTE, which creates every one of its edges through `connect`.
+     */
+    const store = seeded(partialAndUnwrapped());
+    expect(store.getState().doc.edges.some((e) => e.id === "e:supply1")).toBe(true);
+
+    store.getState().disconnect("e:supply1");
+    expect(store.getState().connect("stake1", "supply1").ok).toBe(true);
+
+    // The reconnected edge is a NEW edge carrying the store's default, so it gets its own
+    // id and its own key rather than moving into the departed edge's.
+    const reconnected = store.getState().doc.edges.find((e) => e.source === "stake1");
+    expect(reconnected?.id).not.toBe("e:supply1");
+    expect(reconnected?.allocationBps).toBe(FULL_ALLOCATION_BPS);
+    expect(store.getState().paramOrigins[edgeAllocationOriginKey("e:supply1")]).toBeUndefined();
+
+    store.getState().undo(); // the reconnect
+    store.getState().undo(); // the disconnect
+
+    const restored = store.getState().doc.edges.find((e) => e.id === "e:supply1");
+    expect(restored?.allocationBps).toBe(6_000);
+    expect(readOutgoingAllocationBps(store.getState(), "stake1")?.inputs).toEqual([
+      { kind: "entered", value: 6_000 },
+    ]);
+  });
+
+  it("inherits a CONFIGURED origin as configured — inheritance runs both ways", () => {
+    const store = createComposerStore();
+    const input = store.getState().addBlock("input", { x: 0, y: 0 });
+    const stake = store.getState().addBlock("stake", { x: 1, y: 0 });
+    const lend = store.getState().addBlock("lend", { x: 2, y: 0 });
+    store.getState().setBlockParam(input, "amount", "10");
+    store.getState().setBlockParam(stake, "protocol", "etherfi");
+    store.getState().setBlockParam(lend, "asset", "weETH");
+    expect(store.getState().connect(input, stake).ok).toBe(true);
+    expect(store.getState().connect(stake, lend).ok).toBe(true);
+    // `connect` stamps the store's full-allocation default: the user chose to connect, not
+    // to allocate.
+    expect(store.getState().insertRequiredWraps()).toEqual({ inserted: 1 });
+
+    const inbound = readOutgoingAllocationBps(store.getState(), stake);
+    expect(inbound?.inputs.map((i) => i.kind)).toEqual(["configured"]);
+  });
+});
+
+describe("param origin — the aliasing class stays closed at every id-minting door", () => {
+  /**
+   * A random walk almost never reaches this: the corruption needs FIVE specific actions in
+   * order on the same target (mint an id, give it a non-default allocation, disconnect it,
+   * mint again, then unwind past the reuse). So the sweep is deterministic — it drives that
+   * shape at every door that mints an id, then UNWINDS THE WHOLE HISTORY, asserting origin
+   * coherence at every level.
+   *
+   * Unwinding completely is the part that generalises: `paramOrigins` does not travel with
+   * undo, so every document the stack can produce is a document a stale stamp could land
+   * on. Checking one level deep is what let this class survive two rounds of fixes.
+   */
+  function driveAndUnwind(store: ComposerStoreApi, label: string): void {
+    expectCoherentOrigins(store.getState(), `${label}: before unwinding`);
+    for (let depth = 0; selectUndoLabel(store.getState()) !== null && depth < 100; depth += 1) {
+      store.getState().undo();
+      expectCoherentOrigins(store.getState(), `${label}: ${depth + 1} undo(s) deep`);
+    }
+    // And forward again: redo restores documents too.
+    for (let depth = 0; selectRedoLabel(store.getState()) !== null && depth < 100; depth += 1) {
+      store.getState().redo();
+      expectCoherentOrigins(store.getState(), `${label}: redo ${depth + 1}`);
+    }
+  }
+
+  it("survives disconnect → reconnect → unwind at connect()", () => {
+    const store = seeded(partialAndUnwrapped());
+    store.getState().disconnect("e:supply1");
+    expect(store.getState().connect("stake1", "supply1").ok).toBe(true);
+    store.getState().setEdgeAllocationBps(
+      store.getState().doc.edges.find((e) => e.source === "stake1")!.id,
+      4_200,
+    );
+    driveAndUnwind(store, "connect");
+  });
+
+  it("survives mint → re-allocate → disconnect → mint again → unwind", () => {
+    // The full five-action shape, on one target, at the connect door.
+    const store = seeded(partialAndUnwrapped());
+    store.getState().disconnect("e:supply1");
+    expect(store.getState().connect("stake1", "supply1").ok).toBe(true);
+    const first = store.getState().doc.edges.find((e) => e.source === "stake1")!.id;
+    store.getState().setEdgeAllocationBps(first, 6_000);
+    store.getState().disconnect(first);
+    expect(store.getState().connect("stake1", "supply1").ok).toBe(true);
+    driveAndUnwind(store, "remint");
+  });
+
+  it("survives the wrap pass, whose ids are minted by a different door", () => {
+    const store = seeded(partialAndUnwrapped());
+    expect(store.getState().insertRequiredWraps()).toEqual({ inserted: 1 });
+    driveAndUnwind(store, "wrap pass");
+  });
+
+  it("survives a template arrival followed by edits and a full unwind", () => {
+    const store = createComposerStore();
+    expect(store.getState().loadTemplate(FLAGSHIP_TEMPLATE_ID)).toBe(true);
+    store.getState().setBorrowAllocationBps("borrow", 7_000);
+    store.getState().setBlockParam("in", "amount", "3.5");
+    const edge = store.getState().doc.edges[0]!;
+    store.getState().setEdgeAllocationBps(edge.id, 8_000);
+    store.getState().disconnect(edge.id);
+    driveAndUnwind(store, "template");
   });
 });

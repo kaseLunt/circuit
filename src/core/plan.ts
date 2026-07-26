@@ -18,11 +18,13 @@ import { encodeFunctionData, type Abi, type Address, type Hex } from "viem";
 import {
   derived,
   entered,
+  paramOriginKey,
+  wrapParam,
   type AnyProvenanced,
   type Derived,
-  type Entered,
   type Observed,
   type Provenanced,
+  type ParamOrigins,
 } from "./provenance";
 import {
   accruedLiquidityIndexRay,
@@ -110,11 +112,21 @@ export interface EtherFiSnapshot {
   readonly totalShares: Observed<bigint>;
 }
 
+/**
+ * `Provenanced`, not `Observed`, and the widening is the point (W05 P2). Everything else
+ * on a `ChainSnapshot` is protocol state, which always comes from a read. The USER does
+ * not: sandbox is the default experience and no wallet is connected, so there is no
+ * address to call `getUserEMode` on. The honest wrapper for "a fresh actor with no Aave
+ * position" is `Configured` — a named constant with a definition site — and typing these
+ * `Observed` would have forced the sandbox to forge a chain read to satisfy the compiler.
+ * The live path (`server/chain/snapshot.ts`) still mints `Observed` and is unaffected;
+ * `Observed` is a `Provenanced`. Consumers read `.value` and are indifferent.
+ */
 export interface UserSnapshot {
   readonly address: Address;
-  readonly eModeCategoryId: Observed<number>;
+  readonly eModeCategoryId: Provenanced<number>;
   /** SPEC §2 predicate: any Aave Core footprint — any aToken balance or debt. */
-  readonly hasAaveFootprint: Observed<boolean>;
+  readonly hasAaveFootprint: Provenanced<boolean>;
 }
 
 export interface ChainSnapshot {
@@ -136,7 +148,14 @@ export type AmountAttribution =
   | "transfer-event";
 
 export type AmountSpec =
-  | { readonly kind: "literal"; readonly amount: Entered<bigint> }
+  /**
+   * The figure the DOCUMENT holds, becoming calldata unchanged. `Provenanced`, not
+   * `Entered`: SPEC §5.5's whitelist is about the attribution MECHANISM (only the input
+   * step may carry a plan-time figure at all), not about how that figure got into the
+   * document. A template's untouched amount is a `Configured` default and must keep saying
+   * so all the way into the step list.
+   */
+  | { readonly kind: "literal"; readonly amount: Provenanced<bigint> }
   | {
       readonly kind: "step-output";
       readonly producerStepId: string;
@@ -514,7 +533,19 @@ function categoryAdmits(
 
 // ————————————————————————— buildPlan —————————————————————————
 
-export function buildPlan(graph: StrategyGraph, snapshot: ChainSnapshot): PlanResult {
+/**
+ * `origins` carries how each user-editable param reached the document, so the provenance
+ * TREE agrees with what the screen shows. Optional and defaulting to empty, which means
+ * all-entered: every caller that does not track origins — the live path, the fork suite —
+ * gets exactly the semantics it had before, because its params really do come from a human.
+ * Without it, a template default would render `Configured` in its own tooltip while every
+ * derivation that consumed it cited `entered by user` for the same number.
+ */
+export function buildPlan(
+  graph: StrategyGraph,
+  snapshot: ChainSnapshot,
+  origins: ParamOrigins = {},
+): PlanResult {
   const structural = validateGraph(graph);
   if (!structural.ok) {
     return { ok: false, errors: [{ kind: "graph-invalid", messages: structural.errors }] };
@@ -703,7 +734,7 @@ export function buildPlan(graph: StrategyGraph, snapshot: ChainSnapshot): PlanRe
   for (const id of order) {
     const b = blockById.get(id)!;
     if (b.type === "input") {
-      const prov = entered(inputWei);
+      const prov = wrapParam(inputWei, origins[paramOriginKey("block", id, "amount")]);
       predictedOut.set(id, inputWei);
       provOut.set(id, prov);
       flows.push(flowOf(b, { input: null, output: prov }));
@@ -794,7 +825,7 @@ export function buildPlan(graph: StrategyGraph, snapshot: ChainSnapshot): PlanRe
         const borrowBase = (collateralBase * BigInt(bBps)) / 10_000n;
         const borrowBaseProv = derived(borrowBase, `floor(collateralBase × ${bBps} / 10^4)`, [
           collateralProv,
-          entered(bBps),
+          wrapParam(bBps, origins[paramOriginKey("block", id, "allocationBps")]),
         ]);
         const unit = 10n ** BigInt(borrowReserve.decimals.value);
         const borrowWei = (borrowBase * unit) / borrowReserve.priceBase.value;
@@ -978,10 +1009,16 @@ export function buildPlan(graph: StrategyGraph, snapshot: ChainSnapshot): PlanRe
       // the wrapper that genuinely is the user's entered figure; a partial allocation is
       // `floor(entered × bps / 1e4)`, which is a derivation and must say so.
       const recorded = flowByBlockId.get(b.id)!.inputWei!;
-      if (recorded.kind === "entered") return { kind: "literal", amount: recorded };
+      // `configured` joins `entered` here: both are the document's own figure, arriving as
+      // calldata unchanged. Only a `derived` inflow is a computation over it (a partial
+      // allocation is `floor(entered × bps / 1e4)`), and only `observed` is impossible —
+      // nothing on this path is read from a chain.
+      if (recorded.kind === "entered" || recorded.kind === "configured") {
+        return { kind: "literal", amount: recorded };
+      }
       if (recorded.kind === "derived") return { kind: "derived", amount: recorded };
       throw new Error(
-        `unreachable: input-funded flow for ${b.id} is ${recorded.kind}, not entered or derived`,
+        `unreachable: input-funded flow for ${b.id} is ${recorded.kind}, not a document figure`,
       );
     }
     return {

@@ -72,8 +72,20 @@ const DEFAULT_INPUT_ETH = "10";
  * Observed on the snapshot and resolved per e-mode regime. Both quantities are
  * called "allocation"; conflating them (as the predecessor's single `flowPercent`
  * did) produces wrong leverage that still typechecks.
+ *
+ * 5000, not 7000, and the difference is the demo script (SPEC §3): the composer opens
+ * here and step 3 drags to 70%, crossing the warning threshold on the way. At 7000 the
+ * composer opened ALREADY in warning — the borrow block arrived amber, the panel arrived
+ * amber, and step 3's crossing had nothing left to demonstrate. A default that pre-empts
+ * the product's own headline beat is the wrong default.
+ *
+ * This does NOT move the fork-proven point. `tests/helpers/graphs.ts` keeps its fixture at
+ * `FORK_PROVEN_BORROW_BPS` (7000) — the value W03's anvil evidence executed against — and
+ * the identity gate in templates.test.ts proves this template reaches that exact graph in
+ * one `setBorrowAllocationBps` call. The shipped default and the proven point are now two
+ * named things one slider apart, rather than one literal doing both jobs.
  */
-const DEFAULT_BORROW_ALLOCATION_BPS = 7000;
+const DEFAULT_BORROW_ALLOCATION_BPS = 5000;
 
 /** The template SPEC §3 step 1 opens the composer with. */
 export const FLAGSHIP_TEMPLATE_ID = "leveraged-restake-loop";

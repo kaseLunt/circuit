@@ -243,6 +243,34 @@ describe("BaseBlock — frame anatomy", () => {
     expect(container.querySelectorAll("[aria-live]").length).toBe(1);
     expect(container.querySelectorAll('[aria-busy="true"]').length).toBeGreaterThan(1);
   });
+
+  it("says nothing about loading — pending is a slot fact, not a block-identity fact", () => {
+    // Taste finding S-2a. `runtime.pending` is ONE flag shared by the whole canvas, so
+    // announcing it per block turned a single simulation cycle into six simultaneous
+    // announcements. The unresolved slots already carry aria-busy, which is where a
+    // screen reader should learn this and the only place that names the actual slot.
+    const { container } = mount(<StakeBlock {...nodeProps("stake1", "stake", stakeData)} />, {
+      ...runtime({ pending: true }),
+    });
+    const region = container.querySelector("[aria-live]");
+    expect(region?.textContent).toBe("");
+    expect(container.querySelectorAll('[aria-busy="true"]').length).toBeGreaterThan(0);
+  });
+
+  it("still announces this block's own facts while its values are pending", () => {
+    // Dropping the loading line must not silence the region: over-allocation and warnings
+    // are per-block facts that need block identity and change rarely.
+    const { container } = mount(<StakeBlock {...nodeProps("stake1", "stake", stakeData)} />, {
+      ...runtime({
+        pending: true,
+        overAllocatedIds: new Set(["stake1"]),
+        outgoingAllocationBps: { stake1: outgoing(11_500) },
+      }),
+    });
+    const region = container.querySelector("[aria-live]");
+    expect(region?.textContent).toContain("115%");
+    expect(region?.textContent).not.toContain("loading");
+  });
 });
 
 describe("BaseBlock — states are token assignments", () => {
@@ -796,6 +824,29 @@ describe("BorrowBlock — risk thresholds come from core/health-factor.ts", () =
     );
     expect(container.textContent).toContain("no liquidation risk");
     expect(container.textContent).not.toContain("∞");
+  });
+
+  it("renders no input row — a borrow does not consume what it borrows against", () => {
+    // `core/plan.ts` gives a borrow flow `inputWei: null` by construction. Rendering the row
+    // anyway turned that structural absence into "amount unavailable" — a claim that a data
+    // source failed, about a quantity no read, wallet or provider could ever fill.
+    //
+    // Asserted with a FULLY RESOLVED value, so this cannot pass merely because the fixture
+    // had nothing to show: even when core hands over an input amount, the borrow block
+    // refuses the row.
+    const { container } = mount(
+      <BorrowBlock {...nodeProps("borrow1", "borrow", borrowData)} />,
+      borrowRuntime({ blockValues: { borrow1: { ...RESOLVED_VALUE, inputAsset: "weETH" } } }),
+    );
+    const directions = [...container.querySelectorAll("span.sr-only")].map((s) => s.textContent);
+    expect(directions).not.toContain("In");
+    expect(directions).toContain("Out");
+    expect(container.textContent).not.toContain("In value");
+
+    // The rows for quantities that DO exist are untouched: an out flow, and a gas cost that
+    // exists but is unquoted in sandbox.
+    expect(container.textContent).toContain("Out value");
+    expect(container.textContent).toContain("Gas");
   });
 
   it("carries none of the prototype's hardcoded prices or thresholds", () => {

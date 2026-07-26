@@ -176,6 +176,20 @@ interface BlockValueZoneProps {
  * A missing `ComputedBlockValue` is passed straight through as nulls: the slots then
  * land in the pending or unavailable state on their own, which is precisely the
  * behaviour the network-dead probe checks.
+ *
+ * THE RULE FOR THE `show*` FLAGS — two different questions, and conflating them is how a
+ * block ends up lying:
+ *
+ *   DOES THE QUANTITY EXIST?  decides whether the ROW RENDERS.
+ *   DO WE HAVE IT?            decides what the SLOT SAYS.
+ *
+ * Gas exists for every block that emits a transaction — we simply have no quote in sandbox
+ * — so the row stays and states the gap ("not quoted"). A borrow's INPUT does not exist at
+ * all: a borrow opens debt against collateral it does not consume, so there is no row.
+ * "Unavailable" is a statement about a data source, and making it about a quantity that was
+ * never going to have a value reads as a failure the user cannot fix — the same defect the
+ * gate named on the min-HF slot. When in doubt: if no future read, wallet or provider could
+ * ever fill the slot, the row should not be there.
  */
 export function BlockValueZone({
   subject,

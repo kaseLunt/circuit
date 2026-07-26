@@ -112,7 +112,11 @@ export function formatAddress(address: string, chars = 4): string {
  * "2025-07-23 03:14:11 UTC". Deliberately never a locale string and never
  * relative time — a provenance citation must not go stale on screen or
  * render differently per viewer. (SPEC §3: tooltip cites method + block +
- * source-fetch timestamp.)
+ * timestamp.)
+ *
+ * It is the SOURCE BLOCK'S time, never a fetch or poll time — `Observed.fetchedAt` says so
+ * at its definition. Surfaces label it "block time" for that reason: replaying the same
+ * block tomorrow must render the same citation, which a fetch time would not.
  */
 export function formatBlockTime(unixSeconds: number): string {
   const iso = new Date(unixSeconds * 1000).toISOString();

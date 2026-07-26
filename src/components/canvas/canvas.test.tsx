@@ -21,6 +21,7 @@ import {
   makeIsValidConnection,
   pasteClipboard,
   rejectionFromConnectionEnd,
+  arrivalViewport,
   runtimeRiskFields,
   selectionBarPosition,
 } from "./canvas";
@@ -202,8 +203,8 @@ describe("the doc → view-model mapping", () => {
       ],
       edges: [],
     };
-    const wrap = blockDataOf(doc, doc.blocks[0]!, undefined);
-    const unwrap = blockDataOf(doc, doc.blocks[1]!, undefined);
+    const wrap = blockDataOf({ doc: doc, paramOrigins: {} }, doc.blocks[0]!, undefined);
+    const unwrap = blockDataOf({ doc: doc, paramOrigins: {} }, doc.blocks[1]!, undefined);
 
     expect(wrap.type).toBe("auto-wrap");
     expect(unwrap.type).toBe("auto-wrap");
@@ -219,7 +220,7 @@ describe("the doc → view-model mapping", () => {
     const doc = store.getState().doc;
     const input = doc.blocks.find((b) => b.type === "input");
     expect(input).not.toBeUndefined();
-    const configured = blockDataOf(doc, input!, undefined);
+    const configured = blockDataOf({ doc: doc, paramOrigins: {} }, input!, undefined);
     expect(configured.isConfigured).toBe(true);
     expect(configured.type === "input" && configured.amount.length).toBeGreaterThan(0);
 
@@ -227,7 +228,7 @@ describe("the doc → view-model mapping", () => {
       blocks: [{ id: "in", type: "input", params: { asset: "ETH" } }],
       edges: [],
     };
-    const unset = blockDataOf(empty, empty.blocks[0]!, "input needs a positive amount");
+    const unset = blockDataOf({ doc: empty, paramOrigins: {} }, empty.blocks[0]!, "input needs a positive amount");
     expect(unset.isConfigured).toBe(false);
     // Unconfigured is NOT invalid: core's complaint about an unset param is the expected
     // reading of an empty control, and the block renders that as its own state.
@@ -243,7 +244,7 @@ describe("the doc → view-model mapping", () => {
     };
     const errors = blockParamErrors(doc);
     expect(errors["in"]).toBe("input needs a positive amount");
-    const data = blockDataOf(doc, doc.blocks[0]!, errors["in"]);
+    const data = blockDataOf({ doc: doc, paramOrigins: {} }, doc.blocks[0]!, errors["in"]);
     expect(data.isValid).toBe(false);
     expect(data.errorMessage).toBe("input needs a positive amount");
   });
@@ -259,7 +260,7 @@ describe("the doc → view-model mapping", () => {
       edges: [],
     };
     expect(blockParamErrors(doc)["stake1"]).toBeUndefined();
-    expect(blockDataOf(doc, doc.blocks[1]!, undefined).isValid).toBe(true);
+    expect(blockDataOf({ doc: doc, paramOrigins: {} }, doc.blocks[1]!, undefined).isValid).toBe(true);
   });
 
   it("never invents a borrow allocation the document does not hold", () => {
@@ -267,7 +268,7 @@ describe("the doc → view-model mapping", () => {
       blocks: [{ id: "b1", type: "borrow", params: { protocol: "aave-v3", asset: "WETH" } }],
       edges: [],
     };
-    const data = blockDataOf(doc, doc.blocks[0]!, undefined);
+    const data = blockDataOf({ doc: doc, paramOrigins: {} }, doc.blocks[0]!, undefined);
     expect(data.isConfigured).toBe(false);
     // The number on the node is the slider's resting position, and the block prints the
     // allocation from the store's provenanced reader — which is null until one is entered.
@@ -276,7 +277,7 @@ describe("the doc → view-model mapping", () => {
 
   it("hands every edge the names the canvas shows, never the store's ids", () => {
     const doc = flagship().getState().doc;
-    const labels = blockLabelsOf(doc, blockParamErrors(doc));
+    const labels = blockLabelsOf({ doc, paramOrigins: {} }, blockParamErrors(doc));
     const edges = allocationEdgesOf(doc.edges, labels, new Set());
 
     expect(edges.length).toBeGreaterThan(0);
@@ -293,11 +294,11 @@ describe("the doc → view-model mapping", () => {
 
   it("labels a block with the same title blockDataOf gives its component", () => {
     const doc = flagship().getState().doc;
-    const labels = blockLabelsOf(doc, blockParamErrors(doc));
+    const labels = blockLabelsOf({ doc, paramOrigins: {} }, blockParamErrors(doc));
 
     expect(Object.keys(labels).sort()).toEqual(doc.blocks.map((b) => b.id).sort());
     for (const block of doc.blocks) {
-      expect(labels[block.id]).toBe(blockDataOf(doc, block, undefined).label);
+      expect(labels[block.id]).toBe(blockDataOf({ doc: doc, paramOrigins: {} }, block, undefined).label);
     }
     expect(Object.values(labels)).toContain("Supply");
   });
@@ -566,5 +567,52 @@ describe("empty state template cards", () => {
       expect(card?.contains(summary)).toBe(false);
       expect(card?.textContent).not.toContain(template.summary);
     }
+  });
+});
+
+describe("the arrival fit (treatment §3 amendment: the legibility floor)", () => {
+  const FIELD = { width: 866, height: 900 };
+  /** The nine-block flagship as laid out: far wider than any field, short enough to fit. */
+  const WIDE = { x: 0, y: 0, width: 2600, height: 300 };
+  const SMALL = { x: 0, y: 0, width: 400, height: 200 };
+
+  it("never drops below the 12px-text legibility floor, however wide the graph", () => {
+    // Free-fitting the flagship solves ~0.26, which renders text-xs at ~3px.
+    expect(arrivalViewport(WIDE, FIELD).zoom).toBe(0.75);
+  });
+
+  it("anchors the graph HEAD when the floor means it cannot fit", () => {
+    // Centring an overflowing graph clips BOTH ends, and the left end is the Input Capital
+    // block — the entry point of the strategy, absent from SPEC §3's opening frame.
+    const view = arrivalViewport(WIDE, FIELD, 24);
+    expect(view.x).toBe(24);
+    // The head's left edge lands at the padding, not off-screen.
+    expect(WIDE.x * view.zoom + view.x).toBe(24);
+  });
+
+  it("still centres a graph that fits, rather than pinning everything left", () => {
+    const view = arrivalViewport(SMALL, FIELD, 24);
+    const left = SMALL.x * view.zoom + view.x;
+    const right = SMALL.width * view.zoom + view.x;
+    expect(left).toBeGreaterThan(24);
+    expect(FIELD.width - right).toBeCloseTo(left, 6);
+  });
+
+  it("decides each axis on its own — a wide, short graph still centres vertically", () => {
+    const view = arrivalViewport(WIDE, FIELD, 24);
+    const top = WIDE.y * view.zoom + view.y;
+    const bottom = WIDE.height * view.zoom + view.y;
+    expect(top).toBeGreaterThan(24);
+    expect(FIELD.height - bottom).toBeCloseTo(top, 6);
+  });
+
+  it("honours a graph whose offset is not the origin", () => {
+    const offset = { x: -500, y: -120, width: 2600, height: 300 };
+    const view = arrivalViewport(offset, FIELD, 24);
+    expect(offset.x * view.zoom + view.x).toBe(24);
+  });
+
+  it("never zooms past the canvas maximum for a tiny graph", () => {
+    expect(arrivalViewport({ x: 0, y: 0, width: 10, height: 10 }, FIELD).zoom).toBe(2);
   });
 });
