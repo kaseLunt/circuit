@@ -5,7 +5,7 @@
 
 import { afterEach, describe, expect, it } from "vitest";
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
-import { SourcedValue } from "./sourced-value";
+import { SourcedValue, slotClassName } from "./sourced-value";
 import { derived, entered, observationMinter } from "../../core/provenance";
 import { RAY, formatRayRateAsPct } from "../../core/format";
 
@@ -90,6 +90,38 @@ describe("SourcedValue — three disjoint states", () => {
   });
 });
 
+describe("slotClassName — a refusal never wears a figure's weight", () => {
+  const ramp = { resolved: "text-sm font-semibold text-foreground", size: "text-sm" };
+
+  it("hands the ramp over where a figure renders, the size alone while pending, and nothing when settled empty", () => {
+    expect(slotClassName(true, false, ramp)).toBe(ramp.resolved);
+    expect(slotClassName(false, true, ramp)).toBe(ramp.size);
+    expect(slotClassName(false, false, ramp)).toBeUndefined();
+  });
+
+  it("leaves the unavailable prose on the component's own ramp, not the caller's", () => {
+    // The trap this guard exists for: the unavailable branch merges the caller's className
+    // OVER `text-xs text-muted-foreground`, and tailwind-merge resolves it in the caller's
+    // favour — so an unconditional ramp prints a refusal at the weight of a reading.
+    render(
+      <SourcedValue
+        value={null}
+        pending={false}
+        label="Minimum health factor"
+        chars={5}
+        format={formatRate}
+        unavailableReason="health factor unavailable"
+        className={slotClassName(false, false, ramp)}
+      />,
+    );
+    const prose = screen.getByText("health factor unavailable");
+    expect(prose.className).toContain("text-xs");
+    expect(prose.className).toContain("text-muted-foreground");
+    expect(prose.className).not.toContain("font-semibold");
+    expect(prose.className).not.toContain("text-sm");
+  });
+});
+
 describe("SourcedValue — provenance tooltip", () => {
   it("exposes the observed trail on activation and wires aria-describedby", () => {
     render(
@@ -110,6 +142,54 @@ describe("SourcedValue — provenance tooltip", () => {
     expect(tooltip.textContent).toContain("@ block 25592678");
     expect(tooltip.textContent).toContain("2025-07-23 03:14:11 UTC");
     expect(trigger.getAttribute("aria-describedby")).toBe(tooltip.getAttribute("id"));
+
+    // Open-only: a second click must not latch the evidence shut under the pointer.
+    fireEvent.click(trigger);
+    expect(screen.queryByRole("tooltip")).not.toBeNull();
+  });
+
+  it("reserves the pending slot's width so resolution does not move the layout", () => {
+    render(
+      <SourcedValue
+        value={liquidityRate}
+        pending={false}
+        label="Supply APY"
+        chars={7}
+        format={formatRate}
+      />,
+    );
+    const trigger = screen.getByRole("button", { name: "3.42%" });
+    expect(trigger.style.minWidth).toBe("7ch");
+  });
+
+  it("drops the reservation inside prose, where there is no column to protect", () => {
+    const { container, rerender } = render(
+      <SourcedValue
+        value={liquidityRate}
+        pending={false}
+        label="Supply APY"
+        chars={7}
+        format={formatRate}
+        inline
+      />,
+    );
+    // A reservation inside a sentence is a gap before the next word, not an alignment.
+    expect(screen.getByRole("button", { name: "3.42%" }).style.minWidth).toBe("");
+
+    // The skeleton still holds its box either way: a pending slot with no width would let
+    // the sentence reflow at the moment the number lands.
+    rerender(
+      <SourcedValue
+        value={null}
+        pending
+        label="Supply APY"
+        chars={7}
+        format={formatRate}
+        inline
+      />,
+    );
+    const slot = container.querySelector<HTMLElement>('[aria-busy="true"]');
+    expect(slot?.style.width).toBe("7ch");
   });
 
   it("shows a derivation's formula and each of its inputs", () => {

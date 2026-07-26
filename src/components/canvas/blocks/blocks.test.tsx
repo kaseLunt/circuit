@@ -1,0 +1,913 @@
+/** @vitest-environment jsdom */
+// Renders inside <ReactFlowProvider> because <Handle> subscribes to React Flow's store
+// and its handle-config context; the provider supplies both. No node-id context is
+// available outside a real flow, which React Flow reports through `onError` — a no-op
+// outside a development build, so nothing is written to the console here.
+
+import { afterEach, describe, expect, it } from "vitest";
+import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { ReactFlowProvider } from "@xyflow/react";
+import type { ReactNode } from "react";
+import { WAD, formatHealthFactor } from "../../../core/format";
+import { HF_WARN_WAD, type HealthFactor } from "../../../core/health-factor";
+import {
+  derived,
+  entered,
+  observationMinter,
+  type Derived,
+  type Provenanced,
+} from "../../../core/provenance";
+import type {
+  AutoWrapBlockData,
+  BlockData,
+  BorrowBlockData,
+  ComputedBlockValue,
+  InputBlockData,
+  LendBlockData,
+  StakeBlockData,
+} from "../../../lib/strategy/types";
+import { AutoWrapBlock } from "./auto-wrap-block";
+import { BlockRuntimeProvider, type BlockRuntime, type RenderableBlockType } from "./base-block";
+import { BorrowBlock } from "./borrow-block";
+import { InputBlock } from "./input-block";
+import { LendBlock } from "./lend-block";
+import { BLOCK_COMPONENTS } from "./index";
+import type { NodePropsFor } from "./node-props";
+import { StakeBlock } from "./stake-block";
+
+afterEach(cleanup);
+
+const minter = observationMinter(25_592_678n, 1_753_240_451);
+const collateralBase = minter.observe(3_500_00000000n, "AaveOracle.getAssetPrice(weETH)");
+const debtBase = minter.observe(1_200_00000000n, "AavePool.getUserAccountData().totalDebtBase");
+
+function healthFactor(hfWad: bigint): Provenanced<HealthFactor> {
+  return derived<HealthFactor>({ status: "healthy", hfWad }, "wadDiv(Σ base·lt, debt) / 1e4", [
+    collateralBase,
+    debtBase,
+  ]);
+}
+
+function wrapped(hf: HealthFactor): Provenanced<HealthFactor> {
+  return derived(hf, "wadDiv(Σ base·lt, debt) / 1e4", [collateralBase, debtBase]);
+}
+
+const RESOLVED_VALUE: ComputedBlockValue = {
+  inputAsset: "ETH",
+  inputAmountWei: entered(10n * WAD),
+  inputValueBase: minter.observe(35_000_00000000n, "derived from AaveOracle.getAssetPrice(WETH)"),
+  outputAsset: "eETH",
+  outputAmountWei: minter.observe((9_997n * WAD) / 1000n, "LiquidityPool.deposit share delta"),
+  outputValueBase: minter.observe(34_990_00000000n, "derived from AaveOracle.getAssetPrice(weETH)"),
+  gasCostBase: minter.observe(3_45000000n, "derived from eth_feeHistory"),
+  // 3.42% expressed as a WAD.
+  apyWad: minter.observe((WAD * 342n) / 10_000n, "AavePool.getReserveData(WETH).liquidityRate"),
+};
+
+function runtime(overrides: Partial<BlockRuntime> = {}): BlockRuntime {
+  return {
+    autoInsertedIds: new Set<string>(),
+    overAllocatedIds: new Set<string>(),
+    outgoingAllocationBps: {},
+    inputAmounts: {},
+    borrowAllocations: {},
+    executingBlockId: null,
+    blockValues: {},
+    minHealthFactor: null,
+    liquidationRatioWad: null,
+    pending: false,
+    pendingEdit: null,
+    docRev: 1,
+    setBlockParam: () => ({ ok: true }),
+    setBorrowAllocationBps: () => ({ ok: true }),
+    beginEdit: () => undefined,
+    endEdit: () => undefined,
+    ...overrides,
+  };
+}
+
+/** The sum a source routes out, wrapped exactly as the store's reader wraps it. */
+function outgoing(bps: number): Derived<number> {
+  return derived(bps, "sum of outgoing edge allocationBps out of stake1", [entered(bps)]);
+}
+
+function nodeProps<T extends BlockData>(
+  id: string,
+  type: RenderableBlockType,
+  data: T,
+  selected = false,
+): NodePropsFor<T> {
+  return {
+    id,
+    type,
+    data,
+    selected,
+    dragging: false,
+    draggable: true,
+    selectable: true,
+    deletable: true,
+    zIndex: 0,
+    isConnectable: true,
+    positionAbsoluteX: 0,
+    positionAbsoluteY: 0,
+  };
+}
+
+function tree(ui: ReactNode, rt: BlockRuntime) {
+  return (
+    <ReactFlowProvider>
+      <BlockRuntimeProvider value={rt}>{ui}</BlockRuntimeProvider>
+    </ReactFlowProvider>
+  );
+}
+
+function mount(ui: ReactNode, rt: BlockRuntime = runtime()) {
+  return render(tree(ui, rt));
+}
+
+const inputData: InputBlockData = {
+  type: "input",
+  label: "Input Capital",
+  isConfigured: true,
+  isValid: true,
+  asset: "ETH",
+  amount: "10",
+};
+
+const stakeData: StakeBlockData = {
+  type: "stake",
+  label: "Stake",
+  isConfigured: true,
+  isValid: true,
+  protocol: "etherfi",
+  inputAsset: "ETH",
+  outputAsset: "eETH",
+};
+
+const lendData: LendBlockData = {
+  type: "lend",
+  label: "Supply",
+  isConfigured: true,
+  isValid: true,
+  protocol: "aave-v3",
+  asset: "weETH",
+};
+
+const borrowData: BorrowBlockData = {
+  type: "borrow",
+  label: "Borrow",
+  isConfigured: true,
+  isValid: true,
+  protocol: "aave-v3",
+  asset: "WETH",
+  allocationBps: 5_000,
+};
+
+const wrapData: AutoWrapBlockData = {
+  type: "auto-wrap",
+  label: "Wrap",
+  isConfigured: true,
+  isValid: true,
+  fromAsset: "eETH",
+  toAsset: "weETH",
+  isWrap: true,
+};
+
+function frameOf(container: HTMLElement): HTMLElement {
+  const frame = container.querySelector<HTMLElement>("[data-block-type]");
+  if (frame === null) throw new Error("no block frame rendered");
+  return frame;
+}
+
+/** The value zones only — the rows SourcedValue owns. The designed-state rules about
+ *  dashes and zeros are rules about VALUES, not about the prose around them. */
+function valueZoneTextOf(container: HTMLElement): string {
+  return [...container.querySelectorAll<HTMLElement>(".space-y-1.border-t")]
+    .map((zone) => zone.textContent ?? "")
+    .join(" ");
+}
+
+/**
+ * A rendered zero standing in for a missing value: a bare "0", "0.0000" or "$0.00". The
+ * digit must not be part of a longer number, so "10" and "1.05" are not matches.
+ */
+const COERCED_ZERO = /(^|\s)\$?0(\.0+)?(\s|$)/;
+
+/** A dash used AS a value, which is what "never a dash" forbids. */
+const DASH_AS_VALUE = /(^|\s)[—–-](\s|$)/;
+
+describe("BaseBlock — frame anatomy", () => {
+  it("gives every block one width, one surface and one radius", () => {
+    const { container } = everyBlock(runtime());
+    const frames = container.querySelectorAll<HTMLElement>("[data-block-type]");
+    expect(frames.length).toBe(5);
+    for (const frame of frames) {
+      expect(frame.className).toContain("w-60");
+      expect(frame.className).toContain("bg-card");
+      expect(frame.className).toContain("rounded-lg");
+      expect(frame.className).toContain("border");
+    }
+  });
+
+  it("carries a 36px header band on the secondary surface", () => {
+    const { container } = mount(<StakeBlock {...nodeProps("stake1", "stake", stakeData)} />);
+    const header = frameOf(container).querySelector<HTMLElement>(".bg-secondary");
+    expect(header).not.toBeNull();
+    expect(header?.className).toContain("h-9");
+    expect(header?.className).toContain("border-b");
+  });
+
+  it("names the block by kind and title, and exposes kind as data only", () => {
+    const { container } = mount(<LendBlock {...nodeProps("supply1", "lend", lendData)} />);
+    const frame = frameOf(container);
+    expect(frame.getAttribute("data-block-type")).toBe("lend");
+    expect(frame.getAttribute("aria-label")).toBe("lend block, Supply");
+  });
+
+  it("holds exactly one live region per block — never one per pending slot", () => {
+    const { container } = mount(<StakeBlock {...nodeProps("stake1", "stake", stakeData)} />, {
+      ...runtime({ pending: true }),
+    });
+    expect(container.querySelectorAll("[aria-live]").length).toBe(1);
+    expect(container.querySelectorAll('[aria-busy="true"]').length).toBeGreaterThan(1);
+  });
+});
+
+describe("BaseBlock — states are token assignments", () => {
+  it("valid is zero chroma", () => {
+    const { container } = mount(<StakeBlock {...nodeProps("stake1", "stake", stakeData)} />);
+    const frame = frameOf(container);
+    expect(frame.getAttribute("data-block-state")).toBe("valid");
+    expect(frame.className).toContain("border-border");
+  });
+
+  it("warning takes the warning border and a warning status dot", () => {
+    const { container } = mount(
+      <LendBlock {...nodeProps("supply1", "lend", { ...lendData, asset: null })} />,
+    );
+    const frame = frameOf(container);
+    expect(frame.getAttribute("data-block-state")).toBe("warning");
+    expect(frame.className).toContain("border-warning");
+    expect(frame.querySelector(".status-dot-warning")).not.toBeNull();
+  });
+
+  it("error beats warning, takes the destructive border, and is described, not just coloured", () => {
+    const { container } = mount(
+      <InputBlock
+        {...nodeProps("in1", "input", {
+          ...inputData,
+          amount: "",
+          isValid: false,
+          errorMessage: "input needs a positive amount",
+        })}
+      />,
+    );
+    const frame = frameOf(container);
+    expect(frame.getAttribute("data-block-state")).toBe("error");
+    expect(frame.className).toContain("border-destructive");
+    expect(frame.className).not.toContain("border-warning");
+
+    const describedBy = frame.getAttribute("aria-describedby");
+    expect(describedBy).not.toBeNull();
+    // Attribute selector, not `#${CSS.escape(id)}`: jsdom installs no `CSS` global, so the
+    // escape call throws a ReferenceError that lib.dom.d.ts happily typechecks.
+    const described =
+      describedBy === null ? null : container.querySelector(`[id="${describedBy}"]`);
+    expect(described?.textContent).toContain("input needs a positive amount");
+    // A lucide glyph, never the ⚠ emoji the prototype shipped.
+    expect(described?.querySelector("svg")).not.toBeNull();
+    expect(container.textContent).not.toContain("⚠");
+  });
+
+  it("never renders an error as colour alone, even with no reason to give", () => {
+    const { container } = mount(
+      <StakeBlock {...nodeProps("stake1", "stake", { ...stakeData, isValid: false })} />,
+    );
+    const frame = frameOf(container);
+    expect(frame.getAttribute("data-block-state")).toBe("error");
+    const describedBy = frame.getAttribute("aria-describedby");
+    expect(describedBy).not.toBeNull();
+    const described =
+      describedBy === null ? null : container.querySelector(`[id="${describedBy}"]`);
+    expect(described?.textContent).toContain("can't run as configured");
+    expect(described?.querySelector("svg")).not.toBeNull();
+  });
+
+  it("executing is the only state that spends --primary, and only on the border", () => {
+    const { container } = mount(<StakeBlock {...nodeProps("stake1", "stake", stakeData)} />, {
+      ...runtime({ executingBlockId: "stake1" }),
+    });
+    const frame = frameOf(container);
+    expect(frame.getAttribute("data-block-state")).toBe("executing");
+    expect(frame.className).toContain("border-primary");
+    expect(container.innerHTML).not.toMatch(/(bg|text)-primary/);
+  });
+
+  it("does not let execution demote a live warning", () => {
+    const { container } = mount(
+      <LendBlock {...nodeProps("supply1", "lend", { ...lendData, asset: null })} />,
+      { ...runtime({ executingBlockId: "supply1" }) },
+    );
+    const frame = frameOf(container);
+    expect(frame.getAttribute("data-block-state")).toBe("warning");
+    expect(frame.className).toContain("border-warning");
+    expect(frame.className).not.toContain("border-primary");
+  });
+
+  it("selection is one ring for every type, in the landed focus-ring grammar", () => {
+    const { container } = mount(
+      <BorrowBlock {...nodeProps("borrow1", "borrow", borrowData, true)} />,
+    );
+    const frame = frameOf(container);
+    // One mechanism: the two-layer box-shadow declared in canvas.css. A second outline
+    // utility on the same element would be a second authority for the same 2px.
+    expect(frame.className).toContain("block-selected");
+    expect(frame.className).not.toMatch(/ring-2|ring-offset|outline-2/);
+  });
+});
+
+describe("BaseBlock — auto-insertion is view state, not document state", () => {
+  it("badges and dashes a block the optimizer inserted", () => {
+    const { container } = mount(<AutoWrapBlock {...nodeProps("wrap1", "auto-wrap", wrapData)} />, {
+      ...runtime({ autoInsertedIds: new Set(["wrap1"]) }),
+    });
+    expect(screen.getByText("AUTO")).not.toBeNull();
+    expect(frameOf(container).className).toContain("border-dashed");
+    expect(container.textContent).toContain("Inserted for protocol compatibility.");
+  });
+
+  it("leaves a share-arrived wrap unbadged even when its data claims otherwise", () => {
+    const { container } = mount(
+      <AutoWrapBlock {...nodeProps("wrap1", "auto-wrap", { ...wrapData, isAutoInserted: true })} />,
+    );
+    expect(screen.queryByText("AUTO")).toBeNull();
+    expect(frameOf(container).className).not.toContain("border-dashed");
+  });
+
+  it("draws no pair for a wrap the document has not configured", () => {
+    const { container } = mount(
+      <AutoWrapBlock {...nodeProps("wrap1", "auto-wrap", { ...wrapData, isConfigured: false })} />,
+    );
+    expect(frameOf(container).getAttribute("data-block-state")).toBe("warning");
+    expect(container.textContent).toContain("Connect a producer");
+    expect(container.textContent).not.toContain("weETH");
+  });
+});
+
+describe("BaseBlock — over-allocation is blamed on the source", () => {
+  it("escalates a valid source to warning and prints the total it routes, provenanced", () => {
+    const { container } = mount(<StakeBlock {...nodeProps("stake1", "stake", stakeData)} />, {
+      ...runtime({
+        overAllocatedIds: new Set(["stake1"]),
+        outgoingAllocationBps: { stake1: outgoing(11_500) },
+      }),
+    });
+    const frame = frameOf(container);
+    expect(frame.getAttribute("data-block-state")).toBe("warning");
+    expect(frame.className).toContain("border-warning");
+    expect(container.textContent).toContain("115% allocated");
+  });
+
+  it("renders the total through the one money renderer, never below text-xs", () => {
+    mount(<StakeBlock {...nodeProps("stake1", "stake", stakeData)} />, {
+      ...runtime({
+        overAllocatedIds: new Set(["stake1"]),
+        outgoingAllocationBps: { stake1: outgoing(11_500) },
+      }),
+    });
+    const badge = screen.getByText("115%");
+    // SourcedValue's trigger: a real button carrying the provenance tooltip.
+    expect(badge.tagName).toBe("BUTTON");
+    expect(badge.className).toContain("text-xs");
+    expect(badge.className).not.toContain("text-micro");
+  });
+
+  it("says nothing about allocation on a source the store did not call over-allocated", () => {
+    const { container } = mount(<StakeBlock {...nodeProps("stake1", "stake", stakeData)} />, {
+      ...runtime({ outgoingAllocationBps: { stake1: outgoing(9_000) } }),
+    });
+    expect(frameOf(container).getAttribute("data-block-state")).toBe("valid");
+    expect(container.textContent).not.toContain("allocated");
+  });
+});
+
+describe("BlockValueBadge — direction is a glyph, never a colour pair", () => {
+  it("marks both directions with an arrow and a text label", () => {
+    const { container } = mount(<StakeBlock {...nodeProps("stake1", "stake", stakeData)} />, {
+      ...runtime({ blockValues: { stake1: RESOLVED_VALUE } }),
+    });
+    const zone = frameOf(container).querySelector<HTMLElement>(".border-t.px-3");
+    expect(zone).not.toBeNull();
+    expect(zone?.querySelectorAll("svg").length).toBeGreaterThanOrEqual(2);
+    expect(screen.getByText("In")).not.toBeNull();
+    expect(screen.getByText("Out")).not.toBeNull();
+  });
+
+  it("gives every quantity a row of its own inside the 240px frame", () => {
+    const { container } = mount(<StakeBlock {...nodeProps("stake1", "stake", stakeData)} />, {
+      ...runtime({ blockValues: { stake1: RESOLVED_VALUE } }),
+    });
+    const zone = frameOf(container).querySelector<HTMLElement>(".space-y-1.border-t");
+    expect(zone).not.toBeNull();
+
+    // In amount · in value · out amount · out value · gas. The base-currency figure is a
+    // restatement of the token amount and does not hold equal width beside it: two 11ch
+    // reservations plus an arrow and an asset chip over-ran the frame's 216px of content,
+    // and nothing in a flex row shrinks once SourcedValue pins its width.
+    const rows = [...(zone?.children ?? [])];
+    expect(rows.length).toBe(5);
+    for (const row of rows) {
+      expect(row.querySelectorAll('[style*="min-width"]').length).toBe(1);
+    }
+  });
+
+  it("spends no chroma on direction — success is reserved for confirmed execution", () => {
+    const { container } = mount(<StakeBlock {...nodeProps("stake1", "stake", stakeData)} />, {
+      ...runtime({ blockValues: { stake1: RESOLVED_VALUE } }),
+    });
+    expect(container.innerHTML).not.toMatch(
+      /text-success|text-destructive|text-(blue|green|amber)-/,
+    );
+  });
+
+  it("renders every digit through core/format.ts", () => {
+    mount(<StakeBlock {...nodeProps("stake1", "stake", stakeData)} />, {
+      ...runtime({ blockValues: { stake1: RESOLVED_VALUE } }),
+    });
+    expect(screen.getByText("10.0000")).not.toBeNull();
+    expect(screen.getByText("$35,000.00")).not.toBeNull();
+    expect(screen.getByText("3.42%")).not.toBeNull();
+  });
+});
+
+describe("BlockValueBadge — the value flash is a claim about the value", () => {
+  function withOutput(amountWei: bigint): ComputedBlockValue {
+    return {
+      ...RESOLVED_VALUE,
+      outputAmountWei: minter.observe(amountWei, "LiquidityPool.deposit share delta"),
+    };
+  }
+
+  it("never fires on a first arrival", () => {
+    const { container } = mount(<StakeBlock {...nodeProps("stake1", "stake", stakeData)} />, {
+      ...runtime({ blockValues: { stake1: withOutput(10n * WAD) } }),
+    });
+    expect(container.innerHTML).not.toContain("value-up");
+    expect(container.innerHTML).not.toContain("value-down");
+  });
+
+  it("fires on a discrete external change of a value already on screen", () => {
+    const node = <StakeBlock {...nodeProps("stake1", "stake", stakeData)} />;
+    const view = mount(node, runtime({ blockValues: { stake1: withOutput(10n * WAD) } }));
+    expect(view.container.innerHTML).not.toContain("value-up");
+
+    view.rerender(tree(node, runtime({ blockValues: { stake1: withOutput(11n * WAD) } })));
+    expect(view.container.innerHTML).toContain("value-up");
+
+    view.rerender(tree(node, runtime({ blockValues: { stake1: withOutput(9n * WAD) } })));
+    expect(view.container.innerHTML).toContain("value-down");
+  });
+
+  it("stays silent while an edit gesture is open — a dragged number did not move itself", () => {
+    const node = <StakeBlock {...nodeProps("stake1", "stake", stakeData)} />;
+    const view = mount(node, runtime({ blockValues: { stake1: withOutput(10n * WAD) } }));
+
+    view.rerender(
+      tree(
+        node,
+        runtime({ blockValues: { stake1: withOutput(11n * WAD) }, pendingEdit: "move block" }),
+      ),
+    );
+    expect(view.container.innerHTML).not.toContain("value-up");
+    expect(view.container.innerHTML).not.toContain("value-down");
+  });
+});
+
+describe("InputBlock — the raw string, never a coerced zero", () => {
+  it("keeps what the user typed and reports the store's refusal", () => {
+    const rt = runtime({
+      setBlockParam: () => ({
+        ok: false,
+        reason: "value for 'amount' is not an accepted input parameter value",
+      }),
+    });
+    const { container } = mount(<InputBlock {...nodeProps("in1", "input", inputData)} />, rt);
+    const field = screen.getByLabelText("Amount");
+    fireEvent.change(field, { target: { value: "10e" } });
+
+    expect((field as HTMLInputElement).value).toBe("10e");
+    expect(container.textContent ?? "").not.toMatch(COERCED_ZERO);
+    expect(frameOf(container).getAttribute("data-block-state")).toBe("error");
+    expect(field.getAttribute("aria-invalid")).toBe("true");
+  });
+
+  it("says what the document still holds whenever the field disagrees with it", () => {
+    const rt = runtime({
+      inputAmounts: { in1: entered("10") },
+      setBlockParam: () => ({ ok: false, reason: "refused" }),
+    });
+    const { container } = mount(<InputBlock {...nodeProps("in1", "input", inputData)} />, rt);
+    fireEvent.change(screen.getByLabelText("Amount"), { target: { value: "10e" } });
+    expect(container.textContent).toContain("The strategy still starts with");
+    expect(screen.getByText("10")).not.toBeNull();
+  });
+
+  it("treats an empty field as unconfigured, not as zero", () => {
+    const { container } = mount(
+      <InputBlock {...nodeProps("in1", "input", { ...inputData, amount: "" })} />,
+    );
+    expect(frameOf(container).getAttribute("data-block-state")).toBe("warning");
+    expect(container.textContent).toContain("Enter the amount of ETH");
+  });
+
+  it("returns a CLEARED field to unconfigured rather than reporting a parser error", () => {
+    // The store refuses "" — DECIMAL_AMOUNT admits no empty string — and it is right to.
+    // An emptied field is still not an error: it is the unconfigured state, arrived at.
+    const rt = runtime({
+      setBlockParam: () => ({
+        ok: false,
+        reason: "value for 'amount' is not an accepted input parameter value",
+      }),
+    });
+    const { container } = mount(<InputBlock {...nodeProps("in1", "input", inputData)} />, rt);
+    fireEvent.change(screen.getByLabelText("Amount"), { target: { value: "" } });
+
+    expect(frameOf(container).getAttribute("data-block-state")).toBe("warning");
+    expect(container.textContent).toContain("Enter the amount of ETH");
+    expect(container.textContent).not.toContain("not an accepted");
+  });
+
+  it("does not flash the error frame at an unfinished decimal", () => {
+    const rt = runtime({
+      setBlockParam: (_id, _key, value) =>
+        typeof value === "string" && /^\d+(\.\d+)?$/.test(value)
+          ? { ok: true }
+          : { ok: false, reason: "value for 'amount' is not an accepted input parameter value" },
+    });
+    const { container } = mount(<InputBlock {...nodeProps("in1", "input", inputData)} />, rt);
+    const field = screen.getByLabelText("Amount");
+
+    fireEvent.change(field, { target: { value: "1." } });
+    expect(frameOf(container).getAttribute("data-block-state")).not.toBe("error");
+    expect(container.textContent).not.toContain("not an accepted");
+
+    fireEvent.change(field, { target: { value: "1.5" } });
+    expect(frameOf(container).getAttribute("data-block-state")).toBe("valid");
+  });
+
+  it("retires a refusal when the document moves underneath it", () => {
+    const node = <InputBlock {...nodeProps("in1", "input", inputData)} />;
+    const refusing = runtime({
+      docRev: 4,
+      setBlockParam: () => ({ ok: false, reason: "refused by the store" }),
+    });
+    const view = mount(node, refusing);
+    fireEvent.change(screen.getByLabelText("Amount"), { target: { value: "10e" } });
+    expect(view.container.textContent).toContain("refused by the store");
+
+    // An undo restores the SAME amount: the value did not change, but the document did,
+    // and a refusal about a superseded edit must not outlive it.
+    view.rerender(tree(node, runtime({ docRev: 5 })));
+    expect(view.container.textContent).not.toContain("refused by the store");
+    expect((screen.getByLabelText("Amount") as HTMLInputElement).value).toBe("10");
+  });
+
+  it("offers no asset selector — core admits exactly one input asset", () => {
+    const { container } = mount(<InputBlock {...nodeProps("in1", "input", inputData)} />);
+    expect(container.querySelector("select")).toBeNull();
+  });
+});
+
+describe("StakeBlock — a refused write is reported, never swallowed", () => {
+  it("surfaces the store's reason when the protocol write is refused", () => {
+    const rt = runtime({
+      setBlockParam: () => ({ ok: false, reason: "'protocol' is not a parameter of a stake block" }),
+    });
+    const { container } = mount(<StakeBlock {...nodeProps("stake1", "stake", stakeData)} />, rt);
+    fireEvent.change(screen.getByLabelText("Protocol"), { target: { value: "lido" } });
+
+    expect(frameOf(container).getAttribute("data-block-state")).toBe("error");
+    expect(container.textContent).toContain("is not a parameter of a stake block");
+  });
+
+  it("opens on an explicit unset option when the document holds no protocol", () => {
+    const { container } = mount(
+      <StakeBlock {...nodeProps("stake1", "stake", { ...stakeData, isConfigured: false })} />,
+    );
+    const select = screen.getByLabelText("Protocol") as HTMLSelectElement;
+    expect(select.value).toBe("");
+    expect(container.textContent).toContain("Choose a protocol");
+    expect(frameOf(container).getAttribute("data-block-state")).toBe("warning");
+  });
+});
+
+describe("LendBlock — reserve risk parameters are reads, not constants", () => {
+  it("prints no LTV and no liquidation threshold", () => {
+    const { container } = mount(<LendBlock {...nodeProps("supply1", "lend", lendData)} />, {
+      ...runtime({ blockValues: { supply1: RESOLVED_VALUE } }),
+    });
+    expect(container.textContent).not.toContain("LTV");
+    expect(container.textContent).not.toContain("82.5");
+    expect(container.textContent).not.toContain("Liq. Threshold");
+  });
+
+  it("labels the Aave rate current-rate run-rate, verbatim", () => {
+    const { container } = mount(<LendBlock {...nodeProps("supply1", "lend", lendData)} />, {
+      ...runtime({ blockValues: { supply1: RESOLVED_VALUE } }),
+    });
+    expect(container.textContent).toContain("current-rate run-rate");
+  });
+
+  it("says unconnected rather than assuming ETH", () => {
+    const { container } = mount(
+      <LendBlock {...nodeProps("supply1", "lend", { ...lendData, asset: null })} />,
+    );
+    expect(container.textContent).toContain("Connect a producer");
+    expect(container.textContent).not.toContain("ETH");
+  });
+});
+
+describe("BorrowBlock — risk thresholds come from core/health-factor.ts", () => {
+  const liquidationRatio = minter.observe(
+    (WAD * 9123n) / 10_000n,
+    "derived from AaveOracle.getAssetPrice(weETH)/getAssetPrice(WETH)",
+  );
+
+  function borrowRuntime(overrides: Partial<BlockRuntime> = {}): BlockRuntime {
+    return runtime({ borrowAllocations: { borrow1: entered(5_000) }, ...overrides });
+  }
+
+  it("leads with the liquidation sentence, not with digits", () => {
+    const { container } = mount(
+      <BorrowBlock {...nodeProps("borrow1", "borrow", borrowData)} />,
+      borrowRuntime({
+        blockValues: { borrow1: { ...RESOLVED_VALUE, inputAsset: "weETH" } },
+        liquidationRatioWad: liquidationRatio,
+        minHealthFactor: healthFactor(2n * WAD),
+      }),
+    );
+    expect(container.textContent).toContain("Liquidates if weETH/WETH falls to");
+    expect(screen.getByText("0.9123")).not.toBeNull();
+  });
+
+  it("carries the sentence into the slider's announced value, word for word", () => {
+    mount(
+      <BorrowBlock {...nodeProps("borrow1", "borrow", borrowData)} />,
+      borrowRuntime({
+        blockValues: { borrow1: { ...RESOLVED_VALUE, inputAsset: "weETH" } },
+        liquidationRatioWad: liquidationRatio,
+        minHealthFactor: healthFactor(2n * WAD),
+      }),
+    );
+    const slider = screen.getByRole("slider");
+    expect(slider.getAttribute("aria-valuetext")).toBe(
+      "50% of collateral value borrowed. Liquidates if weETH/WETH falls to 0.9123.",
+    );
+    expect(slider.getAttribute("max")).toBe("10000");
+  });
+
+  it("renders the borrowed fraction through the store's provenanced reader", () => {
+    mount(
+      <BorrowBlock {...nodeProps("borrow1", "borrow", borrowData)} />,
+      borrowRuntime({ minHealthFactor: healthFactor(2n * WAD) }),
+    );
+    const readout = screen.getByText("50%");
+    expect(readout.tagName).toBe("BUTTON");
+  });
+
+  it("says the fraction is unset rather than printing a zero for it", () => {
+    const { container } = mount(
+      <BorrowBlock
+        {...nodeProps("borrow1", "borrow", { ...borrowData, isConfigured: false })}
+      />,
+      runtime(),
+    );
+    expect(container.textContent).toContain("not set");
+    expect(container.textContent ?? "").not.toMatch(COERCED_ZERO);
+    expect(frameOf(container).getAttribute("data-block-state")).toBe("warning");
+  });
+
+  it("reports a refused allocation instead of snapping the slider back in silence", () => {
+    const { container } = mount(
+      <BorrowBlock {...nodeProps("borrow1", "borrow", borrowData)} />,
+      borrowRuntime({
+        setBorrowAllocationBps: () => ({
+          ok: false,
+          reason: "allocation must be a whole basis-point value in [1, 10000]",
+        }),
+      }),
+    );
+    fireEvent.change(screen.getByRole("slider"), { target: { value: "6000" } });
+    expect(frameOf(container).getAttribute("data-block-state")).toBe("error");
+    expect(container.textContent).toContain("whole basis-point value");
+  });
+
+  it("warns exactly where riskState does — below HF_WARN_WAD, not at it", () => {
+    const atThreshold = mount(
+      <BorrowBlock {...nodeProps("borrow1", "borrow", borrowData)} />,
+      borrowRuntime({ minHealthFactor: healthFactor(HF_WARN_WAD) }),
+    );
+    expect(frameOf(atThreshold.container).getAttribute("data-block-state")).toBe("valid");
+    cleanup();
+
+    const belowThreshold = mount(
+      <BorrowBlock {...nodeProps("borrow1", "borrow", borrowData)} />,
+      borrowRuntime({ minHealthFactor: healthFactor(HF_WARN_WAD - 1n) }),
+    );
+    const frame = frameOf(belowThreshold.container);
+    expect(frame.getAttribute("data-block-state")).toBe("warning");
+    // The copy quotes core's constant through core's formatter — no literal is authored.
+    expect(belowThreshold.container.textContent).toContain(
+      `below the ${formatHealthFactor(HF_WARN_WAD)} warning threshold`,
+    );
+  });
+
+  it("is not green when it is safe — baseline safety reads as foreground", () => {
+    const { container } = mount(
+      <BorrowBlock {...nodeProps("borrow1", "borrow", borrowData)} />,
+      borrowRuntime({ minHealthFactor: healthFactor(2n * WAD) }),
+    );
+    const hf = screen.getByText("2.00");
+    expect(hf.className).toContain("text-foreground");
+    expect(container.innerHTML).not.toContain("text-success");
+  });
+
+  it("says a missing health factor is missing, never safe and never a dash", () => {
+    const { container } = mount(
+      <BorrowBlock {...nodeProps("borrow1", "borrow", borrowData)} />,
+      borrowRuntime({
+        minHealthFactor: wrapped({
+          status: "unknown",
+          reason: "missing collateral or debt snapshot",
+        }),
+      }),
+    );
+    expect(container.textContent).toContain(
+      "Health factor unavailable: missing collateral or debt snapshot",
+    );
+    expect(container.textContent ?? "").not.toMatch(DASH_AS_VALUE);
+    expect(container.textContent).not.toContain("Safe");
+  });
+
+  it("refuses to print 'unavailable' at the weight of a health factor", () => {
+    // The loudest slot on the block, so the falsest place to promote a refusal: the ramp
+    // is handed to SourcedValue only where a figure renders, because the unavailable
+    // branch merges the caller's className over its own and wins.
+    mount(
+      <BorrowBlock {...nodeProps("borrow1", "borrow", borrowData)} />,
+      borrowRuntime({ minHealthFactor: null, pending: false }),
+    );
+    const prose = screen.getByText("health factor unavailable");
+    expect(prose.className).toContain("text-xs");
+    expect(prose.className).toContain("text-muted-foreground");
+    expect(prose.className).not.toContain("font-semibold");
+    expect(prose.className).not.toContain("text-sm");
+  });
+
+  it("holds the health factor's box while it is in flight, at its own size", () => {
+    const { container } = mount(
+      <BorrowBlock {...nodeProps("borrow1", "borrow", borrowData)} />,
+      borrowRuntime({ minHealthFactor: null, pending: true }),
+    );
+    const slot = container.querySelector<HTMLElement>(
+      '[aria-label="Minimum health factor during execution: loading"]',
+    );
+    expect(slot).not.toBeNull();
+    expect(slot?.className).toContain("text-sm");
+    expect(slot?.className).not.toContain("font-semibold");
+  });
+
+  it("says a debt-free position has no liquidation risk, never ∞", () => {
+    const { container } = mount(
+      <BorrowBlock {...nodeProps("borrow1", "borrow", borrowData)} />,
+      borrowRuntime({ minHealthFactor: wrapped({ status: "no-debt" }) }),
+    );
+    expect(container.textContent).toContain("no liquidation risk");
+    expect(container.textContent).not.toContain("∞");
+  });
+
+  it("carries none of the prototype's hardcoded prices or thresholds", () => {
+    const { container } = mount(
+      <BorrowBlock {...nodeProps("borrow1", "borrow", borrowData)} />,
+      borrowRuntime({
+        minHealthFactor: healthFactor(2n * WAD),
+        liquidationRatioWad: liquidationRatio,
+      }),
+    );
+    expect(container.textContent).not.toContain("3300");
+    expect(container.textContent).not.toContain("2700");
+    expect(container.textContent).not.toContain("82.5");
+  });
+
+  it("authors the unavailable liquidation copy exactly once", () => {
+    const { container } = mount(
+      <BorrowBlock {...nodeProps("borrow1", "borrow", borrowData)} />,
+      borrowRuntime(),
+    );
+    const text = container.textContent ?? "";
+    const sentence = "Liquidation level unavailable.";
+    expect(text.split(sentence).length - 1).toBe(1);
+  });
+});
+
+/** Every block, mounted once, so a contract can be asserted family-wide. */
+function everyBlock(rt: BlockRuntime) {
+  return mount(
+    <>
+      <InputBlock {...nodeProps("in1", "input", inputData)} />
+      <StakeBlock {...nodeProps("stake1", "stake", stakeData)} />
+      <LendBlock {...nodeProps("supply1", "lend", lendData)} />
+      <BorrowBlock {...nodeProps("borrow1", "borrow", borrowData)} />
+      <AutoWrapBlock {...nodeProps("wrap1", "auto-wrap", wrapData)} />
+    </>,
+    rt,
+  );
+}
+
+describe("the network-dead probe — every value slot lands in a designed state", () => {
+  it("settles into explicit unavailable prose, with no zero, dash or ellipsis anywhere", () => {
+    const { container } = everyBlock(runtime({ pending: false }));
+
+    expect(container.querySelectorAll('[aria-busy="true"]').length).toBe(0);
+    expect(container.querySelectorAll(".skeleton-value").length).toBe(0);
+
+    const text = container.textContent ?? "";
+    expect(text).toContain("amount unavailable");
+    expect(text).toContain("value unavailable");
+    expect(text).toContain("gas unavailable");
+    expect(text).toContain("rate unavailable");
+    expect(text).toContain("health factor unavailable");
+    expect(text).toContain("Liquidation level unavailable");
+
+    // The dash and zero rules are rules about VALUES. Scoping them to the value zones is
+    // what lets the family write prose — an unavailable sentence that has to avoid a
+    // punctuation mark is a test dictating copy rather than checking a contract.
+    const values = valueZoneTextOf(container);
+    expect(values).not.toMatch(DASH_AS_VALUE);
+    expect(values).not.toMatch(COERCED_ZERO);
+    expect(values).not.toContain("NaN");
+
+    expect(text).not.toContain("...");
+    expect(text).not.toContain("…");
+    expect(text).not.toContain("NaN");
+    expect(text).not.toContain("∞");
+    expect(text).not.toContain("$0");
+  });
+
+  it("shows a sized busy slot while in flight, and no placeholder digit", () => {
+    const { container } = everyBlock(runtime({ pending: true }));
+
+    const slots = container.querySelectorAll<HTMLElement>('[aria-busy="true"]');
+    expect(slots.length).toBeGreaterThan(0);
+    for (const slot of slots) {
+      expect(slot.textContent).toBe("");
+      expect(slot.getAttribute("style")).toContain("ch");
+      expect(slot.getAttribute("role")).toBeNull();
+    }
+    expect(container.textContent).not.toContain("unavailable");
+  });
+});
+
+describe("the family's token contract", () => {
+  it("uses no shadow, no ring utility, no bg-accent, no brand token and no raw hex", () => {
+    const { container } = everyBlock(runtime({ blockValues: { stake1: RESOLVED_VALUE } }));
+    const markup = container.innerHTML;
+    expect(markup).not.toMatch(/shadow-(sm|md|lg|xl|2xl|none)\b/);
+    expect(markup).not.toMatch(/\bring-2\b|ring-offset/);
+    expect(markup).not.toContain("bg-accent");
+    expect(markup).not.toContain("--brand-");
+    expect(markup).not.toMatch(/class="[^"]*#[0-9a-fA-F]{3,8}/);
+  });
+
+  it("animates nothing but colour and opacity — no entrance, no pulse, no scale", () => {
+    const { container } = everyBlock(runtime({ blockValues: { stake1: RESOLVED_VALUE } }));
+    const markup = container.innerHTML;
+    // A first resolution is not an event: the flash class is absent until a value that was
+    // already on screen moves on its own.
+    expect(markup).not.toContain("value-up");
+    expect(markup).not.toContain("value-down");
+    expect(markup).not.toMatch(/animate-(pulse|bounce|ping|spin)/);
+    expect(markup).not.toMatch(/\bscale-\d/);
+    expect(markup).toContain("transition-fast");
+  });
+
+  it("keeps every in-block control out of the drag path and on the one focus ring", () => {
+    const { container } = mount(
+      <BorrowBlock {...nodeProps("borrow1", "borrow", borrowData)} />,
+      runtime({ minHealthFactor: healthFactor(2n * WAD) }),
+    );
+    const slider = screen.getByRole("slider");
+    expect(slider.className).toContain("nodrag");
+    expect(slider.className).toContain("focus-ring");
+    expect(container.querySelector('[class*="user-select"]')).toBeNull();
+  });
+});
+
+describe("BLOCK_COMPONENTS", () => {
+  it("registers exactly the block types a valid graph can contain", () => {
+    expect(Object.keys(BLOCK_COMPONENTS).sort()).toEqual(
+      ["auto-wrap", "borrow", "input", "lend", "stake"].sort(),
+    );
+    expect(Object.keys(BLOCK_COMPONENTS)).not.toContain("swap");
+  });
+});

@@ -97,6 +97,16 @@ const eslintConfig = [
     },
   },
   {
+    // W05 canvas batch (treatment §5 trap 3): the component family is the first
+    // consumer path where a `?? 0` on a rate, price or allocation is invisible to
+    // review — the same defect there as in core/. forgedObservedBan is restated
+    // because this block replaces the catch-all's rule entry for these files.
+    files: ["src/components/**/*.{ts,tsx}"],
+    rules: {
+      "no-restricted-syntax": ["error", forgedObservedBan, ...numericFallbackBan],
+    },
+  },
+  {
     // W05 R10. The shared fixtures mint every Observed through observationMinter over
     // the committed reads log; a hand-written observed literal here would forge
     // provenance into every suite that imports them — including the ones asserting

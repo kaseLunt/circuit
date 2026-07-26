@@ -118,3 +118,28 @@ export function formatBlockTime(unixSeconds: number): string {
   const iso = new Date(unixSeconds * 1000).toISOString();
   return `${iso.slice(0, 10)} ${iso.slice(11, 19)} UTC`;
 }
+
+/** Integer bps rendered as a percent — bps ARE a 1e2-scaled percent. Sign preserved. */
+export function formatBpsAsPercent(bps: number, displayDecimals = 0): string {
+  return `${formatUnits(BigInt(bps), 2, displayDecimals, "nearest")}%`;
+}
+
+/** WAD-scaled rate/share rendered as a percent: 1e18 = 100%, so percent lives at 1e16. */
+export function formatWadAsPercent(wad: bigint, displayDecimals = 2): string {
+  return `${formatUnits(wad, 16, displayDecimals, "nearest")}%`;
+}
+
+/** WAD-scaled ratio to 4 dp, e.g. the oracle collateral/debt ratio at liquidation. */
+export function formatWadRatio(wad: bigint): string {
+  return formatUnits(wad, 18, 4, "nearest");
+}
+
+/** WAD-scaled multiple, e.g. leverage: 2.5e18 → "2.50×". */
+export function formatWadAsMultiple(wad: bigint): string {
+  return `${formatUnits(wad, 18, 2, "nearest")}×`;
+}
+
+/** An 18-decimal ETH amount with its unit, e.g. equity: "1.0998 ETH". */
+export function formatEth(wei: bigint): string {
+  return `${formatToken(wei, 4)} ETH`;
+}

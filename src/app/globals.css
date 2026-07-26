@@ -61,6 +61,11 @@
     --input: 220 12% 12%;
     --ring: 173 80% 45%;
 
+    /* Native controls (the block family's <select>s, scrollbars, focus rings the UA
+       draws) read this and nothing else; without it a dark canvas renders a white
+       dropdown. Declared with the palette so it can never lag a theme change. */
+    color-scheme: dark;
+
     --success: 152 76% 45%;
     --warning: 42 95% 55%;
 
@@ -69,12 +74,19 @@
        shadow scale is black at 10% and draws nothing over a 5% background, so
        --shadow-overlay is the one sanctioned shadow and belongs to floating chrome
        only (tooltip/popover, the P3 dialog, the selection action bar).
-       These five are declared on .dark alone: v1 is dark-only, and a light theme
-       would need its own elevation values rather than an inherited one. */
+       These are declared on .dark alone: v1 is dark-only, and a light theme
+       would need its own elevation values rather than an inherited one.
+
+       FLOATING CHROME IS EXACTLY: bg-popover + border-border + shadow-overlay.
+       --card-elevated sits at 10% L, BELOW --card-hover at 12%, because it is a
+       PRESS value and nothing else — a pressed control settles under its hover
+       state. It is never an elevation for a surface that floats. */
     --card-elevated: 220 14% 10%;
     --card-hover: 220 14% 12%;
+    /* Only --shadow-color lives here. The shadow itself is declared once, in
+       @theme inline below, which is the reachable one — a second declaration here
+       shadowed it and gave the family two definitions of its one shadow. */
     --shadow-color: 220 15% 2%;
-    --shadow-overlay: 0 8px 24px hsl(var(--shadow-color) / 0.55);
   }
 }
 
@@ -158,14 +170,20 @@
 }
 
 @layer utilities {
+  /* Colour and band are separate properties on purpose. The `background` shorthand
+     reset the surface too, so it clobbered whatever bg-* utility a consumer passed
+     (Skeleton's bg-muted) and painted the band's stops as the surface — which is
+     what inverted it. The band is a transparent-to-ink-to-transparent sweep OVER
+     the surface, so reduced motion can drop the image and leave the colour. */
   .shimmer,
   .skeleton-value {
-    background: linear-gradient(
+    background-color: hsl(var(--muted));
+    background-image: linear-gradient(
       100deg,
-      hsl(var(--muted)) 0%,
+      transparent 0%,
       hsl(var(--muted-foreground) / 0.08) 40%,
       hsl(var(--muted-foreground) / 0.08) 60%,
-      hsl(var(--muted)) 100%
+      transparent 100%
     );
     background-size: 300% 100%;
     animation: shimmer var(--motion-shimmer) infinite;
@@ -188,11 +206,6 @@
     min-height: 1lh;
     vertical-align: middle;
     border-radius: var(--radius-sm);
-  }
-
-  .tabular-nums {
-    font-variant-numeric: tabular-nums;
-    font-feature-settings: "tnum" on;
   }
 
   .transition-fast {
@@ -246,6 +259,22 @@
     outline-offset: 2px;
   }
 
+  /* The EXACT keyboard-only mirror of .focus-ring, drawn around the element the user
+     PERCEIVES as the control when the real control is a descendant — a card whose border,
+     surface and hover live on a wrapper while the button inside covers only part of it.
+     `:has(:focus-visible)` rather than `:focus-within` is what makes it a mirror:
+     `:focus-within` also fires on a pointer click, which would ring a card the user just
+     clicked. The inner control keeps `outline: none` so one gesture never paints two
+     rings. */
+  .focus-ring-within {
+    outline: none;
+  }
+
+  .focus-ring-within:has(:focus-visible) {
+    outline: 2px solid hsl(var(--ring));
+    outline-offset: 2px;
+  }
+
   .status-dot {
     width: 8px;
     height: 8px;
@@ -269,7 +298,7 @@
   .shimmer,
   .skeleton-value {
     animation: none;
-    background: hsl(var(--muted));
+    background-image: none;
   }
 
   .value-up,

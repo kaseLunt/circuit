@@ -1,0 +1,80 @@
+"use client";
+
+/**
+ * Composer layout shell.
+ *
+ * Structural only: three columns and the three sidebar actions forwarded to store
+ * actions. It renders no quantity and imports no React Flow — the canvas arrives as a
+ * node, so this file stays testable in jsdom and the canvas keeps ownership of its own
+ * viewport.
+ *
+ * The store's React binding is `app/store/composer-provider.tsx` and nothing else. Two
+ * bindings over one store would each carry their own subscription bookkeeping and drift
+ * apart under maintenance; the canvas family already consumes that one, so this shell
+ * takes the api from it rather than minting a second context.
+ */
+import type { ReactNode } from "react";
+import type { BlockType } from "../../core/graph";
+import { useComposerStoreApi } from "../../app/store/composer-provider";
+import type { BlockPosition } from "../../app/store/composer-store";
+import type { SimulationResult } from "../../lib/strategy/types";
+import { Sidebar } from "./sidebar";
+import { SimulationPanel } from "./simulation-panel";
+
+export interface ComposerShellProps {
+  /** The canvas surface. A node, so this shell never imports React Flow. */
+  canvas: ReactNode;
+  /** The panel's input. The shell computes nothing and never defaults it. */
+  simulation: SimulationResult | null;
+  simulationPending: boolean;
+  /**
+   * Canvas-space coordinate for a keyboard-placed block, resolved at the moment of the
+   * keystroke because only the canvas knows the live viewport. The shell never invents
+   * a position.
+   */
+  resolveDropPosition: () => BlockPosition;
+}
+
+export function ComposerShell({
+  canvas,
+  simulation,
+  simulationPending,
+  resolveDropPosition,
+}: ComposerShellProps) {
+  const api = useComposerStoreApi();
+
+  function handleAddBlock(type: BlockType): void {
+    api.getState().addBlock(type, resolveDropPosition());
+  }
+
+  function handleLoadTemplate(templateId: string): boolean {
+    return api.getState().loadTemplate(templateId);
+  }
+
+  /**
+   * `clear` returns void and no-ops on an already-empty document rather than pushing an
+   * undo entry for nothing. The sidebar announces what happened, not what was asked for,
+   * so the verdict is read from the document here — the store keeps its landed shape.
+   */
+  function handleClear(): boolean {
+    const { doc, clear } = api.getState();
+    if (doc.blocks.length === 0 && doc.edges.length === 0) return false;
+    clear();
+    return true;
+  }
+
+  return (
+    <div className="flex h-full w-full overflow-hidden bg-background">
+      <Sidebar
+        onAddBlock={handleAddBlock}
+        onLoadTemplate={handleLoadTemplate}
+        onClear={handleClear}
+      />
+      {/* Unlabelled on purpose: the canvas wrapper carries role=application and the
+          "Strategy canvas" label, and a second landmark with the same name would be
+          announced twice. */}
+      <div className="relative min-w-0 flex-1">{canvas}</div>
+      <SimulationPanel result={simulation} pending={simulationPending} />
+    </div>
+  );
+}
