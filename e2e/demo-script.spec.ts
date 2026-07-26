@@ -765,6 +765,17 @@ test.describe("ratified deviation 2 — what a cold share arrival actually paint
         description: String(probe?.fcpToDocumentMs ?? "unmeasured"),
       },
     );
+    // Durable in CI like the geometry evidence: in-memory annotations vanish on a
+    // green run, so the measured beat is also a workflow notice (Codex phase
+    // finding 3 — an evidence value nobody can retrieve is not evidence).
+    const fcpPayload = JSON.stringify({
+      documentsPainted: probe?.seen ?? [],
+      fcpToDocumentMs: probe?.fcpToDocumentMs ?? "unmeasured",
+    })
+      .replace(/%/g, "%25")
+      .replace(/\r/g, "%0D")
+      .replace(/\n/g, "%0A");
+    console.log(`::notice title=arrival-fcp-to-document::${fcpPayload}`);
 
     // THE assertion: exactly one document was ever on screen, and it is the one that was sent.
     expect(probe?.seen).toEqual([String(TARGET_BORROW_BPS)]);

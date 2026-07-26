@@ -258,7 +258,11 @@ function FlowEdgeComponent({
             <Button
               variant="ghost"
               size="sm"
-              className="mt-3 w-full justify-start text-muted-foreground hover:text-destructive"
+              // Neutral on hover, not destructive: disconnecting is UNDOABLE, and the
+              // button API reserves destructive chroma for irreversible commits — and
+              // 12px text-destructive over the hover surface fails the 4.5:1 AA floor
+              // (Codex phase finding 2). The Unlink glyph carries the semantics.
+              className="mt-3 w-full justify-start text-muted-foreground hover:text-foreground"
               onClick={() => {
                 api.getState().disconnect(id);
                 setOpen(false);

@@ -59,10 +59,14 @@ const eslintConfig = [
   //   numeric ban (SPEC §5/§7, W03): no `?? <numeric literal>` in core/ — a missing
   //   source surfaces an explicit unavailable state, never a defaulted number.
   {
+    // W05 phase exit (Codex 019fa026 finding 1): the numeric ban is src/-wide.
+    // It began scoped to core/ plus named money-adjacent files, which left
+    // src/app, src/lib/recorded-reads and src/server unguarded — clean in fact,
+    // but "lint enforces throughout src/" was false until this block made it true.
     files: ["src/**/*.{ts,tsx}"],
     ignores: ["src/core/**"],
     rules: {
-      "no-restricted-syntax": ["error", forgedObservedBan],
+      "no-restricted-syntax": ["error", forgedObservedBan, ...numericFallbackBan],
     },
   },
   {
