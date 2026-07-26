@@ -17,6 +17,12 @@ coverage/
 .env.*
 !.env.example
 
+# playwright (§3 demo-script evidence; artefacts are per-run, the suite is the record)
+/test-results/
+/playwright-report/
+/blob-report/
+/playwright/.cache/
+
 # misc
 .DS_Store
 npm-debug.log*

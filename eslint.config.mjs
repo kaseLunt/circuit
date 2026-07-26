@@ -39,7 +39,7 @@ const eslintConfig = [
     // (tests/fork/harness.ts `record`, scripts/protocol-reads.mjs `out`/`fail`). Linting
     // scripts/** and tests/** at all is the point — ignoring them reported "lint clean"
     // over exactly the paths that produce W03's evidence.
-    files: ["src/**/*.{ts,tsx}", "tests/**/*.ts", "scripts/**/*.mjs"],
+    files: ["src/**/*.{ts,tsx}", "tests/**/*.ts", "e2e/**/*.ts", "scripts/**/*.mjs"],
     rules: {
       "no-console": "error",
     },
@@ -88,6 +88,7 @@ const eslintConfig = [
     // merging them, so the forge ban is restated rather than inherited.
     files: [
       "src/lib/share/encode.ts",
+      "src/lib/share/share-url.ts",
       "src/lib/strategy/templates.ts",
       "src/lib/strategy/layout.ts",
       "src/app/store/composer-store.ts",
