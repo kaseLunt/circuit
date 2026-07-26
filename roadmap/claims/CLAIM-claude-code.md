@@ -3,7 +3,7 @@ claim_id: dee66aba-85d8-4f50-824c-07d0bfc46c87
 generation: 9
 agent: claude-code
 task: W06
-status: active
+status: released
 integrator: true
 branch: w05
 worktree_id: fcc099da-1d6b-593f-bfcb-bd6915fc89c2
@@ -17,7 +17,7 @@ allowed_paths:
 scope_hash: sha256:ac42b98f13dc740c5ccb7a9b7d38636b95920e7cb625b6efe81697e742bb1cf5
 issued_at: 2026-07-26T22:47:16Z
 lease_expires: 2026-07-27T06:47:16Z
-updated_at: 2026-07-26T22:47:16Z
+updated_at: 2026-07-26T23:04:51Z
 ---
 
 # Claim: claude-code -> W06

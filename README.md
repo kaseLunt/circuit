@@ -108,13 +108,13 @@ the prediction and the execution are the same sequence:
 - It reproduces the WETH post-action borrow rate exactly, with `toBe`, by re-running the
   interest-rate strategy at the borrow transaction's own block timestamp. Nothing between
   the pinned block and that transaction touches the WETH reserve, so re-running the model
-  reproduces the protocol's arithmetic to the ray.
+  reproduces the protocol's arithmetic to the ray (Aave's 27-decimal fixed-point unit).
 
 The suite also pins the wrong model, which proves the assertions are able to fail:
 
 - It asserts the stale stored-index debt model (the defect the reviewer caught) understates
-  the borrow rate by at least 143,098,107,621,621,733 ray, and lands strictly below the rate
-  the protocol wrote.
+  the borrow rate by at least 143,098,107,621,621,733 ray, about 7 parts per billion of the
+  rate itself, and lands strictly below the rate the protocol wrote.
 - It asserts that the previous 1e-6 relative bound accepts that wrong model; the error sits
   roughly 149x inside it. That is why the borrow leg was tightened to exact equality, and
   why loosening the bound back would fail a test.

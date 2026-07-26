@@ -3,7 +3,7 @@ id: W06
 type: work
 title: P2→P3 boundary — public narrative, phase transition, P3 charter
 phase: P2
-status: active
+status: achieved
 evidence_target: readme-license-landed-and-p3-charter-ratified
 priority: 0
 depends_on: [W05]
@@ -18,12 +18,14 @@ allowed_paths:
 deliverables:
   - README.md
   - LICENSE
-evidence_receipts: []
+evidence_receipts:
+  - roadmap/evidence/E-W06-p2-p3-boundary.md
 invalidated_by:
   - SPEC.md
   - roadmap/decisions/**
 review_when: phase:P3:entry
 updated: 2026-07-26
+evidence_fingerprint: sha256:77586685fb11512699913b10f80bff6b92e5b5a7160b67273c845e9807d94fb2
 ---
 
 # W06 — P2→P3 boundary
