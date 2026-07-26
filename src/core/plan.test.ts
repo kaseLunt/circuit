@@ -1,285 +1,27 @@
 import { describe, expect, it } from "vitest";
-import { decodeFunctionData, toFunctionSelector, type Address } from "viem";
-import type { Block, StrategyGraph } from "./graph";
+import { decodeFunctionData, toFunctionSelector } from "viem";
+import type { StrategyGraph } from "./graph";
 import { observedBlocks, provenanceTrail } from "./provenance";
 import {
   buildPlan,
   encodeStep,
-  type AmountAttribution,
-  type ChainSnapshot,
   type PlanError,
   type PlanResult,
   type TransactionStep,
 } from "./plan";
 import {
   PINNED_BLOCK,
-  PINNED_TS,
-  addressOf,
-  anchorAddr,
-  addrRead,
-  bigRead,
-  readResult,
-  readsMeta,
-  tupleBig,
-  tupleBool,
-  tupleRead,
 } from "../../tests/helpers/protocol-reads";
-import { observationMinter } from "./provenance";
-
-// ————————————————————————— fixture graphs —————————————————————————
-
-function linearEdges(chain: readonly string[]): StrategyGraph["edges"] {
-  return chain.slice(0, -1).map((source, i) => ({
-    id: `e${i}`,
-    source,
-    target: chain[i + 1]!,
-    allocationBps: 10_000,
-  }));
-}
-
-/** SPEC §2 Leveraged Restake Loop — the canonical 13-step fixture graph. */
-function flagshipGraph(amount: string | number = "10", allocationBps = 7000): StrategyGraph {
-  const blocks: Block[] = [
-    { id: "in", type: "input", params: { asset: "ETH", amount } },
-    { id: "stake1", type: "stake", params: { protocol: "etherfi" } },
-    { id: "wrap1", type: "wrap", params: { from: "eETH", to: "weETH" } },
-    { id: "supply1", type: "lend", params: { protocol: "aave-v3", asset: "weETH" } },
-    { id: "borrow", type: "borrow", params: { protocol: "aave-v3", asset: "WETH", allocationBps } },
-    { id: "unwrap", type: "unwrap", params: { from: "WETH", to: "ETH" } },
-    { id: "stake2", type: "stake", params: { protocol: "etherfi" } },
-    { id: "wrap2", type: "wrap", params: { from: "eETH", to: "weETH" } },
-    { id: "supply2", type: "lend", params: { protocol: "aave-v3", asset: "weETH" } },
-  ];
-  const chain = ["in", "stake1", "wrap1", "supply1", "borrow", "unwrap", "stake2", "wrap2", "supply2"];
-  return { blocks, edges: linearEdges(chain) };
-}
-
-function chainOf(blocks: Block[]): StrategyGraph {
-  return { blocks, edges: linearEdges(blocks.map((b) => b.id)) };
-}
-
-// ————————————————————————— fixture snapshot —————————————————————————
-
-const USER = "0x1111111111111111111111111111111111111111" as Address;
-
-interface RawReserve {
-  underlying: Address;
-  aToken: Address;
-  variableDebtToken: Address;
-  reserveIndex: number;
-  decimals: number;
-  active: boolean;
-  frozen: boolean;
-  paused: boolean;
-  borrowingEnabled: boolean;
-  usageAsCollateralAllowed: boolean;
-  reserveLtvBps: number;
-  reserveLiquidationThresholdBps: number;
-  supplyCap: bigint;
-  borrowCap: bigint;
-  aTokenScaledTotalSupply: bigint;
-  variableDebtScaledTotalSupply: bigint;
-  accruedToTreasury: bigint;
-  liquidityRateRay: bigint;
-  variableBorrowRateRay: bigint;
-  liquidityIndexRay: bigint;
-  variableBorrowIndexRay: bigint;
-  lastUpdateTimestamp: bigint;
-  virtualUnderlyingBalance: bigint;
-  priceBase: bigint;
-}
-
-interface RawEMode {
-  id: number;
-  label: string;
-  ltvBps: number;
-  liquidationThresholdBps: number;
-  collateralBitmap: bigint;
-  borrowableBitmap: bigint;
-  isIsolated: boolean;
-  ltvZeroBitmap: bigint;
-}
-
-interface RawFixture {
-  pool: Address;
-  weETH: RawReserve;
-  WETH: RawReserve;
-  eModes: RawEMode[];
-  etherfi: {
-    liquidityPool: Address;
-    eETH: Address;
-    weETH: Address;
-    totalPooledEther: bigint;
-    totalShares: bigint;
-  };
-  user: { address: Address; eModeCategoryId: number; hasAaveFootprint: boolean };
-}
-
-function rawReserve(sym: "WETH" | "weETH"): RawReserve {
-  const cfg = `${sym}.getReserveConfigurationData`;
-  const toks = tupleRead(`${sym}.getReserveTokensAddresses`);
-  const rd = `${sym}.getReserveData`;
-  const underlying = anchorAddr(sym);
-  const list = tupleRead("Pool.getReservesList");
-  const reserveIndex = list.findIndex(
-    (a) => typeof a === "string" && a.toLowerCase() === underlying.toLowerCase(),
-  );
-  if (reserveIndex < 0) throw new Error(`${sym} not in reserves list`);
-  return {
-    underlying,
-    aToken: addressOf(toks[0], `${sym} aToken`),
-    variableDebtToken: addressOf(toks[2], `${sym} variableDebtToken`),
-    reserveIndex,
-    decimals: Number(tupleBig(cfg, 0)),
-    usageAsCollateralAllowed: tupleBool(cfg, 5),
-    reserveLtvBps: Number(tupleBig(cfg, 1)),
-    reserveLiquidationThresholdBps: Number(tupleBig(cfg, 2)),
-    borrowingEnabled: tupleBool(cfg, 6),
-    active: tupleBool(cfg, 8),
-    frozen: tupleBool(cfg, 9),
-    paused: readResult(`${sym}.getPaused`) === true,
-    borrowCap: tupleBig(`${sym}.getReserveCaps`, 0),
-    supplyCap: tupleBig(`${sym}.getReserveCaps`, 1),
-    aTokenScaledTotalSupply: bigRead(`${sym}.aToken.scaledTotalSupply`),
-    variableDebtScaledTotalSupply: bigRead(`${sym}.variableDebtToken.scaledTotalSupply`),
-    accruedToTreasury: tupleBig(rd, 1),
-    liquidityRateRay: tupleBig(rd, 5),
-    variableBorrowRateRay: tupleBig(rd, 6),
-    liquidityIndexRay: tupleBig(rd, 9),
-    variableBorrowIndexRay: tupleBig(rd, 10),
-    lastUpdateTimestamp: tupleBig(rd, 11),
-    virtualUnderlyingBalance: bigRead(`${sym}.getVirtualUnderlyingBalance`),
-    priceBase: bigRead(`Oracle.getAssetPrice(${sym})`),
-  };
-}
-
-function rawFixture(): RawFixture {
-  const cc = readResult("eMode1.collateralConfig");
-  if (
-    typeof cc !== "object" ||
-    cc === null ||
-    typeof (cc as Record<string, unknown>).ltv !== "number" ||
-    typeof (cc as Record<string, unknown>).liquidationThreshold !== "number"
-  ) {
-    throw new Error("eMode1.collateralConfig has an unexpected shape");
-  }
-  const collateralConfig = cc as { ltv: number; liquidationThreshold: number };
-  const label = readResult("eMode1.label");
-  if (typeof label !== "string") throw new Error("eMode1.label is not a string");
-  return {
-    pool: addressOf(readsMeta.pool, "pool"),
-    weETH: rawReserve("weETH"),
-    WETH: rawReserve("WETH"),
-    eModes: [
-      {
-        id: 1,
-        label,
-        ltvBps: collateralConfig.ltv,
-        liquidationThresholdBps: collateralConfig.liquidationThreshold,
-        collateralBitmap: bigRead("eMode1.collateralBitmap"),
-        borrowableBitmap: bigRead("eMode1.borrowableBitmap"),
-        isIsolated: readResult("eMode1.isIsolated (v3.7)") === true,
-        ltvZeroBitmap: bigRead("eMode1.ltvZeroBitmap (v3.7)"),
-      },
-    ],
-    etherfi: {
-      liquidityPool: addrRead("weETH.liquidityPool (round-trip)"),
-      eETH: addrRead("LP.eETH (round-trip)"),
-      weETH: anchorAddr("weETH"),
-      totalPooledEther: bigRead("LP.getTotalPooledEther"),
-      totalShares: bigRead("eETH.totalShares"),
-    },
-    user: { address: USER, eModeCategoryId: 0, hasAaveFootprint: false },
-  };
-}
-
-function snapshotFrom(raw: RawFixture): ChainSnapshot {
-  const mint = observationMinter(PINNED_BLOCK, Number(PINNED_TS));
-  const reserve = (sym: "WETH" | "weETH", r: RawReserve) => ({
-    underlying: r.underlying,
-    aToken: r.aToken,
-    variableDebtToken: r.variableDebtToken,
-    reserveIndex: mint.observe(r.reserveIndex, `Pool.getReservesList.indexOf(${sym})`),
-    decimals: mint.observe(r.decimals, `${sym}.getReserveConfigurationData.decimals`),
-    active: mint.observe(r.active, `${sym}.getReserveConfigurationData.isActive`),
-    frozen: mint.observe(r.frozen, `${sym}.getReserveConfigurationData.isFrozen`),
-    paused: mint.observe(r.paused, `${sym}.getPaused`),
-    borrowingEnabled: mint.observe(r.borrowingEnabled, `${sym}.getReserveConfigurationData.borrowingEnabled`),
-    usageAsCollateralAllowed: mint.observe(
-      r.usageAsCollateralAllowed,
-      `${sym}.getReserveConfigurationData.usageAsCollateralEnabled`,
-    ),
-    ltvBps: mint.observe(r.reserveLtvBps, `${sym}.getReserveConfigurationData.ltv`),
-    liquidationThresholdBps: mint.observe(
-      r.reserveLiquidationThresholdBps,
-      `${sym}.getReserveConfigurationData.liquidationThreshold`,
-    ),
-    supplyCap: mint.observe(r.supplyCap, `${sym}.getReserveCaps.supplyCap`),
-    borrowCap: mint.observe(r.borrowCap, `${sym}.getReserveCaps.borrowCap`),
-    aTokenScaledTotalSupply: mint.observe(r.aTokenScaledTotalSupply, `${sym}.aToken.scaledTotalSupply`),
-    variableDebtScaledTotalSupply: mint.observe(
-      r.variableDebtScaledTotalSupply,
-      `${sym}.variableDebtToken.scaledTotalSupply`,
-    ),
-    accruedToTreasury: mint.observe(r.accruedToTreasury, `${sym}.getReserveData.accruedToTreasury`),
-    liquidityRateRay: mint.observe(r.liquidityRateRay, `${sym}.getReserveData.liquidityRate`),
-    variableBorrowRateRay: mint.observe(r.variableBorrowRateRay, `${sym}.getReserveData.variableBorrowRate`),
-    liquidityIndexRay: mint.observe(r.liquidityIndexRay, `${sym}.getReserveData.liquidityIndex`),
-    variableBorrowIndexRay: mint.observe(r.variableBorrowIndexRay, `${sym}.getReserveData.variableBorrowIndex`),
-    lastUpdateTimestamp: mint.observe(r.lastUpdateTimestamp, `${sym}.getReserveData.lastUpdateTimestamp`),
-    virtualUnderlyingBalance: mint.observe(r.virtualUnderlyingBalance, `${sym}.getVirtualUnderlyingBalance`),
-    priceBase: mint.observe(r.priceBase, `Oracle.getAssetPrice(${sym})`),
-  });
-  return {
-    block: PINNED_BLOCK,
-    blockTimestamp: PINNED_TS,
-    pool: raw.pool,
-    reserves: { weETH: reserve("weETH", raw.weETH), WETH: reserve("WETH", raw.WETH) },
-    eModeCategories: raw.eModes.map((m) => ({
-      id: m.id,
-      label: mint.observe(m.label, `eMode${m.id}.label`),
-      ltvBps: mint.observe(m.ltvBps, `eMode${m.id}.collateralConfig.ltv`),
-      liquidationThresholdBps: mint.observe(
-        m.liquidationThresholdBps,
-        `eMode${m.id}.collateralConfig.liquidationThreshold`,
-      ),
-      collateralBitmap: mint.observe(m.collateralBitmap, `eMode${m.id}.collateralBitmap`),
-      borrowableBitmap: mint.observe(m.borrowableBitmap, `eMode${m.id}.borrowableBitmap`),
-      isIsolated: mint.observe(m.isIsolated, `eMode${m.id}.isIsolated`),
-      ltvZeroBitmap: mint.observe(m.ltvZeroBitmap, `eMode${m.id}.ltvZeroBitmap`),
-    })),
-    etherfi: {
-      liquidityPool: raw.etherfi.liquidityPool,
-      eETH: raw.etherfi.eETH,
-      weETH: raw.etherfi.weETH,
-      totalPooledEther: mint.observe(raw.etherfi.totalPooledEther, "LP.getTotalPooledEther"),
-      totalShares: mint.observe(raw.etherfi.totalShares, "eETH.totalShares"),
-    },
-    user: {
-      address: raw.user.address,
-      eModeCategoryId: mint.observe(raw.user.eModeCategoryId, "Pool.getUserEMode(user)"),
-      hasAaveFootprint: mint.observe(raw.user.hasAaveFootprint, "user aave footprint predicate"),
-    },
-  };
-}
-
-function fixtureSnapshot(mutate?: (raw: RawFixture) => void): ChainSnapshot {
-  const raw = rawFixture();
-  mutate?.(raw);
-  return snapshotFrom(raw);
-}
+import {
+  CANONICAL_STEPS,
+  EXPECTED_BORROW_WEI,
+  WAD_WEI,
+  chainOf,
+  flagshipGraph,
+} from "../../tests/helpers/graphs";
+import { FIXTURE_USER as USER, canonicalStepAddresses, fixtureSnapshot } from "../../tests/helpers/chain-snapshot";
 
 // ————————————————————————— pinned expectations —————————————————————————
-
-// Derivation chain for E = 10 ETH, b = 7000 bps, computed independently from the
-// committed reads log (floor at every division; matrix §7 share model):
-//   s1  = floor(E·S0/P0)                            = 9092267716600505494
-//   b1  = floor(s1·(P0+E)/(S0+s1))                  = 9999999999999999999
-//   w1  = floor(b1·(S0+s1)/(P0+E))                  = 9092267716600505493
-//   collateralBase = floor(w1·priceWeETH/1e18)      = 1923866861999
-//   borrowBase     = floor(collateralBase·7000/1e4) = 1346706803399
-//   borrowWei      = floor(borrowBase·1e18/priceWETH) = 6999999999994802135
-const EXPECTED_BORROW_WEI = 6999999999994802135n;
 
 // Real weETH supply-cap boundary for the flagship at b=7000 (v3.7 formula over
 // the recorded scaled values; crossing block is supply2 — the cumulative check):
@@ -289,8 +31,6 @@ const CAP_BOUNDARY_E_FAIL = "27860.889176796839966251";
 // WETH borrow-cap boundary for the flagship borrow (existing scaled debt plus
 // rayDivCeil(borrowWei) at the accrued index, rayMulCeil display, ceil tokens):
 const BORROW_CAP_MIN_PASSING = 1686984n;
-
-const WAD_WEI = 10n ** 18n;
 
 // ————————————————————————— helpers —————————————————————————
 
@@ -330,56 +70,19 @@ function selectorOfStep(step: TransactionStep): string {
 
 describe("buildPlan — flagship 13-step canonical fixture (SPEC §2)", () => {
   const snapshot = fixtureSnapshot();
-  const addresses = {
-    LP: addrRead("weETH.liquidityPool (round-trip)"),
-    eETH: addrRead("LP.eETH (round-trip)"),
-    weETH: anchorAddr("weETH"),
-    WETH: anchorAddr("WETH"),
-    pool: addressOf(readsMeta.pool, "pool"),
-  };
-
-  interface Row {
-    index: number;
-    id: string;
-    blockId: string;
-    to: Address;
-    functionName: string;
-    signature: string;
-    valueSpec: "none" | "amount";
-    amount:
-      | { kind: "literal"; wei: bigint }
-      | { kind: "none" }
-      | { kind: "derived" }
-      | { kind: "step-output"; producer: string; attribution: AmountAttribution };
-  }
-
-  const rows: Row[] = [
-    { index: 1, id: "stake1:deposit", blockId: "stake1", to: addresses.LP, functionName: "deposit", signature: "function deposit()", valueSpec: "amount", amount: { kind: "literal", wei: 10n * WAD_WEI } },
-    { index: 2, id: "wrap1:approve", blockId: "wrap1", to: addresses.eETH, functionName: "approve", signature: "function approve(address,uint256)", valueSpec: "none", amount: { kind: "step-output", producer: "stake1:deposit", attribution: "share-delta" } },
-    { index: 3, id: "wrap1:wrap", blockId: "wrap1", to: addresses.weETH, functionName: "wrap", signature: "function wrap(uint256)", valueSpec: "none", amount: { kind: "step-output", producer: "stake1:deposit", attribution: "share-delta" } },
-    { index: 4, id: "supply1:set-emode", blockId: "supply1", to: addresses.pool, functionName: "setUserEMode", signature: "function setUserEMode(uint8)", valueSpec: "none", amount: { kind: "none" } },
-    { index: 5, id: "supply1:approve", blockId: "supply1", to: addresses.weETH, functionName: "approve", signature: "function approve(address,uint256)", valueSpec: "none", amount: { kind: "step-output", producer: "wrap1:wrap", attribution: "transfer-event" } },
-    { index: 6, id: "supply1:supply", blockId: "supply1", to: addresses.pool, functionName: "supply", signature: "function supply(address,uint256,address,uint16)", valueSpec: "none", amount: { kind: "step-output", producer: "wrap1:wrap", attribution: "transfer-event" } },
-    { index: 7, id: "borrow:borrow", blockId: "borrow", to: addresses.pool, functionName: "borrow", signature: "function borrow(address,uint256,uint256,uint16,address)", valueSpec: "none", amount: { kind: "derived" } },
-    { index: 8, id: "unwrap:withdraw", blockId: "unwrap", to: addresses.WETH, functionName: "withdraw", signature: "function withdraw(uint256)", valueSpec: "none", amount: { kind: "step-output", producer: "borrow:borrow", attribution: "transfer-event" } },
-    { index: 9, id: "stake2:deposit", blockId: "stake2", to: addresses.LP, functionName: "deposit", signature: "function deposit()", valueSpec: "amount", amount: { kind: "step-output", producer: "unwrap:withdraw", attribution: "withdraw-argument" } },
-    { index: 10, id: "wrap2:approve", blockId: "wrap2", to: addresses.eETH, functionName: "approve", signature: "function approve(address,uint256)", valueSpec: "none", amount: { kind: "step-output", producer: "stake2:deposit", attribution: "share-delta" } },
-    { index: 11, id: "wrap2:wrap", blockId: "wrap2", to: addresses.weETH, functionName: "wrap", signature: "function wrap(uint256)", valueSpec: "none", amount: { kind: "step-output", producer: "stake2:deposit", attribution: "share-delta" } },
-    { index: 12, id: "supply2:approve", blockId: "supply2", to: addresses.weETH, functionName: "approve", signature: "function approve(address,uint256)", valueSpec: "none", amount: { kind: "step-output", producer: "wrap2:wrap", attribution: "transfer-event" } },
-    { index: 13, id: "supply2:supply", blockId: "supply2", to: addresses.pool, functionName: "supply", signature: "function supply(address,uint256,address,uint16)", valueSpec: "none", amount: { kind: "step-output", producer: "wrap2:wrap", attribution: "transfer-event" } },
-  ];
+  const addresses = canonicalStepAddresses();
 
   it("emits exactly the 13 enumerated steps in canonical order", () => {
     const result = buildPlan(flagshipGraph(), snapshot);
     expectOk(result);
     expect(result.steps).toHaveLength(13);
     expect(result.targetEModeCategoryId).toBe(1);
-    for (const row of rows) {
+    for (const row of CANONICAL_STEPS) {
       const step = result.steps[row.index - 1]!;
       expect(step.index, row.id).toBe(row.index);
       expect(step.id, row.id).toBe(row.id);
       expect(step.blockId, row.id).toBe(row.blockId);
-      expect(step.to, row.id).toBe(row.to);
+      expect(step.to, row.id).toBe(addresses[row.to]);
       expect(step.functionName, row.id).toBe(row.functionName);
       expect(step.valueSpec, row.id).toBe(row.valueSpec);
       expect(selectorOfStep(step), row.id).toBe(toFunctionSelector(row.signature));
