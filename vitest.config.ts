@@ -33,6 +33,18 @@ export default defineConfig({
         "src/components/composer/simulation-host.tsx",
         // W07: the attribution module is §5.5 money-path and fork-proven by identity.
         "src/lib/execution/attribution.ts",
+        // W07 session service: the pure decision surfaces are enrolled file by file.
+        // fork-session.ts is deliberately NOT here — it is process/socket I/O end to
+        // end and is proven where that is honest (tests/fork/session-isolation.test.ts);
+        // enrolling it would either fake coverage with mocked sockets or drag the gate.
+        "src/lib/execution/tolerance.ts",
+        "src/server/sandbox/session-registry.ts",
+        "src/server/sandbox/execute-step.ts",
+        "src/server/sandbox/deadlines.ts",
+        "src/server/sandbox/port-lease.ts",
+        "src/server/sandbox/process-exit.ts",
+        "src/server/sandbox/anvil-args.ts",
+        "src/server/trpc/sandbox-router.ts",
       ],
       exclude: ["src/**/*.test.{ts,tsx}"],
       thresholds: { lines: 95, branches: 90, functions: 95, statements: 95 },

@@ -17,6 +17,8 @@
  */
 import { applyAllocation } from "../../../../src/lib/execution/attribution"; // @route:core-imports-execution-file
 import * as execution from "../../../../src/lib/execution"; // @route:core-imports-execution-dir
+import { createSessionRegistry } from "../../../../src/server/sandbox/session-registry"; // @route:core-imports-server
 
 export const attributedShare = applyAllocation(1_000n, 2_500);
 export const driver = execution;
+export const registry = createSessionRegistry;

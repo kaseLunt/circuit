@@ -17,6 +17,26 @@ const memberFetchBan = ["globalThis", "window", "self"].map((host) => ({
     "src/lib/execution must stay pure — chain reads are injected through AttributionReads, never fetched here.",
 }));
 
+// W07 treatment A6/§5.1 (hardened per Codex round-1 finding 7): the sandbox fork/admin
+// RPC is server-only configuration, and a NEXT_PUBLIC_* env var is a client-shipped
+// value by Next.js contract — so server modules must not touch the NAME at all. Banning
+// only `process.env.X` member access left verified bypasses open (destructuring
+// `const {NEXT_PUBLIC_X} = process.env`, aliasing `const env = process.env`), so the ban
+// is on every occurrence of the name itself: any Identifier and any string Literal
+// matching ^NEXT_PUBLIC_ anywhere in src/server/** (.ts AND .tsx).
+const publicEnvInServerBan = [
+  {
+    selector: "Identifier[name=/^NEXT_PUBLIC_/]",
+    message:
+      "src/server must not touch NEXT_PUBLIC_* env names — the fork/admin RPC and session config are server-only (SPEC §6, treatment A6).",
+  },
+  {
+    selector: "Literal[value=/^NEXT_PUBLIC_/]",
+    message:
+      "src/server must not touch NEXT_PUBLIC_* env names — the fork/admin RPC and session config are server-only (SPEC §6, treatment A6).",
+  },
+];
+
 const numericFallbackBan = [
   {
     selector: "LogicalExpression[operator='??'] > Literal.right[raw=/^[0-9.]/]",
@@ -144,8 +164,30 @@ const eslintConfig = [
               message:
                 "core/ must not import the execution driver — transport observation never feeds money-math (CLAUDE.md money rules, treatment §1.2).",
             },
+            {
+              // W07: src/server now carries the session service (registry, fork
+              // lifecycle, execute path) — stateful, networked, transaction-sending
+              // code that core's pure money-math may never depend on (treatment §1.2).
+              group: ["**/server/**"],
+              message:
+                "core/ must not import server modules — snapshots flow INTO core as arguments; core never reaches out (CLAUDE.md money rules, treatment §1.2).",
+            },
           ],
         },
+      ],
+    },
+  },
+  {
+    // W07: the sandbox session service. The catch-all src/** block's syntax bans are
+    // restated because flat config replaces a rule's options rather than merging them.
+    // Covers .tsx too (finding 7): a server file's extension must not be a bypass.
+    files: ["src/server/**/*.{ts,tsx}", "tests/lint/fixtures/server/**/*.{ts,tsx}"],
+    rules: {
+      "no-restricted-syntax": [
+        "error",
+        forgedObservedBan,
+        ...numericFallbackBan,
+        ...publicEnvInServerBan,
       ],
     },
   },
