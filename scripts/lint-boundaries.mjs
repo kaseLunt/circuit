@@ -33,6 +33,16 @@ const EXPECTED = {
   "tests/lint/fixtures/core/imports-execution.ts": [
     ["core-imports-execution-file", "no-restricted-imports"],
     ["core-imports-execution-dir", "no-restricted-imports"],
+    ["core-imports-server", "no-restricted-imports"],
+  ],
+  "tests/lint/fixtures/server/leaks-public-env.ts": [
+    ["next-public-env-dot", "no-restricted-syntax"],
+    ["next-public-env-bracket", "no-restricted-syntax"],
+    ["next-public-env-destructure", "no-restricted-syntax"],
+    ["next-public-env-alias", "no-restricted-syntax"],
+  ],
+  "tests/lint/fixtures/server/leaks-public-env.tsx": [
+    ["next-public-env-tsx", "no-restricted-syntax"],
   ],
   "tests/lint/fixtures/execution/impure.ts": [
     ["react", "no-restricted-imports"],
