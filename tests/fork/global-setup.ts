@@ -84,6 +84,18 @@ export default async function globalSetup(): Promise<() => Promise<void>> {
   // failure wearing the costume of a total suite failure. Self-throttling trades wall-clock for
   // determinism. Override with ANVIL_CUPS when pointing at an endpoint with a higher budget.
   const cups = process.env.ANVIL_CUPS ?? "100";
+  // R-3a74989b retirement option 1. CUPS smooths STEADY-STATE load, but the flake is burst
+  // shaped: anvil's lazy upstream storage fetches collide inside a single multicall and the
+  // 429 surfaces as `failed to get storage … Max retries exceeded` mid-suite. These two flags
+  // harden the layer the retry actually has to happen in — inside anvil's fork backend, which
+  // no suite-side wrapper can reach (rpcWithRetry only covers anvil_reset, harness.ts).
+  // Verified against anvil 1.7.1: the flags are `--retries` (rate-limit retry count, default
+  // 5) and `--fork-retry-backoff` (initial backoff in MILLISECONDS); `--fork-request-retries`
+  // does not exist in this version and is rejected at argument parsing.
+  // Values match the suite-side posture (harness.ts: 5 attempts, 2s) with a doubled retry
+  // budget, trading wall-clock for determinism exactly as the CUPS setting above does.
+  const forkRetries = process.env.ANVIL_FORK_RETRIES ?? "10";
+  const forkRetryBackoffMs = process.env.ANVIL_FORK_RETRY_BACKOFF_MS ?? "2000";
   const child = spawn(
     anvilBin,
     [
@@ -93,6 +105,10 @@ export default async function globalSetup(): Promise<() => Promise<void>> {
       PINNED_BLOCK.toString(),
       "--compute-units-per-second",
       cups,
+      "--retries",
+      forkRetries,
+      "--fork-retry-backoff",
+      forkRetryBackoffMs,
       "--host",
       "127.0.0.1",
       "--port",

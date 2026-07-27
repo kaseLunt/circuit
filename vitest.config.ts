@@ -31,6 +31,8 @@ export default defineConfig({
         "src/components/shared/sourced-value.tsx",
         "src/components/composer/arrival.ts",
         "src/components/composer/simulation-host.tsx",
+        // W07: the attribution module is §5.5 money-path and fork-proven by identity.
+        "src/lib/execution/attribution.ts",
       ],
       exclude: ["src/**/*.test.{ts,tsx}"],
       thresholds: { lines: 95, branches: 90, functions: 95, statements: 95 },

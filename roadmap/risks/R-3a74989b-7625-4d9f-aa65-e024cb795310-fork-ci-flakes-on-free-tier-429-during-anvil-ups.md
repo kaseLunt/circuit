@@ -30,6 +30,11 @@ flip (public repos meter no minutes). The Alchemy free-tier 429 remains open wit
 retirement option 1 chosen: anvil `--fork-retry-backoff` / `--fork-request-retries`
 flags land in W07's first fork-suite commit. The date clock above checks that landing.
 
+Option 1 landed 2026-07-26 in W07's attribution-extraction commit, with a correction:
+`--fork-request-retries` does not exist in anvil 1.7.1; the real flags are `--retries`
+(rate-limit retry count, 10) and `--fork-retry-backoff` (initial backoff, ms, 2000),
+verified against the pinned binary and env-overridable per the ANVIL_CUPS pattern.
+
 ## Posture (current, recorded rather than implied)
 
 **Rerun-once.** A 429 failure is environmental, not evidential: the assertions the job
@@ -44,6 +49,9 @@ consecutive failure is treated as a finding, not a throttle.
 2. A paid-tier or dedicated archive key for CI (owner decision; key handling per the
    post-credential-leak policy — secret write-only, never in any tracked file).
 3. Serializing the two fork describes' capture phases to halve burst concurrency.
+4. Owner-offered dRPC key (free tier includes archive). Switching is a secret-value
+   change only (`FORK_RPC_URL`), no code change; key handling per the
+   post-credential-leak policy — secret write-only, never in any tracked file.
 
 P3's sandbox session service will multiply fork traffic; this risk blocks nothing today
 but should be retired before that multiplier lands (hence `review_when: date:2026-08-09`).

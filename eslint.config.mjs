@@ -7,6 +7,16 @@ const forgedObservedBan = {
     "Do not forge Observed provenance; construct it via observationMinter(...).observe (provenance boundary).",
 };
 
+// W07 finding 4. `no-restricted-globals` only sees a BARE `fetch(...)`; the same call
+// reached through an object member sails past it, so the two member forms are banned by
+// syntax. Together with the viem client/transport import ban below, this closes the routes
+// out of `src/lib/execution/`'s purity contract that a docstring alone left open.
+const memberFetchBan = ["globalThis", "window", "self"].map((host) => ({
+  selector: `MemberExpression[object.name='${host}'][property.name='fetch']`,
+  message:
+    "src/lib/execution must stay pure — chain reads are injected through AttributionReads, never fetched here.",
+}));
+
 const numericFallbackBan = [
   {
     selector: "LogicalExpression[operator='??'] > Literal.right[raw=/^[0-9.]/]",
@@ -31,6 +41,11 @@ const eslintConfig = [
       "spikes/**",
       "coverage/**",
       ".remember/**",
+      // W07 finding 4: these files exist to FAIL the boundary rules below, which is how we
+      // know the rules are not vacuous. They are ignored here so `npm run lint` stays green,
+      // and linted deliberately — with ignores disabled — by
+      // `npm run check:lint-boundaries`, which fails if any of them ever stops erroring.
+      "tests/lint/fixtures/**",
     ],
   },
   {
@@ -109,6 +124,108 @@ const eslintConfig = [
     files: ["src/components/**/*.{ts,tsx}"],
     rules: {
       "no-restricted-syntax": ["error", forgedObservedBan, ...numericFallbackBan],
+    },
+  },
+  {
+    // W07 treatment §1.2 / A19, the money↔transport quarantine, scoped to the surface this
+    // commit creates. `src/lib/execution/` is the client-side execution driver; it may read
+    // the chain-record facet of a receipt, so nothing in `core/` may depend on it without
+    // dragging transport toward money-math. Extend this ban to `wagmi` and `src/lib/wallet`
+    // when those land — they do not exist yet, and a ban on a non-existent path is a claim
+    // the linter cannot check.
+    files: ["src/core/**/*.ts", "tests/lint/fixtures/core/**/*.ts"],
+    rules: {
+      "no-restricted-imports": [
+        "error",
+        {
+          patterns: [
+            {
+              group: ["**/lib/execution/*", "**/lib/execution"],
+              message:
+                "core/ must not import the execution driver — transport observation never feeds money-math (CLAUDE.md money rules, treatment §1.2).",
+            },
+          ],
+        },
+      ],
+    },
+  },
+  {
+    // The other half of the same boundary: the attribution module is pure by contract, so
+    // its purity is lint-enforced rather than asserted in a docstring. Every chain read it
+    // performs arrives through the injected `AttributionReads`.
+    //
+    // viem is banned by NAME, not wholesale: `getAddress`/`parseAbi`/`decodeEventLog` are
+    // pure byte math and legitimately used here (the same reasoning core/ uses). What may
+    // not cross is anything that can OPEN a connection — a client or a transport — because
+    // that is the difference between decoding a receipt and going and getting one.
+    files: ["src/lib/execution/**/*.ts", "tests/lint/fixtures/execution/**/*.ts"],
+    rules: {
+      "no-restricted-imports": [
+        "error",
+        {
+          paths: [
+            { name: "react", message: "src/lib/execution must stay pure — no React." },
+            { name: "react-dom", message: "src/lib/execution must stay pure — no React." },
+            {
+              name: "viem",
+              importNames: [
+                "createClient",
+                "createPublicClient",
+                "createWalletClient",
+                "createTestClient",
+                "createTransport",
+                "custom",
+                "fallback",
+                "http",
+                "ipc",
+                "webSocket",
+              ],
+              message:
+                "src/lib/execution must stay pure — viem's ABI utilities are fine, its clients and transports are not; inject reads through AttributionReads.",
+            },
+          ],
+          patterns: [
+            {
+              group: [
+                "next/*",
+                "wagmi",
+                "wagmi/*",
+                // Both forms: a bare `viem/actions` import is exactly as much of an escape
+                // as a deep one, and `viem/actions/*` alone does not match it.
+                "viem/clients",
+                "viem/clients/*",
+                "viem/actions",
+                "viem/actions/*",
+                "viem/window",
+                "viem/node",
+                "**/server/chain/*",
+              ],
+              message:
+                "src/lib/execution must stay pure — no framework, no wallet stack, no chain client; inject reads instead.",
+            },
+          ],
+        },
+      ],
+      "no-restricted-globals": [
+        "error",
+        {
+          name: "fetch",
+          message:
+            "src/lib/execution must stay pure — chain reads are injected through AttributionReads, never fetched here.",
+        },
+        {
+          name: "XMLHttpRequest",
+          message: "src/lib/execution must stay pure — no transport of any kind.",
+        },
+      ],
+      // Flat config REPLACES a rule's options rather than merging them, so the src/** bans
+      // are restated here or these files would silently lose them.
+      "no-restricted-syntax": [
+        "error",
+        forgedObservedBan,
+        ...numericFallbackBan,
+        ...memberFetchBan,
+      ],
     },
   },
   {

@@ -12,6 +12,11 @@
  *   - post-action reserve rates reproduced via the §5.1 strategy formula
  *     (reading reserve deficits live — matrix §9 OPEN item 3)
  *
+ * Attribution is NOT implemented here. Both runs below drive
+ * `src/lib/execution/attribution.ts` — the module this file's two former copies of
+ * `resolveAmount`/`executeStep` were extracted into (P3 treatment §6.4) — so what this gate
+ * proves is the code the product ships, by identity rather than by resemblance.
+ *
  * A SECOND run follows at the bottom of this file on a re-forked, un-seeded, un-rebased
  * chain: there the prediction and the execution are the same sequence, so every
  * `core/risk.ts` ledger checkpoint is compared NUMERICALLY against getUserAccountData, and
@@ -20,15 +25,12 @@
 import { beforeAll, describe, expect, it } from "vitest";
 import {
   createPublicClient,
-  decodeEventLog,
   decodeFunctionResult,
-  encodeEventTopics,
   encodeFunctionData,
   getAddress,
   http,
   parseAbi,
   type Address,
-  type Hex,
   type PublicClient,
 } from "viem";
 import { mainnet } from "viem/chains";
@@ -36,11 +38,19 @@ import { captureChainSnapshot } from "../../src/server/chain/snapshot";
 import {
   buildPlan,
   effectiveLiquidationThresholdBps,
-  encodeStep,
   type ChainSnapshot,
   type PlanSuccess,
   type TransactionStep,
 } from "../../src/core/plan";
+import {
+  encodeResolvedStep,
+  measureShareDelta,
+  receiptMinter,
+  resolveStepAmount,
+  type AttributionContext,
+  type Confirmed,
+  type ExecutedStepRecord,
+} from "../../src/lib/execution/attribution";
 import { computeHealthFactor, hfWadValue, type CollateralEntry } from "../../src/core/health-factor";
 import { riskLedger, simulate, type RiskCheckpoint } from "../../src/core/risk";
 import {
@@ -107,6 +117,7 @@ const ABI = {
     "function shares(address) view returns (uint256)",
     "function totalShares() view returns (uint256)",
     "function approve(address,uint256) returns (bool)",
+    "function allowance(address,address) view returns (uint256)",
   ]),
   lp: parseAbi([
     "function deposit() payable returns (uint256)",
@@ -116,10 +127,7 @@ const ABI = {
   weeth: parseAbi(["function wrap(uint256) returns (uint256)"]),
   weth: parseAbi(["function deposit() payable"]),
   oracle: parseAbi(["function getAssetPrice(address) view returns (uint256)"]),
-  transfer: parseAbi(["event Transfer(address indexed from, address indexed to, uint256 value)"]),
 };
-
-const TRANSFER_TOPIC = encodeEventTopics({ abi: ABI.transfer, eventName: "Transfer" })[0];
 
 // ————————————————————————— shared state —————————————————————————
 
@@ -130,12 +138,17 @@ let seeded: ChainSnapshot;
 let plan: PlanSuccess;
 let dataProvider: Address;
 
-interface ExecutedStep {
-  readonly step: TransactionStep;
-  readonly receipt: Receipt;
-  readonly resolvedAmount: bigint | null;
-  /** eETH share delta for deposit steps. */
-  readonly sharesDelta: bigint | null;
+/**
+ * Receipts reach attribution ONLY through the minter, which verifies success and mined
+ * identity and brands the result so a hand-built object cannot typecheck as one. The RPC
+ * named here is this suite's own anvil endpoint — never a wallet-injected provider.
+ */
+const receipts = receiptMinter(ANVIL_URL);
+type ConfirmedForkReceipt = Confirmed<Receipt>;
+
+/** The module's record, narrowed to the harness receipt this suite also reads gas from. */
+interface ExecutedStep extends ExecutedStepRecord {
+  readonly receipt: ConfirmedForkReceipt;
 }
 const executed = new Map<string, ExecutedStep>();
 const supplyRecords: Array<{ stepId: string; amountWei: bigint; blockNumber: bigint }> = [];
@@ -168,103 +181,73 @@ function read<T>(args: {
   }) as Promise<T>;
 }
 
-function transferValueTo(receipt: Receipt, token: Address, to: Address): bigint {
-  let total = 0n;
-  let matches = 0;
-  for (const log of receipt.logs) {
-    if (getAddress(log.address) !== getAddress(token)) continue;
-    if (log.topics[0] !== TRANSFER_TOPIC) continue;
-    const decoded = decodeEventLog({
-      abi: ABI.transfer,
-      data: log.data,
-      topics: log.topics as [Hex, ...Hex[]],
-    });
-    if (getAddress(decoded.args.to) === getAddress(to)) {
-      total += decoded.args.value;
-      matches += 1;
-    }
-  }
-  if (matches === 0) {
-    throw new Error(`no Transfer(→wallet) on ${token} in tx ${receipt.txHash}`);
-  }
-  return total;
+/**
+ * The reads `src/lib/execution/attribution.ts` needs, bound to this run's snapshot and actor.
+ * Built per call because `seeded` is captured mid-suite; the module holds no client of its own.
+ */
+function attributionContext(snapshot: ChainSnapshot, actor: Address): AttributionContext {
+  return {
+    actor,
+    reads: {
+      sharesOf: (who) =>
+        read<bigint>({
+          address: snapshot.etherfi.eETH,
+          abi: ABI.eeth,
+          functionName: "shares",
+          fnArgs: [who],
+        }),
+      amountForShare: (shares) =>
+        read<bigint>({
+          address: snapshot.etherfi.liquidityPool,
+          abi: ABI.lp,
+          functionName: "amountForShare",
+          fnArgs: [shares],
+        }),
+    },
+  };
 }
 
-/** Token whose Transfer event attributes a producer step's output. */
-function outputTokenOf(step: TransactionStep): Address {
-  if (step.functionName === "wrap") return step.to;
-  if (step.functionName === "borrow") {
-    const asset = step.args[0];
-    if (asset !== undefined && asset.kind === "value" && typeof asset.value === "string") {
-      return getAddress(asset.value);
-    }
-  }
-  throw new Error(`no transfer-event output token for step ${step.id}`);
-}
-
-async function resolveAmount(step: TransactionStep): Promise<bigint | null> {
-  const spec = step.amount;
-  if (spec.kind === "none") return null;
-  if (spec.kind === "literal" || spec.kind === "derived") return spec.amount.value;
-  const producer = executed.get(spec.producerStepId);
-  if (producer === undefined) throw new Error(`producer ${spec.producerStepId} not executed`);
-  let output: bigint;
-  switch (spec.attribution) {
-    case "share-delta": {
-      if (producer.sharesDelta === null) throw new Error(`${spec.producerStepId} has no share delta`);
-      // Convert rebase-invariant shares to an amount at CONSUMPTION time — this
-      // is what survives the induced rebase between producer and consumer.
-      output = await read<bigint>({
-        address: seeded.etherfi.liquidityPool,
-        abi: ABI.lp,
-        functionName: "amountForShare",
-        fnArgs: [producer.sharesDelta],
-      });
-      break;
-    }
-    case "transfer-event":
-      output = transferValueTo(producer.receipt, outputTokenOf(producer.step), wallet);
-      break;
-    case "withdraw-argument":
-      if (producer.resolvedAmount === null) throw new Error(`${spec.producerStepId} has no amount`);
-      output = producer.resolvedAmount;
-      break;
-    case "return-value":
-      throw new Error("return-value attribution is not used by the flagship plan");
-  }
-  if (spec.allocationBps === 10_000) return output;
-  return (output * BigInt(spec.allocationBps)) / 10_000n;
-}
-
+/**
+ * Send `step` and turn the result into an attributed record. The revert decoding lives inside
+ * the send closure so a failure is diagnosed before `measureShareDelta` ever sees it; a
+ * confirmed-but-unmeasurable step surfaces as its own error carrying the tx hash, because a
+ * transaction that landed must never be lost just because a follow-up read failed.
+ */
 async function executeStep(step: TransactionStep): Promise<ExecutedStep> {
-  const resolved = await resolveAmount(step);
-  const encoded =
-    step.amount.kind === "step-output" ? encodeStep(step, resolved!) : encodeStep(step);
-  const preShares =
-    step.functionName === "deposit"
-      ? await read<bigint>({ address: seeded.etherfi.eETH, abi: ABI.eeth, functionName: "shares", fnArgs: [wallet] })
-      : null;
-  let receipt: Receipt;
-  try {
-    receipt = await sendTx({ from: wallet, to: encoded.to, data: encoded.data, value: encoded.value });
-  } catch (cause) {
-    if (cause instanceof TxRevertedError) {
-      const revertData = await replayRevert(cause.txHash);
-      const decoded =
-        revertData !== null && revertData.startsWith("0x") ? decodeRevert(revertData) : null;
-      throw new Error(
-        `step ${step.id} reverted (${cause.txHash}): ${
-          decoded !== null ? `${decoded.message} [${decoded.raw}]` : String(revertData)
-        }`,
+  const context = attributionContext(seeded, wallet);
+  const resolved = await resolveStepAmount(step, executed, context);
+  const encoded = encodeResolvedStep(step, resolved);
+  const outcome = await measureShareDelta(step, context, async () => {
+    try {
+      return receipts.confirm(
+        await sendTx({ from: wallet, to: encoded.to, data: encoded.data, value: encoded.value }),
       );
+    } catch (cause) {
+      if (cause instanceof TxRevertedError) {
+        const revertData = await replayRevert(cause.txHash);
+        const decoded =
+          revertData !== null && revertData.startsWith("0x") ? decodeRevert(revertData) : null;
+        throw new Error(
+          `step ${step.id} reverted (${cause.txHash}): ${
+            decoded !== null ? `${decoded.message} [${decoded.raw}]` : String(revertData)
+          }`,
+        );
+      }
+      throw cause;
     }
-    throw cause;
+  });
+  if (outcome.status !== "attributed") {
+    throw new Error(
+      `step ${step.id} confirmed (${outcome.receipt.txHash}) but its share delta could not be read: ${String(outcome.cause)}`,
+    );
   }
-  const sharesDelta =
-    preShares !== null
-      ? (await read<bigint>({ address: seeded.etherfi.eETH, abi: ABI.eeth, functionName: "shares", fnArgs: [wallet] })) - preShares
-      : null;
-  const record: ExecutedStep = { step, receipt, resolvedAmount: resolved, sharesDelta };
+  const receipt = outcome.receipt;
+  const record: ExecutedStep = {
+    step,
+    receipt,
+    resolvedAmount: resolved,
+    sharesDelta: outcome.sharesDelta,
+  };
   executed.set(step.id, record);
   planGasPaid += receipt.gasUsed * receipt.effectiveGasPrice;
   if (step.functionName === "supply") {
@@ -274,6 +257,33 @@ async function executeStep(step: TransactionStep): Promise<ExecutedStep> {
     borrowRecord = { amountWei: resolved!, blockNumber: receipt.blockNumber };
   }
   return record;
+}
+
+/**
+ * Locate ether.fi's packed (totalPooledEther-bearing) accounting word by scanning storage for
+ * the single slot whose two 128-bit halves sum to the reported total. Shared by the W03
+ * mutation-contract test and the W07 approval-staleness drill so one scan defines the slot.
+ */
+async function findPackedAccountingSlot(
+  lp: Address,
+  totalBefore: bigint,
+): Promise<{ slot: bigint; word: bigint }> {
+  const matches: Array<{ slot: bigint; word: bigint }> = [];
+  for (let slot = 0n; slot < STORAGE_SCAN_SLOTS; slot += 1n) {
+    const word = await getStorageWord(lp, slot);
+    if (word === 0n) continue;
+    const low = word & (U128 - 1n);
+    const high = word >> 128n;
+    if (low + high === totalBefore) matches.push({ slot, word });
+  }
+  if (matches.length !== 1) {
+    throw new Error(
+      `packed-accounting scan must find exactly one slot; found ${matches.length}: ${JSON.stringify(
+        matches.map((m) => ({ slot: m.slot.toString(), word: m.word.toString(16) })),
+      )}`,
+    );
+  }
+  return matches[0]!;
 }
 
 /** Our accounting reconstruction of the position, priced like Aave does. */
@@ -492,22 +502,7 @@ describe("W03 fork gate — SPEC §2 flagship on the pinned fork", () => {
     const totalBefore = await read<bigint>({ address: lp, abi: ABI.lp, functionName: "getTotalPooledEther" });
     const sharesBefore = await read<bigint>({ address: seeded.etherfi.eETH, abi: ABI.eeth, functionName: "totalShares" });
 
-    const matches: Array<{ slot: bigint; word: bigint }> = [];
-    for (let slot = 0n; slot < STORAGE_SCAN_SLOTS; slot += 1n) {
-      const word = await getStorageWord(lp, slot);
-      if (word === 0n) continue;
-      const low = word & (U128 - 1n);
-      const high = word >> 128n;
-      if (low + high === totalBefore) matches.push({ slot, word });
-    }
-    if (matches.length !== 1) {
-      throw new Error(
-        `packed-accounting scan must find exactly one slot; found ${matches.length}: ${JSON.stringify(
-          matches.map((m) => ({ slot: m.slot.toString(), word: m.word.toString(16) })),
-        )}`,
-      );
-    }
-    const { slot, word } = matches[0]!;
+    const { slot, word } = await findPackedAccountingSlot(lp, totalBefore);
     const delta = totalBefore / REBASE_DIVISOR;
     const low = word & (U128 - 1n);
     expect(low + delta < U128, "low half must not overflow into the high half").toBe(true);
@@ -776,65 +771,30 @@ describe("W03 fork gate — riskLedger against the chain on a clean, un-rebased 
   let actualBorrowRateRay: bigint | null = null;
   let actualLiquidityRateRay: bigint | null = null;
 
-  async function resolveCleanAmount(step: TransactionStep): Promise<bigint | null> {
-    const spec = step.amount;
-    if (spec.kind === "none") return null;
-    if (spec.kind === "literal" || spec.kind === "derived") return spec.amount.value;
-    const producer = cleanExecuted.get(spec.producerStepId);
-    if (producer === undefined) throw new Error(`producer ${spec.producerStepId} not executed`);
-    let output: bigint;
-    switch (spec.attribution) {
-      case "share-delta": {
-        if (producer.sharesDelta === null) {
-          throw new Error(`${spec.producerStepId} has no share delta`);
-        }
-        output = await read<bigint>({
-          address: cleanSnapshot.etherfi.liquidityPool,
-          abi: ABI.lp,
-          functionName: "amountForShare",
-          fnArgs: [producer.sharesDelta],
-        });
-        break;
-      }
-      case "transfer-event":
-        output = transferValueTo(producer.receipt, outputTokenOf(producer.step), cleanWallet);
-        break;
-      case "withdraw-argument":
-        if (producer.resolvedAmount === null) {
-          throw new Error(`${spec.producerStepId} has no amount`);
-        }
-        output = producer.resolvedAmount;
-        break;
-      case "return-value":
-        throw new Error("return-value attribution is not used by the flagship plan");
-    }
-    if (spec.allocationBps === 10_000) return output;
-    return (output * BigInt(spec.allocationBps)) / 10_000n;
-  }
-
   async function executeClean(step: TransactionStep): Promise<void> {
-    const resolved = await resolveCleanAmount(step);
-    const encoded =
-      step.amount.kind === "step-output" ? encodeStep(step, resolved!) : encodeStep(step);
-    const shares = (): Promise<bigint> =>
-      read<bigint>({
-        address: cleanSnapshot.etherfi.eETH,
-        abi: ABI.eeth,
-        functionName: "shares",
-        fnArgs: [cleanWallet],
-      });
-    const preShares = step.functionName === "deposit" ? await shares() : null;
-    const receipt = await sendTx({
-      from: cleanWallet,
-      to: encoded.to,
-      data: encoded.data,
-      value: encoded.value,
-    });
+    const context = attributionContext(cleanSnapshot, cleanWallet);
+    const resolved = await resolveStepAmount(step, cleanExecuted, context);
+    const encoded = encodeResolvedStep(step, resolved);
+    const outcome = await measureShareDelta(step, context, async () =>
+      receipts.confirm(
+        await sendTx({
+          from: cleanWallet,
+          to: encoded.to,
+          data: encoded.data,
+          value: encoded.value,
+        }),
+      ),
+    );
+    if (outcome.status !== "attributed") {
+      throw new Error(
+        `step ${step.id} confirmed (${outcome.receipt.txHash}) but its share delta could not be read: ${String(outcome.cause)}`,
+      );
+    }
     cleanExecuted.set(step.id, {
       step,
-      receipt,
+      receipt: outcome.receipt,
       resolvedAmount: resolved,
-      sharesDelta: preShares === null ? null : (await shares()) - preShares,
+      sharesDelta: outcome.sharesDelta,
     });
   }
 
@@ -1117,5 +1077,177 @@ describe("W03 fork gate — riskLedger against the chain on a clean, un-rebased 
       relWithin(rayAprToApyWad(staleSupplyRay), chainApy, RATE_REL_POW),
       `the stale model must fail this bound: stale ${staleSupplyRay} vs chain ${actualLiquidityRateRay}`,
     ).toBe(false);
+  });
+});
+
+/**
+ * A THIRD fork run: the W07 approval-staleness drill (Codex finding 3).
+ *
+ * `buildPlan` hands an approve and the step it authorises ONE amount spec. Resolving that
+ * spec twice means two `amountForShare` reads straddling the approve transaction, and eETH
+ * rebases: a positive rebase in between makes the wrap's amount exceed the allowance the
+ * approve just set. `WeETH.wrap` transfers exactly its argument via `safeTransferFrom`, so
+ * that plan reverts at step 3 with a live allowance stranded on the token.
+ *
+ * `resolveStepAmount` resolves once per attributed output and reuses the figure for the
+ * pair's second member, which is what this drill measures. It is deliberately discriminating
+ * rather than merely green: it asserts that an INDEPENDENT re-resolution after the rebase
+ * would have exceeded the approved amount, so a regression that re-derived the wrap's amount
+ * would fail here instead of passing quietly. Only the first three steps run — the rest of
+ * the sequence is already proven twice above, and a third full pass would triple the
+ * suite's upstream fetch burst for no additional evidence (R-3a74989b).
+ */
+describe("W07 fork gate — a rebase between an approval and its consumer does not strand the plan", () => {
+  let drillWallet: Address;
+  let drillSnapshot: ChainSnapshot;
+  let drillPlan: PlanSuccess;
+  const drillExecuted = new Map<string, ExecutedStep>();
+
+  async function executeDrill(step: TransactionStep): Promise<ExecutedStep> {
+    const context = attributionContext(drillSnapshot, drillWallet);
+    const resolved = await resolveStepAmount(step, drillExecuted, context);
+    const encoded = encodeResolvedStep(step, resolved);
+    const outcome = await measureShareDelta(step, context, async () => {
+      try {
+        return receipts.confirm(
+          await sendTx({
+            from: drillWallet,
+            to: encoded.to,
+            data: encoded.data,
+            value: encoded.value,
+          }),
+        );
+      } catch (cause) {
+        if (cause instanceof TxRevertedError) {
+          const revertData = await replayRevert(cause.txHash);
+          const decoded =
+            revertData !== null && revertData.startsWith("0x") ? decodeRevert(revertData) : null;
+          throw new Error(
+            `drill step ${step.id} reverted (${cause.txHash}): ${
+              decoded !== null ? `${decoded.message} [${decoded.raw}]` : String(revertData)
+            }`,
+          );
+        }
+        throw cause;
+      }
+    });
+    if (outcome.status !== "attributed") {
+      throw new Error(`drill step ${step.id} confirmed but unmeasurable: ${String(outcome.cause)}`);
+    }
+    const executedStep: ExecutedStep = {
+      step,
+      receipt: outcome.receipt,
+      resolvedAmount: resolved,
+      sharesDelta: outcome.sharesDelta,
+    };
+    drillExecuted.set(step.id, executedStep);
+    return executedStep;
+  }
+
+  beforeAll(async () => {
+    await rpcWithRetry("anvil_reset", [{ forking: { blockNumber: Number(PINNED_BLOCK) } }]);
+    const pinned = await rpc<{ hash?: string } | null>("eth_getBlockByNumber", [
+      hexQuantity(PINNED_BLOCK),
+      false,
+    ]);
+    if (pinned === null || pinned.hash !== readsMeta.pinned_block.hash) {
+      throw new Error(`drill fork identity mismatch at ${PINNED_BLOCK}: ${pinned?.hash ?? "null"}`);
+    }
+    client = createPublicClient({
+      chain: mainnet,
+      transport: http(ANVIL_URL, { timeout: 120_000 }),
+    }) as unknown as PublicClient;
+    // A third empty EOA, code-free for the EIP-7702 reason documented at the top of this file.
+    drillWallet = getAddress("0x3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c");
+    const code = await rpc<string>("eth_getCode", [drillWallet, "latest"]);
+    if (code !== "0x") {
+      throw new Error(`drill wallet ${drillWallet} unexpectedly has code — pick an empty EOA`);
+    }
+    await rpc("anvil_setBalance", [drillWallet, hexQuantity(100_000n * 10n ** 18n)]);
+    await rpc("anvil_impersonateAccount", [drillWallet]);
+    drillSnapshot = await captureChainSnapshot(client, {
+      user: drillWallet,
+      blockNumber: PINNED_BLOCK,
+      expectBlockHash: readsMeta.pinned_block.hash as `0x${string}`,
+    });
+    const built = buildPlan(flagshipGraph(INPUT_ETH, BORROW_BPS), drillSnapshot);
+    if (!built.ok) throw new Error(`drill plan failed: ${JSON.stringify(built.errors)}`);
+    drillPlan = built;
+  });
+
+  it("wraps the approved amount and leaves no residual allowance", async () => {
+    const [deposit, approve, wrap] = drillPlan.steps as unknown as [
+      TransactionStep,
+      TransactionStep,
+      TransactionStep,
+    ];
+    expect([deposit.id, approve.id, wrap.id]).toEqual([
+      "stake1:deposit",
+      "wrap1:approve",
+      "wrap1:wrap",
+    ]);
+
+    const staked = await executeDrill(deposit);
+    const approved = await executeDrill(approve);
+    const approvedWei = approved.resolvedAmount;
+    if (approvedWei === null || staked.sharesDelta === null) {
+      throw new Error("the drill's deposit/approve pair produced no figures");
+    }
+
+    // The allowance the chain actually holds is the amount the approve resolved.
+    const lp = drillSnapshot.etherfi.liquidityPool;
+    const eETH = drillSnapshot.etherfi.eETH;
+    const weETH = drillSnapshot.etherfi.weETH;
+    const allowanceAfterApprove = await read<bigint>({
+      address: eETH,
+      abi: ABI.eeth,
+      functionName: "allowance",
+      fnArgs: [drillWallet, weETH],
+    });
+    expect(allowanceAfterApprove).toBe(approvedWei);
+
+    // ————— the mutation: +1% of totalPooledEther, BETWEEN the approval and its consumer —————
+    const totalBefore = await read<bigint>({
+      address: lp,
+      abi: ABI.lp,
+      functionName: "getTotalPooledEther",
+    });
+    const { slot, word } = await findPackedAccountingSlot(lp, totalBefore);
+    const delta = totalBefore / REBASE_DIVISOR;
+    await setStorageWord(lp, slot, word + delta);
+    const totalAfter = await read<bigint>({
+      address: lp,
+      abi: ABI.lp,
+      functionName: "getTotalPooledEther",
+    });
+    expect(totalAfter).toBe(totalBefore + delta);
+
+    // The drill discriminates: resolving the SAME spec again now yields more than the
+    // allowance, which is precisely the calldata a per-step re-derivation would have built.
+    const wouldHaveWrapped = await read<bigint>({
+      address: lp,
+      abi: ABI.lp,
+      functionName: "amountForShare",
+      fnArgs: [staked.sharesDelta],
+    });
+    expect(wouldHaveWrapped).toBeGreaterThan(allowanceAfterApprove);
+    record(
+      `approval-staleness drill: allowance ${allowanceAfterApprove}, post-rebase re-resolution ` +
+        `${wouldHaveWrapped} (+${wouldHaveWrapped - allowanceAfterApprove} wei over the allowance)`,
+    );
+
+    // …and the plan still completes, because the pair resolves once.
+    const wrapped = await executeDrill(wrap);
+    expect(wrapped.resolvedAmount).toBe(approvedWei);
+
+    // Treatment §3.3: each consumer spends exactly what was approved, so nothing is left
+    // standing on the token afterwards.
+    const residualAllowance = await read<bigint>({
+      address: eETH,
+      abi: ABI.eeth,
+      functionName: "allowance",
+      fnArgs: [drillWallet, weETH],
+    });
+    expect(residualAllowance, "no allowance may outlive the step that consumed it").toBe(0n);
   });
 });
