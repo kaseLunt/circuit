@@ -48,6 +48,7 @@ import {
 } from "./deadlines";
 import { createPortLeaseRegistry, type PortLeaseRegistry } from "./port-lease";
 import { trackProcessExit } from "./process-exit";
+import { sessionAnvilArgs } from "./anvil-args";
 
 export interface ForkSessionConfig {
   /** Upstream RPC the session anvil forks from. Server-only env; archive-capable in prod. */
@@ -418,24 +419,20 @@ export async function spawnSessionFork(config: ForkSessionConfig): Promise<Sessi
   const lease = portRegistryFor(config).acquire();
   const port = lease.port;
   const url = `http://127.0.0.1:${port}`;
+  // Flag construction is a covered TOPOLOGY DECISION (`anvil-args.ts`, PR #20 CI
+  // finding): a localhost upstream gets no self-throttle and a raised fork-request
+  // timeout; a remote upstream keeps the R-3a74989b posture. `anvil_reset` re-forks
+  // in-process and inherits these spawn-time flags, so this is the ONLY site.
   const child: ChildProcess = spawn(
     config.anvilPath,
-    [
-      "--fork-url",
-      config.upstreamUrl,
-      "--fork-block-number",
-      config.baseBlock.toString(),
-      "--compute-units-per-second",
-      config.computeUnitsPerSecond,
-      "--retries",
-      config.forkRetries,
-      "--fork-retry-backoff",
-      config.forkRetryBackoffMs,
-      "--host",
-      "127.0.0.1",
-      "--port",
-      String(port),
-    ],
+    sessionAnvilArgs({
+      upstreamUrl: config.upstreamUrl,
+      baseBlock: config.baseBlock,
+      port,
+      computeUnitsPerSecond: config.computeUnitsPerSecond,
+      forkRetries: config.forkRetries,
+      forkRetryBackoffMs: config.forkRetryBackoffMs,
+    }),
     { stdio: ["ignore", "ignore", "pipe"] },
   );
   // The exit listener is installed HERE, at spawn time (Codex round-3 finding 1), so a

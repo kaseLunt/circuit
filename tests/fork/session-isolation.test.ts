@@ -49,9 +49,13 @@ const config: ForkSessionConfig = {
   anvilPath: process.env.ANVIL_PATH ?? "anvil",
   portBase: 9645,
   portCount: 4,
-  // The upstream here is the suite's own local anvil — no provider rate limiter to
-  // respect, so a generous compute budget just makes the fork boots fast.
-  computeUnitsPerSecond: "5000",
+  // The upstream here is the suite's own LOCAL anvil, so the topology decision in
+  // `anvil-args.ts` (PR #20 CI finding) drops the three throttle/retry values below
+  // entirely and raises the fork-request timeout instead — self-throttling loopback
+  // traffic starved the fresh actor's cold-miss storage sweep past anvil's default
+  // 45s fork timeout. The values still ride the config for the remote (live-mode)
+  // topology, where they are the R-3a74989b posture.
+  computeUnitsPerSecond: "100",
   forkRetries: "10",
   forkRetryBackoffMs: "2000",
 };

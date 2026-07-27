@@ -43,6 +43,7 @@ export default defineConfig({
         "src/server/sandbox/deadlines.ts",
         "src/server/sandbox/port-lease.ts",
         "src/server/sandbox/process-exit.ts",
+        "src/server/sandbox/anvil-args.ts",
         "src/server/trpc/sandbox-router.ts",
       ],
       exclude: ["src/**/*.test.{ts,tsx}"],
