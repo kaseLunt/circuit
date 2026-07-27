@@ -55,3 +55,28 @@ consecutive failure is treated as a finding, not a throttle.
 
 P3's sandbox session service will multiply fork traffic; this risk blocks nothing today
 but should be retired before that multiplier lands (hence `review_when: date:2026-08-09`).
+
+## Option 4 verdict (2026-07-27): dRPC free tier non-viable, paid-only
+
+Empirical, owner's free dRPC key: light head-state calls answer (~490ms), but ANY block or
+state fetch at the pinned height is refused by dRPC's gateway with HTTP 408 "Request timeout
+on the free plan" (code 30) after ~2.2s — 0/8 attempts, header-only included. anvil's fork
+bootstrap dies on its first request, and `--retries` does not apply (408, not 429). Option 4
+therefore requires a paid dRPC plan; the owner declined (correctly — no need exists while
+Alchemy free carries CI). Alchemy remains primary. Keyless public endpoints re-verified the
+same day: headers yes, archive state no.
+
+## Related finding (2026-07-27): anvil-under-anvil historical-tag wedge — retired
+
+The session service's fork drills exposed a distinct failure the 429 posture did not cover:
+an anvil serving CONCURRENT state reads at a historical tag (a block behind its own head) to
+a forked child wedges permanently — it stops answering even `eth_blockNumber` and never
+recovers. Minimal reproduction: base mined +3 past the pin, 30 parallel reads at the pinned
+tag = instant total wedge (12/12 probes dead); the identical burst against a pristine base
+(head == pin) = fully healthy (~60ms). This wedge — not throttling — caused three identical
+fork-job failures on PR #20 once session drills ran after the flagship suite had mined the
+shared base. Retired in PR #20: the fork suite gives the session service a dedicated
+never-mutated upstream anvil plus a head==PIN assertion that turns any re-arming into a loud
+failure. Standing doctrine for any future shared-anvil rig (demo included): session upstreams
+must be head-stable or remote. Accepted CI cost: one extra remote bootstrap per run and one
+cold first capture through CUPS.
