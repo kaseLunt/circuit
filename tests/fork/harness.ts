@@ -9,6 +9,8 @@ export interface RawLog {
   readonly address: Hex;
   readonly topics: readonly Hex[];
   readonly data: Hex;
+  /** Carried through from the RPC so the receipt minter can check log↔tx identity. */
+  readonly transactionHash?: Hex;
 }
 
 export interface Receipt {
@@ -17,6 +19,7 @@ export interface Receipt {
   readonly gasUsed: bigint;
   readonly effectiveGasPrice: bigint;
   readonly blockNumber: bigint;
+  readonly blockHash: Hex;
   readonly logs: readonly RawLog[];
 }
 
@@ -131,6 +134,7 @@ export async function sendTx(tx: {
         gasUsed: BigInt(r["gasUsed"] as string),
         effectiveGasPrice: BigInt(r["effectiveGasPrice"] as string),
         blockNumber: BigInt(r["blockNumber"] as string),
+        blockHash: r["blockHash"] as Hex,
         logs: r["logs"] as RawLog[],
       };
       if (receipt.status !== 1n) throw new TxRevertedError(txHash);
