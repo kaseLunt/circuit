@@ -38,6 +38,12 @@ export default defineConfig({
         // end and is proven where that is honest (tests/fork/session-isolation.test.ts);
         // enrolling it would either fake coverage with mocked sockets or drag the gate.
         "src/lib/execution/tolerance.ts",
+        // W07 execution-state-machine surface: the pure machine, its durable record,
+        // the resume/wire adapter, and the shared type grammar — each a deliberate enrol.
+        "src/lib/execution/types.ts",
+        "src/lib/execution/record.ts",
+        "src/lib/execution/machine.ts",
+        "src/lib/execution/resume.ts",
         "src/server/sandbox/session-registry.ts",
         "src/server/sandbox/execute-step.ts",
         "src/server/sandbox/deadlines.ts",
