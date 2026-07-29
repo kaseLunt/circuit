@@ -4,7 +4,7 @@ type: work
 title: P3 execution — sandbox session service, the tx UX family, live gating
 phase: P3
 status: active
-evidence_target: spec-3-steps-4-7-green-in-playwright-against-sandbox-fork
+evidence_target: sandbox-execution-arc-green-on-fork-in-ci
 priority: 1
 depends_on: [W05, W06]
 blocked_by: []
@@ -35,9 +35,6 @@ deliverables:
   - src/lib/execution/record.ts
   - src/lib/execution/resume.ts
   - src/lib/execution/resume.test.ts
-  - src/lib/wallet/types.ts
-  - src/lib/wallet/config.ts
-  - src/lib/wallet/wallet-provider.tsx
   - src/server/sandbox/session-registry.ts
   - src/server/sandbox/fork-session.ts
   - src/server/sandbox/execute-step.ts
@@ -50,7 +47,6 @@ deliverables:
   - tests/fork/execution-drills.test.ts
   - tests/fork/session-isolation.test.ts
   - e2e/demo-script.spec.ts
-  - docs/live-execution-checklist.md
   - eslint.config.mjs
   - .github/workflows/ci.yml
 evidence_receipts: []
@@ -109,12 +105,17 @@ interface, and refactor the fork suite to consume it. After that commit the ship
 code is the code the fork gate proves, by identity rather than resemblance. Everything else in
 this item builds on that module.
 
-**Phase split (SPEC §11).** P3a is the sandbox path: provider provisioned, session registry,
-server-built execution, §3 steps 4–6. P3b is the §6 family in full: both recovery machines,
-decoded reverts, replaced/timeout classification, a11y pass, live-mode gating and the §2
-footprint refusal, §3 step 7 plus the documented manual live checklist. One work object covers
-both because the state machine, the attribution module, and the pre-sign surface are shared
-spines, not per-phase code.
+**Phase split (SPEC §11) — AMENDED 2026-07-28 (owner-ratified; phase review 019fabfb).** This
+work object now covers P3a ONLY: the sandbox path — provider provisioned, session registry,
+server-built execution, and the sandbox execution arc (arm → review → execute → attribute →
+receipt) proven in the browser against a pinned fork in CI. P3b — the wallet boundary, live-mode
+gating with the §2 footprint refusal, the §3 prevention-and-override beat (step 4) and live-gating
+beat (step 7), timeout keep-waiting/give-up controls, T26 canvas lockdown, and the manual live
+checklist — moves to W08. The original charter said one object covers both because the shared
+spines (state machine, attribution, pre-sign surface) are common code; those spines are BUILT and
+merged, so the split now cuts along mode, not architecture. The phase-exit review correctly
+refused the old evidence-target label: the sandbox arc is not SPEC §3 steps 4 and 7, and the
+receipts must claim exactly what was proven.
 
 **Deliverables are enumerated as far as the treatment names them.** The execution-surface
 components beyond the four `components/tx/` files — designed refusal and edge states, the
@@ -126,21 +127,16 @@ quarantine is enforced there, and it is in `invalidated_by` for the same reason:
 
 ## Acceptance
 
-- **§3 step 4 — the prevention-and-override beat, executed.** Borrow dragged past the limit is
-  refused client-side with LTV/LT read from the active eMode configuration; "Simulate anyway"
-  produces a decoded revert from the deployed revision in the step list; dragging back and
-  re-simulating reruns the entire bundle from the base snapshot, labelled "Re-simulate" and
-  never "Resume".
-- **§3 step 5 — the authoritative run.** All 13 steps stream pending → success with per-step gas
-  **estimate** (never conflated with the EIP-1559 max), and the final summary carries net APY,
-  final HF, and liquidation ratio.
-- **§3 step 6 — sandbox execution.** All 13 steps execute against the session fork with their
-  lifecycles rendered, `awaiting-signature` skipped and said so in the badge, explorer links
-  where the provider offers them. No success state exists without a mined receipt in any mode.
-- **§3 step 7 — live gating.** The mock connector switches the mode to Live; Execute stays gated
-  until a fresh simulation against real balances passes; the §2 footprint predicate refuses
-  wallets that already hold a position. Completed live execution is not a gate; the manual live
-  checklist is documented.
+- **The sandbox execution arc, in the browser, on the fork, in CI.** From the composed flagship:
+  arm a session, review every planned call (full targets, signatures, bound amounts, tolerance
+  contract, session facts), execute all 13 steps against the session fork with their lifecycles
+  rendered, every producer output attributed within named tolerances with provenance citations,
+  and the still receipt (N+1 success glyphs exactly, CHAIN/PREDICTED agreement, the
+  forked-mainnet badge). Gas renders from receipts only — the sandbox quotes no estimates and
+  says so rather than conflating (T36.4). No success state exists without a mined receipt.
+- *(Moved to W08 by the 2026-07-28 amendment: the §3 step-4 prevention-and-override beat and
+  the §3 step-7 live-gating beat, including the mock connector, fresh-simulation gate, and the
+  §2 footprint refusal.)*
 - **Server builds everything (SPEC §6, treatment §5.2).** No sandbox endpoint schema accepts a
   `to`, `data`, address, or amount; zod strict; `planHash` reconciled against the server's own
   rebuild; `(sessionKey, planHash, stepIndex)` makes `executeStep` idempotent under retry with a
