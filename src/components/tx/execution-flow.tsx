@@ -217,6 +217,7 @@ function CompleteReceipt({
               chars={8}
               format={formatWadAsPercent}
               unavailableReason="net APY unavailable — a rate did not resolve"
+              provenance="disclosure"
               className={slotClassName(simulation.netApyWad !== null, false, HERO_RAMP)}
             />
           )}
@@ -242,6 +243,7 @@ function CompleteReceipt({
                   chars={5}
                   format={formatHealthFactor}
                   unavailableReason="unavailable"
+                  provenance="disclosure"
                   className={slotClassName(true, false, HERO_RAMP)}
                 />
               )}
@@ -260,6 +262,7 @@ function CompleteReceipt({
                   chars={5}
                   format={formatHf}
                   unavailableReason="unavailable"
+                  provenance="disclosure"
                   className={slotClassName(true, false, ROW_RAMP)}
                 />
               )}
@@ -277,6 +280,7 @@ function CompleteReceipt({
               format={formatWadRatio}
               unavailableReason="ratio unavailable"
               inline
+              provenance="disclosure"
               className={slotClassName(simulation.liquidationRatioWad !== null, false, CONTEXT_RAMP)}
             />
           </p>

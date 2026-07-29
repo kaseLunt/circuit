@@ -187,6 +187,13 @@ describe("StepList — rows and the chroma budget", () => {
     expect(screen.getAllByText("Predicted").length).toBeGreaterThan(0);
     expect(screen.getAllByText("Attributed").length).toBeGreaterThan(0);
     expect(screen.getAllByLabelText("Copy transaction hash").length).toBeGreaterThan(0);
+    // Column slots use the PANEL surface (gif-capture defect): disclosure triggers
+    // (aria-expanded), never the floating tooltip a 320px clipping aside cannot fit.
+    const triggers = container.querySelectorAll("button[aria-expanded]");
+    expect(triggers.length).toBeGreaterThan(0);
+    fireEvent.click(triggers[0] as HTMLElement);
+    expect(container.querySelector('[role="tooltip"]')).toBeNull();
+    expect(screen.getByRole("group", { name: /provenance/i })).not.toBeNull();
   });
 
   it("a mined revert renders the T20 trichotomy and the T21 card, focus on recovery", () => {
@@ -334,6 +341,8 @@ describe("ExecutionFlow — the container and its narrator", () => {
     expect(screen.getAllByText("Predicted").length).toBeGreaterThan(0);
     expect(screen.getByText("no chain reading in the record")).not.toBeNull();
     expect(screen.getByText(/forked-mainnet demo/)).not.toBeNull();
+    // The receipt's evidence slots are disclosure-mode too (gif-capture defect).
+    expect(container.querySelectorAll("button[aria-expanded]").length).toBeGreaterThan(0);
   });
 });
 
