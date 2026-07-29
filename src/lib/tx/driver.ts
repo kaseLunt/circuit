@@ -219,6 +219,27 @@ interface ArmInput {
 /** Bounds mid-run transport recoveries so a half-broken network cannot loop the driver. */
 const MAX_RUN_RECOVERIES = 3;
 
+/**
+ * The session's own rate floor (registry `minExecuteIntervalMs`) fires during a HEALTHY
+ * sandbox walk — a local fork settles a simple step faster than the floor — and the
+ * refusal names its own remedy (`retryAfterMs`). The driver honours that stated wait
+ * and re-dispatches, keeping SPEC §3 step 6 one gesture ("Execute → all steps run")
+ * instead of a stop card asking a human to click Retry after single-digit milliseconds.
+ * The machine's own contract makes the re-dispatch legal: a transient refusal leaves
+ * the run state untouched, still `pending` (machine.test "run state untouched").
+ *
+ * Both bounds keep the absorption from becoming a livelock. A wait stated beyond
+ * `MAX_ABSORBED_RATE_WAIT_MS` (seconds mean something other than the floor is wrong),
+ * or more waits than a run can plausibly need, falls through to the designed T27
+ * rate-limited stop card exactly as before — the card is the exception path now, not
+ * the response to the floor working as configured.
+ */
+export const MAX_RATE_WAITS_PER_RUN = 32;
+export const MAX_ABSORBED_RATE_WAIT_MS = 5_000;
+
+const waitMs = (ms: number): Promise<void> =>
+  new Promise((resolve) => setTimeout(resolve, ms));
+
 const detailOf = (cause: unknown): string =>
   cause instanceof Error ? cause.message : String(cause);
 
@@ -524,6 +545,7 @@ export class SandboxDriver {
 
   private async runSteps(): Promise<void> {
     let recoveries = 0;
+    let rateWaits = 0;
     for (;;) {
       const phase = this.machine.phase;
       if (phase.kind === "ready") {
@@ -533,9 +555,10 @@ export class SandboxDriver {
         // re-dispatch is legal (D6) — and in sandbox there is no signature to wait for.
         if (!this.dispatch({ type: "advance", facts: NULL_FACTS })) return;
       } else if (phase.kind === "pending") {
-        const outcome = await this.settleStep(phase.stepIndex, recoveries);
+        const outcome = await this.settleStep(phase.stepIndex, recoveries, rateWaits);
         if (outcome === "stop") return;
         if (outcome === "recovered") recoveries += 1;
+        if (outcome === "rate-waited") rateWaits += 1;
       } else if (RECONCILE_PHASES.has(phase.kind)) {
         const outcome = await this.reconcileStep(recoveries);
         if (outcome === "stop") return;
@@ -549,7 +572,8 @@ export class SandboxDriver {
   private async settleStep(
     stepIndex: number,
     recoveries: number,
-  ): Promise<"continue" | "recovered" | "stop"> {
+    rateWaits: number,
+  ): Promise<"continue" | "recovered" | "stop" | "rate-waited"> {
     const key = this.sessionKey;
     const planHash = this.machine.planHash;
     if (key === null || planHash === null) {
@@ -619,6 +643,17 @@ export class SandboxDriver {
       return this.recoverRun("execute", new Error(result.refusal.reason), recoveries);
     }
     if (result.refusal.kind === "transport-refusal") {
+      if (
+        refusal.kind === "rate-limited" &&
+        refusal.retryAfterMs <= MAX_ABSORBED_RATE_WAIT_MS &&
+        rateWaits < MAX_RATE_WAITS_PER_RUN
+      ) {
+        // The floor working as configured: honour the refusal's own stated wait, then
+        // re-dispatch — the machine held the run at `pending`, so the loop re-enters
+        // this same step. Bounded above by the constants' rationale.
+        await waitMs(refusal.retryAfterMs);
+        return "rate-waited";
+      }
       this.setFault({ kind: "refusal", stage: "execute", refusal, retry: "run" });
       return "stop";
     }

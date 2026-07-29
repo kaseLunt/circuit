@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useId, useRef, useState, type KeyboardEvent } from "react";
+import { useEffect, useId, useLayoutEffect, useRef, useState, type KeyboardEvent } from "react";
 import {
   provenanceTrail,
   valueOf,
@@ -40,6 +40,13 @@ function cappedTrail(entries: readonly TrailEntry[]): {
 
 /** Nesting rendered as PADDING, so a wrapped continuation stays under its own entry. */
 const DEPTH_INDENT_REM = 0.75;
+
+/**
+ * Viewport collision gutter for the floating tooltip: one 0.5rem step from the spacing
+ * scale (the `--space-2`-class step — no new token). Evidence flush against the bezel
+ * reads as cropped; the box shifts left just enough to keep this gutter.
+ */
+const TOOLTIP_GUTTER_PX = 8;
 
 function TrailLines({ entries }: { entries: readonly TrailEntry[] }) {
   // Inherited echoes are dropped at the RENDER; the data still carries them.
@@ -169,6 +176,7 @@ export function SourcedValue<T>({
   const tooltipId = useId();
   const triggerRef = useRef<HTMLButtonElement>(null);
   const panelRef = useRef<HTMLSpanElement>(null);
+  const tooltipBoxRef = useRef<HTMLSpanElement>(null);
   const [open, setOpen] = useState(false);
   const [entered, setEntered] = useState(value !== null);
   const [wasNull, setWasNull] = useState(value === null);
@@ -187,6 +195,20 @@ export function SourcedValue<T>({
     const frame = requestAnimationFrame(() => setEntered(true));
     return () => cancelAnimationFrame(frame);
   }, [value, entered]);
+
+  // Measurement-driven positioning, written to the node directly: this is layout, not
+  // state — a setState here would re-render for a value React never reads, and the
+  // shift must land before paint. Extends the existing tooltip (T35: no second
+  // evidence surface); the box keeps the gutter instead of kissing the bezel.
+  useLayoutEffect(() => {
+    if (!open) return;
+    const node = tooltipBoxRef.current;
+    if (node === null) return;
+    node.style.left = "0px";
+    const rect = node.getBoundingClientRect();
+    const overflow = rect.right + TOOLTIP_GUTTER_PX - window.innerWidth;
+    if (overflow > 0) node.style.left = `${-overflow}px`;
+  }, [open]);
 
   if (value === null) {
     if (pending) return <SkeletonValue label={label} chars={chars} className={className} />;
@@ -250,6 +272,7 @@ export function SourcedValue<T>({
       </button>
       {open ? (
         <span
+          ref={tooltipBoxRef}
           id={tooltipId}
           role="tooltip"
           className={cn(

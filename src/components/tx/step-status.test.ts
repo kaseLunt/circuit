@@ -16,6 +16,7 @@ import type { ExecutionEvent, SandboxStepResult } from "../../lib/execution/type
 import {
   approveConsumerOf,
   approveSpenderAddressOf,
+  executingBlockIdOf,
   plannedAmountOf,
   stepRowStatusOf,
 } from "./step-status";
@@ -240,6 +241,41 @@ describe("approveSpenderAddressOf — non-approve shapes", () => {
     const none = plan.steps.find((step) => step.amount.kind === "none");
     if (none === undefined) throw new Error("fixture");
     expect(approveSpenderAddressOf({ ...none, args: [] })).toBeNull();
+  });
+});
+
+describe("executingBlockIdOf — the T26 frame appears during executing(k) and only then", () => {
+  it("maps the in-flight step to its block and every other phase to null", () => {
+    expect(executingBlockIdOf(createExecutionMachine({ mode: "sandbox" }))).toBeNull();
+    const ready = readyMachine();
+    expect(executingBlockIdOf(ready)).toBeNull();
+    const pending = ok(ready, { type: "execute", facts: NULL_FACTS });
+    if (pending.phase.kind !== "pending") throw new Error("fixture");
+    const activeBlock = plan.steps[0]?.blockId;
+    expect(executingBlockIdOf(pending)).toBe(activeBlock);
+    const settled = ok(pending, { type: "step-result", result: attributedResult(0) });
+    expect(executingBlockIdOf(settled)).toBeNull();
+    const advanced = ok(settled, { type: "advance", facts: NULL_FACTS });
+    expect(executingBlockIdOf(advanced)).toBe(plan.steps[1]?.blockId);
+  });
+
+  it("keeps the frame through the live watch states and drops it at the halt family", () => {
+    let live = createExecutionMachine({ mode: "live", tolerance: SANDBOX_OUTPUT_TOLERANCE });
+    live = ok(live, { type: "simulate" });
+    live = ok(live, {
+      type: "plan-ready",
+      plan,
+      planHash: PLAN_HASH,
+      address: `0x${"aa".repeat(20)}` as Hex,
+    });
+    live = ok(live, { type: "execute", facts: { ...NULL_FACTS, nonce: 1n } });
+    expect(executingBlockIdOf(live)).toBe(plan.steps[0]?.blockId);
+    live = ok(live, { type: "signed", txHash: `0x${"11".repeat(32)}` as Hex });
+    expect(executingBlockIdOf(live)).toBe(plan.steps[0]?.blockId);
+    const timedOut = ok(live, { type: "tx-timeout" });
+    expect(executingBlockIdOf(timedOut)).toBe(plan.steps[0]?.blockId);
+    const halted = ok(live, { type: "wallet-changed" });
+    expect(executingBlockIdOf(halted)).toBeNull();
   });
 });
 

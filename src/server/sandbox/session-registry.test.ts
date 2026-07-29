@@ -411,6 +411,34 @@ describe("clock-rollback resilience (Codex round-5)", () => {
     expect(registry.beginExecution(session).ok).toBe(true);
     registry.endExecution(session);
   });
+
+  it("(c) retryAfterMs crosses the wire as an integer even off a fractional monotonic clock", async () => {
+    const monoMs = { value: 0 };
+    const registry = createSessionRegistry({
+      maxSessions: 4,
+      ttlMs: 60_000,
+      maxTxPerSession: 8,
+      minExecuteIntervalMs: 250,
+      now: () => 1_000_000,
+      monotonicNow: () => monoMs.value,
+    });
+    const created = await registry.create(async () => fakeFork());
+    if (!created.ok) throw new Error("creation refused");
+    expect(registry.beginExecution(created.session).ok).toBe(true);
+    registry.endExecution(created.session);
+
+    // performance.now() is fractional, and the wire types retryAfterMs as a
+    // non-negative INTEGER — the client's strict parser refuses anything else. Found
+    // by the §3 steps 5-7 e2e gate: 6.697200000053272 stopped a run as malformed-wire.
+    monoMs.value = 243.3028;
+    const tooSoon = registry.beginExecution(created.session);
+    expect(tooSoon.ok).toBe(false);
+    if (tooSoon.ok) throw new Error("unreachable");
+    if (tooSoon.refusal.kind !== "rate-limited") throw new Error("expected rate-limited");
+    expect(Number.isInteger(tooSoon.refusal.retryAfterMs)).toBe(true);
+    // Ceil, never round: the stated wait is never understated. 250 − 243.3028 → 7.
+    expect(tooSoon.refusal.retryAfterMs).toBe(7);
+  });
 });
 
 describe("execution gates", () => {

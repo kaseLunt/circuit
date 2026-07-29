@@ -99,6 +99,27 @@ export function stepRowStatusOf(machine: ExecutionMachine, stepIndex: number): S
 }
 
 /**
+ * The canvas's executing frame (T26/T1, P2 site five): during `executing(k)` — the
+ * in-flight substates of §2.1 — the active step's BLOCK carries `border-primary` on the
+ * canvas; at every other phase the frame is absent. Mapped here from the machine's own
+ * phase through the frozen plan, so the canvas and the column can never disagree about
+ * which block is executing.
+ */
+export function executingBlockIdOf(machine: ExecutionMachine): string | null {
+  const phase = machine.phase;
+  if (machine.plan === null) return null;
+  if (
+    phase.kind === "awaiting-signature" ||
+    phase.kind === "pending" ||
+    phase.kind === "timeout" ||
+    phase.kind === "attributing"
+  ) {
+    return machine.plan.steps[phase.stepIndex]?.blockId ?? null;
+  }
+  return null;
+}
+
+/**
  * What the amount slot of an UNSETTLED row may honestly show (T13's spec-or-resolved
  * rule): the spec's own provenanced figure where the plan carries one, the "bound to
  * step {j}" statement where the amount is a future attribution, and nothing at all for

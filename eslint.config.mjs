@@ -275,7 +275,7 @@ const eslintConfig = [
     // which the runner parses from stdout — so this one file writes to the
     // console by design (the B5 pattern: a sanctioned writer is declared here,
     // never dodged via process.stdout).
-    files: ["e2e/demo-script.spec.ts"],
+    files: ["e2e/demo-script.spec.ts", "e2e/demo-script-fork.spec.ts"],
     rules: { "no-console": "off" },
   },
   {
