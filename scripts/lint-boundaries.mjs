@@ -70,6 +70,21 @@ const EXPECTED = {
     ["wallet-mints-provenance", "no-restricted-imports"],
     ["wallet-imports-server", "no-restricted-imports"],
   ],
+  // Codex D-011 F5 routes: the repo-wide wagmi confinement (a) and the wallet boundary's
+  // value-imports-of-core-money ban (b). The (b) fixture also carries a LEGAL type-only
+  // import line that must NOT fire — the exact-multiset check makes its silence an
+  // assertion too.
+  "tests/lint/fixtures/app/imports-wagmi.ts": [
+    ["app-imports-wagmi", "no-restricted-imports"],
+    ["app-imports-wagmi-subpath", "no-restricted-imports"],
+    ["app-imports-wagmi-scoped", "no-restricted-imports"],
+  ],
+  "tests/lint/fixtures/wallet/imports-core-money.ts": [
+    ["wallet-imports-core-plan", "@typescript-eslint/no-restricted-imports"],
+    ["wallet-imports-core-risk", "@typescript-eslint/no-restricted-imports"],
+    ["wallet-imports-core-borrow-limit", "@typescript-eslint/no-restricted-imports"],
+    ["wallet-imports-core-rates", "@typescript-eslint/no-restricted-imports"],
+  ],
   "tests/lint/fixtures/execution/impure.ts": [
     ["react", "no-restricted-imports"],
     ["react-dom", "no-restricted-imports"],

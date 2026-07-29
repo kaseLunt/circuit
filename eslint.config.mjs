@@ -147,6 +147,35 @@ const eslintConfig = [
     },
   },
   {
+    // Codex D-011 F5(a): wagmi — the injected-provider VALUE surface — is confined to the
+    // two boundary directories, `src/lib/wallet/**` (the boundary itself) and
+    // `src/components/wallet/**` (its rendering surface). Everything else in src/ carries
+    // this default ban; the two directories are un-banned by the `ignores` below rather
+    // than by a permissive later block, so a new directory starts BANNED.
+    //
+    // Ordering is load-bearing: flat config REPLACES a rule's options per file, so the
+    // specialized blocks below (core/, server/, execution/) each restate their own wagmi
+    // ban inside their fuller `no-restricted-imports` sets and win for their files. This
+    // catch-all exists for every OTHER src/ file — components, app, lib — which previously
+    // had no wagmi rule at all.
+    files: ["src/**/*.{ts,tsx}", "tests/lint/fixtures/app/**/*.{ts,tsx}"],
+    ignores: ["src/lib/wallet/**", "src/components/wallet/**"],
+    rules: {
+      "no-restricted-imports": [
+        "error",
+        {
+          patterns: [
+            {
+              group: ["wagmi", "wagmi/*", "@wagmi/*"],
+              message:
+                "wagmi is confined to the wallet boundary (src/lib/wallet, src/components/wallet) — the injected provider is transport, and no other surface may touch it (treatment §1.1, seam A1; Codex D-011 F5).",
+            },
+          ],
+        },
+      ],
+    },
+  },
+  {
     // W07 treatment §1.2 / A19, the money↔transport quarantine, scoped to the surface this
     // commit creates. `src/lib/execution/` is the client-side execution driver; it may read
     // the chain-record facet of a receipt, so nothing in `core/` may depend on it without
@@ -254,6 +283,26 @@ const eslintConfig = [
               group: ["**/server/**"],
               message:
                 "src/lib/wallet must not import server modules — chain reads arrive through the injected seam source, never by reaching across the boundary (treatment §1.1).",
+            },
+          ],
+        },
+      ],
+      // Codex D-011 F5(b): the wallet boundary may reference core money-math TYPES (the
+      // gate's `PlanSuccess` parameter is one) but never its VALUES — a value import would
+      // let wallet code run money-math over transport facts. The typescript-eslint variant
+      // exists precisely for this split: `allowTypeImports` admits `import type` and
+      // nothing else. The standing's plan hash is computed OUTSIDE the wallet module (the
+      // composer mints it, the gate compares opaque hashes), so no execution value-route
+      // opens either.
+      "@typescript-eslint/no-restricted-imports": [
+        "error",
+        {
+          patterns: [
+            {
+              group: ["**/core/plan", "**/core/risk", "**/core/borrow-limit", "**/core/rates"],
+              allowTypeImports: true,
+              message:
+                "src/lib/wallet may import core money-math types only — compute money values in the composer and pass results in (Codex D-011 F5b).",
             },
           ],
         },

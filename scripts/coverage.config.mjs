@@ -98,6 +98,16 @@ export const coverageConfig = {
     // Deliberately NOT enrolled: config.ts/seam.ts/wallet-provider.tsx (connector I/O and
     // scenario thread-through, proven in live-gating.test.tsx and the e2e beats).
     "src/lib/wallet/gate.ts",
+    // W08 remediation (Codex D-011 F2): the live-capture wire codec, the wallet router,
+    // and the composer's live-simulation decisions — each shipped and tested this round.
+    // Deliberately NOT enrolled: src/lib/live/live-transport.ts (tRPC client composition —
+    // I/O thread-through per D10, the src/lib/tx/transport.ts precedent),
+    // src/lib/live/demo-capture.ts (scenario thread-through, the seam.ts precedent, proven
+    // in live-gating.test.tsx), and src/server/chain/live-readiness.ts (chain I/O end to
+    // end, proven where honest — the fork e2e suite against a real upstream).
+    "src/lib/live/snapshot-wire.ts",
+    "src/server/trpc/wallet-router.ts",
+    "src/components/composer/live-simulation.ts",
     "src/lib/tx/driver.ts",
     "src/lib/tx/provenance.ts",
     "src/components/tx/step-status.ts",
