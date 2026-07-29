@@ -69,3 +69,68 @@ jobs:
       - run: npm run test:fork
         env:
           FORK_RPC_URL: ${{ secrets.FORK_RPC_URL }}
+
+  # SPEC §3 steps 4-7 — the execution beats — in the browser against a real sandbox
+  # session. Rides the fork job's secret pattern and fails closed without it (external
+  # PRs keep `ci` and `e2e` as their green gates). The topology mirrors the local
+  # harness: one pristine upstream anvil at the pinned block (the dedicated-upstream
+  # pattern the fork suite adopted when it retired the historical-tag wedge), with the
+  # PRODUCTION server's session service forking per-session from it. The suite's own
+  # webServer builds and serves the production bundle (e2e/playwright.fork.config.ts), so
+  # there is deliberately no separate build step here to drift from it.
+  e2e-fork:
+    needs: fork
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      # Anvil serves twice here — the pinned upstream below AND the per-session forks the
+      # server spawns — pinned to the same toolchain version as the fork job.
+      - uses: foundry-rs/foundry-toolchain@v1
+        with:
+          version: v1.7.1
+      - run: npm ci
+      - run: npx playwright install --with-deps chromium
+      # The pin and its hash come from the committed reads log — never retyped here —
+      # and fork identity is verified by hash before anything runs, exactly as the fork
+      # suite's global setup does: a fork that silently landed elsewhere would measure
+      # every downstream assertion against the wrong history.
+      - name: boot the pristine upstream anvil at the pin
+        env:
+          FORK_RPC_URL: ${{ secrets.FORK_RPC_URL }}
+        run: |
+          if [ -z "$FORK_RPC_URL" ]; then
+            echo "FORK_RPC_URL secret is required and must be archive-capable (W03)"; exit 1
+          fi
+          PIN=$(node -p "JSON.parse(require('fs').readFileSync('docs/protocol-matrix-reads.json','utf8')).meta.pinned_block.number")
+          HASH=$(node -p "JSON.parse(require('fs').readFileSync('docs/protocol-matrix-reads.json','utf8')).meta.pinned_block.hash")
+          anvil --fork-url "$FORK_RPC_URL" --fork-block-number "$PIN" \
+            --compute-units-per-second 100 --retries 10 --fork-retry-backoff 2000 \
+            --host 127.0.0.1 --port 8547 > /tmp/upstream-anvil.log 2>&1 &
+          for i in $(seq 1 120); do
+            if curl -sf -X POST http://127.0.0.1:8547 -H 'content-type: application/json' \
+              -d '{"jsonrpc":"2.0","id":1,"method":"eth_blockNumber","params":[]}' > /dev/null; then
+              break
+            fi
+            sleep 1
+          done
+          GOT=$(curl -s -X POST http://127.0.0.1:8547 -H 'content-type: application/json' \
+            -d "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"eth_getBlockByNumber\",\"params\":[\"0x$(printf '%x' "$PIN")\",false]}" \
+            | node -p "JSON.parse(require('fs').readFileSync(0,'utf8')).result?.hash ?? 'null'")
+          if [ "$GOT" != "$HASH" ]; then
+            echo "fork identity mismatch at block $PIN: got $GOT, expected $HASH"
+            tail -50 /tmp/upstream-anvil.log
+            exit 1
+          fi
+      - run: npm run test:e2e:fork
+        env:
+          SANDBOX_FORK_URL: http://127.0.0.1:8547
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: playwright-fork-failure-trace
+          path: test-results/
+          retention-days: 7

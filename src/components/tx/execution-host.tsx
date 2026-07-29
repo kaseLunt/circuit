@@ -50,6 +50,12 @@ export interface ExecutionHostProps {
   readonly snapshot: SnapshotState;
   readonly simulation: SimulationResult | null;
   readonly simulationPending: boolean;
+  /**
+   * An externally owned driver (the composer body creates one so the canvas can read
+   * the executing step for its T26 frame). Omitted, the host composes its own from the
+   * seams below.
+   */
+  readonly driver?: SandboxDriver;
   /** Test seams; production uses the tRPC transport and localStorage. */
   readonly transport?: SandboxTransport;
   readonly storage?: PointerStorage;
@@ -66,6 +72,11 @@ const NO_STORAGE: PointerStorage = {
 function defaultStorage(): PointerStorage {
   if (typeof window === "undefined") return NO_STORAGE;
   return localPointerStorage(window.localStorage);
+}
+
+/** The production driver composition, for callers that own the driver (composer body). */
+export function createDefaultSandboxDriver(): SandboxDriver {
+  return new SandboxDriver({ transport: trpcSandboxTransport(), storage: defaultStorage() });
 }
 
 /**
@@ -115,6 +126,7 @@ export function ExecutionHost({
   snapshot,
   simulation,
   simulationPending,
+  driver: externalDriver,
   transport,
   storage,
   now,
@@ -124,6 +136,7 @@ export function ExecutionHost({
 
   const [driver] = useState(
     () =>
+      externalDriver ??
       new SandboxDriver({
         transport: transport ?? trpcSandboxTransport(),
         storage: storage ?? defaultStorage(),
@@ -292,6 +305,7 @@ export function ExecutionHost({
       <PanelFade id="execution">
         <ExecutionFlow
           plan={machinePlan}
+          planActor={snapshot.snapshot.user.address}
           snapshot={snap}
           simulation={runPinned === null ? null : runPinned.simulation}
           checkpoints={runPinned === null ? null : runPinned.checkpoints}

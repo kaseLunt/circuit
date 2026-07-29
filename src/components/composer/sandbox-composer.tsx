@@ -44,7 +44,15 @@
  * partial snapshot worth rendering.
  */
 
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+  useSyncExternalStore,
+} from "react";
 import { CANVAS_ORIGIN, StrategyCanvas } from "../canvas/canvas";
 import { ComposerStoreProvider, useComposerStore } from "../../app/store/composer-provider";
 import type { BlockPosition } from "../../app/store/composer-store";
@@ -52,7 +60,8 @@ import { sandboxSnapshot } from "../../lib/recorded-reads/sandbox-snapshot";
 import { readShareToken } from "../../lib/share/encode";
 import { describeArrivalFailure, type ShareRefusal } from "../../lib/share/share-url";
 import { logError } from "../../lib/log";
-import { ExecutionHost } from "../tx/execution-host";
+import { ExecutionHost, createDefaultSandboxDriver } from "../tx/execution-host";
+import { executingBlockIdOf } from "../tx/step-status";
 import { flagshipStore, resolveArrival, type Arrival } from "./arrival";
 import { ComposerShell } from "./composer-shell";
 import { SandboxChrome } from "./sandbox-chrome";
@@ -72,6 +81,13 @@ export function loadSandboxSnapshot(): SnapshotState {
 function ComposerBody({ snapshot }: { readonly snapshot: SnapshotState }) {
   const { simulation, simulationPending } = useSimulation(snapshot);
 
+  // The driver lives HERE so both consumers of one machine state can read it: the host
+  // (the execution column) and the canvas (the T26 executing frame — the active step's
+  // block carries border-primary during executing(k), P2 site five).
+  const [driver] = useState(createDefaultSandboxDriver);
+  const driverSnap = useSyncExternalStore(driver.subscribe, driver.snapshot, driver.snapshot);
+  const executingBlockId = executingBlockIdOf(driverSnap.machine);
+
   // Filled by the canvas once it has a viewport (see StrategyCanvasProps.dropPositionRef).
   // Read only inside the shell's keyboard handler, so the composer does not re-render when
   // the user pans.
@@ -88,6 +104,7 @@ function ComposerBody({ snapshot }: { readonly snapshot: SnapshotState }) {
           simulation={simulation}
           simulationPending={simulationPending}
           dropPositionRef={dropPosition}
+          executingBlockId={executingBlockId}
         />
       }
       simulation={simulation}
@@ -97,6 +114,7 @@ function ComposerBody({ snapshot }: { readonly snapshot: SnapshotState }) {
           snapshot={snapshot}
           simulation={simulation}
           simulationPending={simulationPending}
+          driver={driver}
         />
       }
       resolveDropPosition={resolveDropPosition}

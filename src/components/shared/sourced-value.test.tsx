@@ -239,3 +239,35 @@ describe("SourcedValue — provenance tooltip", () => {
     expect(screen.queryByRole("tooltip")).toBeNull();
   });
 });
+
+describe("tooltip viewport gutter (taste finding 3)", () => {
+  it("shifts an overflowing tooltip left so evidence keeps the gutter, and leaves fitting ones alone", async () => {
+    const original = Element.prototype.getBoundingClientRect;
+    // jsdom rects are all zeros; simulate a tooltip whose right edge crosses the bezel.
+    Element.prototype.getBoundingClientRect = function measure(this: Element) {
+      const rect = original.call(this);
+      if (this.getAttribute("role") === "tooltip") {
+        return { ...rect, right: window.innerWidth + 40, toJSON: () => "" } as DOMRect;
+      }
+      return rect;
+    };
+    try {
+      render(
+        <SourcedValue
+          value={entered(42n)}
+          pending={false}
+          label="Gutter probe"
+          chars={4}
+          format={(value: bigint) => value.toString()}
+        />,
+      );
+      fireEvent.click(screen.getByRole("button", { name: "42" }));
+      const tooltip = await screen.findByRole("tooltip");
+      // Shifted left by the overflow plus the 8px spacing-scale gutter.
+      expect(tooltip.style.left).toBe("-48px");
+    } finally {
+      Element.prototype.getBoundingClientRect = original;
+    }
+  });
+});
+

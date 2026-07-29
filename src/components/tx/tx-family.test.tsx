@@ -105,6 +105,7 @@ const RECOVER = { label: "Re-simulate", onAct: () => undefined, gateReason: null
 
 const flowProps = {
   plan,
+  planActor: snapshot.user.address,
   simulation: null,
   checkpoints: null,
   simulatedAtBlock: snapshot.block,
@@ -826,6 +827,11 @@ describe("PreSignReview — the T13 call surface (Codex fix 5)", () => {
     }
     // Spec-or-resolved honesty: unresolved step-output amounts state their binding.
     expect(list.textContent).toContain("bound to the attributed output of step");
+    // The actor slot takes the same grammar (taste finding 1): named in the signature,
+    // bound by the line beneath — the sentinel address never prints raw.
+    expect(list.textContent).not.toContain(snapshot.user.address);
+    expect(list.textContent).toContain("actor: bound to the session account at execution");
+    expect(screen.getAllByText(/\(.*actor.*\)/).length).toBeGreaterThan(0);
     // The block flow row through the SourcedValue machinery.
     expect(list.textContent).toContain("→");
     // Risk-changing steps carry the ledger checkpoint's after-this-step line.
@@ -972,6 +978,33 @@ describe("restore is bound to the document generation (thread 019fa749 finding 2
     expect(document.querySelector('aside[aria-label="Execution"]')).toBeNull();
     expect(document.querySelector('aside[aria-label="Simulation"]')).not.toBeNull();
     expect(sandbox.calls.executeStep.length).toBe(stepCalls);
+  });
+});
+
+describe("the executing frame's seam (taste finding 2)", () => {
+  it("ExecutionHost adopts an externally owned driver — one machine, two consumers", async () => {
+    const sandbox = scriptedSandbox();
+    const driver = new SandboxDriver({
+      transport: sandbox.transport,
+      storage: memoryStorage(),
+      now: () => 1_000,
+    });
+    await driver.arm({ plan, token });
+    render(
+      <ComposerStoreProvider store={flagshipStore()}>
+        <ExecutionHost
+          snapshot={{ status: "ready", snapshot }}
+          simulation={null}
+          simulationPending={false}
+          driver={driver}
+          now={() => 1_000}
+        />
+      </ComposerStoreProvider>,
+    );
+    // The host renders the externally armed machine's state — the same driver whose
+    // snapshot the composer body maps to the canvas's executingBlockId prop.
+    expect(screen.getByRole("button", { name: "Execute" })).not.toBeNull();
+    expect(document.querySelector('aside[aria-label="Execution"]')).not.toBeNull();
   });
 });
 

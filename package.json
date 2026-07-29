@@ -16,7 +16,8 @@
     "test": "vitest run",
     "test:coverage": "vitest run --coverage",
     "test:fork": "vitest run --config vitest.fork.config.ts",
-    "test:e2e": "playwright test"
+    "test:e2e": "playwright test",
+    "test:e2e:fork": "playwright test --config=e2e/playwright.fork.config.ts"
   },
   "dependencies": {
     "@radix-ui/react-slot": "^1.3.3",

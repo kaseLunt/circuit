@@ -45,6 +45,8 @@ const CONTEXT_RAMP: SlotRamp = {
 
 export interface ExecutionFlowProps {
   readonly plan: PlanSuccess;
+  /** The plan-build actor, for the review's actor-slot grammar (taste finding 1). */
+  readonly planActor: string;
   readonly snapshot: DriverSnapshot;
   /** The run-pinned simulation, for the T23 receipt's PREDICTED column (Codex fix 1). */
   readonly simulation: SimulationResult | null;
@@ -296,6 +298,7 @@ function counterOf(phase: ExecutionPhase, stepCount: number): string | null {
 
 export function ExecutionFlow({
   plan,
+  planActor,
   snapshot,
   simulation,
   checkpoints,
@@ -353,6 +356,7 @@ export function ExecutionFlow({
       {phase.kind === "ready" ? (
         <PreSignReview
           plan={plan}
+          planActor={planActor}
           tolerance={machine.tolerance}
           checkpoints={checkpoints}
           session={session}

@@ -18,6 +18,8 @@ import { SANDBOX_OUTPUT_TOLERANCE, toleranceWeiFor } from "../execution/toleranc
 import { stepResultFactOf, type WireStepResult } from "../execution/resume";
 import { stepResultClaimMismatch } from "../execution/output-claims";
 import {
+  MAX_ABSORBED_RATE_WAIT_MS,
+  MAX_RATE_WAITS_PER_RUN,
   SandboxDriver,
   encodePointer,
   localPointerStorage,
@@ -329,6 +331,66 @@ describe("execute", () => {
     await driver.retry();
     expect(driver.snapshot().machine.phase.kind).toBe("complete");
     expect(driver.snapshot().fault).toBeNull();
+  });
+
+  it("absorbs a rate-limited refusal for its stated wait and completes the run unassisted", async () => {
+    let limited = false;
+    const sandbox = scriptedSandbox({
+      onExecuteStep: (index) => {
+        if (index === 1 && !limited) {
+          limited = true;
+          return { ok: false, refusal: { kind: "rate-limited", retryAfterMs: 1 } };
+        }
+        return undefined;
+      },
+    });
+    const { driver } = driverWith(sandbox);
+    await driver.arm(armInput);
+    await driver.execute();
+    const snap = driver.snapshot();
+    // SPEC §3 step 6 stays one gesture: the floor's refusal named its own remedy and
+    // the driver honoured it — no stop card, no human Retry for a stated 1ms wait.
+    expect(snap.machine.phase.kind).toBe("complete");
+    expect(snap.fault).toBeNull();
+    // One extra transport call: the refused attempt, then the honoured re-dispatch.
+    expect(sandbox.calls.executeStep.length).toBe(plan.steps.length + 1);
+  });
+
+  it("stops with the designed card when the stated wait exceeds the absorption cap", async () => {
+    const sandbox = scriptedSandbox({
+      onExecuteStep: (index) =>
+        index === 1
+          ? {
+              ok: false,
+              refusal: { kind: "rate-limited", retryAfterMs: MAX_ABSORBED_RATE_WAIT_MS + 1 },
+            }
+          : undefined,
+    });
+    const { driver } = driverWith(sandbox);
+    await driver.arm(armInput);
+    await driver.execute();
+    // A wait stated in seconds is not the floor working — it is the T27 designed stop,
+    // with the run held at pending so Retry can continue it.
+    expect(driver.snapshot().fault).toMatchObject({ kind: "refusal", retry: "run" });
+    expect(driver.snapshot().machine.phase.kind).toBe("pending");
+    expect(sandbox.calls.executeStep.length).toBe(2);
+  });
+
+  it("bounds absorbed waits per run — a floor that never opens lands on the designed card", async () => {
+    const sandbox = scriptedSandbox({
+      onExecuteStep: (index) =>
+        index === 1
+          ? { ok: false, refusal: { kind: "rate-limited", retryAfterMs: 1 } }
+          : undefined,
+    });
+    const { driver } = driverWith(sandbox);
+    await driver.arm(armInput);
+    await driver.execute();
+    expect(driver.snapshot().fault).toMatchObject({ kind: "refusal", retry: "run" });
+    expect(driver.snapshot().machine.phase.kind).toBe("pending");
+    // Step 0's call, MAX_RATE_WAITS_PER_RUN absorbed attempts on step 1, then the
+    // attempt that fell through to the card: the absorption is provably bounded.
+    expect(sandbox.calls.executeStep.length).toBe(2 + MAX_RATE_WAITS_PER_RUN);
   });
 
   it("recovers a lost executeStep response by discovery, never by assuming (D6)", async () => {

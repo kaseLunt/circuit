@@ -43,6 +43,8 @@ const WARN_RAMP: SlotRamp = { resolved: "text-xs text-warning", size: "text-xs" 
 export interface PreSignReviewProps {
   /** The frozen plan the machine holds — the same reference, never a describing string (T33). */
   readonly plan: PlanSuccess;
+  /** The plan-build actor (`snapshot.user.address`) — names the actor slot in signatures. */
+  readonly planActor: string;
   readonly tolerance: OutputTolerance;
   /** The frozen plan's own risk walk, pinned at arm alongside the plan (§0: one prediction home). */
   readonly checkpoints: readonly RiskCheckpoint[] | null;
@@ -55,12 +57,30 @@ export interface PreSignReviewProps {
   readonly executeGateReason: string | null;
 }
 
-/** Value args are identifiers and codes (addresses, enums); the money quantity renders
- *  on its own line through SourcedValue, never inline in the signature. */
-function argTextOf(step: TransactionStep): string {
+/**
+ * Value args are identifiers and codes (addresses, enums); the money quantity renders
+ * on its own line through SourcedValue, never inline in the signature. The plan-build
+ * actor gets the same slot grammar as `amount` (taste verdict finding 1): the sandbox
+ * sentinel address would read as a bug or a fake, so the slot names WHAT it is and the
+ * line below states what it binds to.
+ */
+function argTextOf(step: TransactionStep, planActor: string): string {
+  const actor = planActor.toLowerCase();
   return step.args
-    .map((arg) => (arg.kind === "amount" ? "amount" : String(arg.value)))
+    .map((arg) => {
+      if (arg.kind === "amount") return "amount";
+      if (typeof arg.value === "string" && arg.value.toLowerCase() === actor) return "actor";
+      return String(arg.value);
+    })
     .join(", ");
+}
+
+function stepTouchesActor(step: TransactionStep, planActor: string): boolean {
+  const actor = planActor.toLowerCase();
+  return step.args.some(
+    (arg) =>
+      arg.kind === "value" && typeof arg.value === "string" && arg.value.toLowerCase() === actor,
+  );
 }
 
 function AmountLine({ plan, step }: { readonly plan: PlanSuccess; readonly step: TransactionStep }) {
@@ -179,11 +199,13 @@ function RiskLine({
 function StepReview({
   plan,
   step,
+  planActor,
   showFlow,
   checkpoint,
 }: {
   readonly plan: PlanSuccess;
   readonly step: TransactionStep;
+  readonly planActor: string;
   readonly showFlow: boolean;
   readonly checkpoint: RiskCheckpoint | null;
 }) {
@@ -193,9 +215,14 @@ function StepReview({
       {showFlow ? <FlowLine plan={plan} step={step} /> : null}
       <p className="mt-0.5 break-all font-mono text-label text-muted-foreground">{step.to}</p>
       <p className="break-all font-mono text-xs text-muted-foreground">
-        {`${step.functionName}(${argTextOf(step)})`}
+        {`${step.functionName}(${argTextOf(step, planActor)})`}
       </p>
       <AmountLine plan={plan} step={step} />
+      {stepTouchesActor(step, planActor) ? (
+        <p className="text-xs text-muted-foreground">
+          actor: bound to the session account at execution
+        </p>
+      ) : null}
       {checkpoint === null ? null : <RiskLine step={step} checkpoint={checkpoint} />}
     </li>
   );
@@ -203,6 +230,7 @@ function StepReview({
 
 export function PreSignReview({
   plan,
+  planActor,
   tolerance,
   checkpoints,
   session,
@@ -249,30 +277,39 @@ export function PreSignReview({
           <span className="font-mono text-xs">{`${simulatedAtBlock}`}</span>
           {ageSeconds === null ? "" : ` · ${formatDuration(ageSeconds)} ago`}
         </p>
+        {/* Operand groups are no-break spans (taste verdict finding 4): the formula
+            wraps at prose boundaries only — never "max(" dangling at a line end. */}
         <p className="text-xs text-muted-foreground">
-          {"Each measured output must land within ± max("}
-          <SourcedValue
-            value={bounds.absWei}
-            pending={false}
-            label="Tolerance absolute floor"
-            chars={1}
-            format={(value) => `${formatUnits(value, 0, 0)} wei`}
-            unavailableReason="unavailable"
-            inline
-            className={slotClassName(true, false, CONTEXT_RAMP)}
-          />
-          {", predicted ÷ "}
-          <SourcedValue
-            value={bounds.relPow}
-            pending={false}
-            label="Tolerance relative divisor"
-            chars={9}
-            format={(value) => formatUnits(value, 0, 0)}
-            unavailableReason="unavailable"
-            inline
-            className={slotClassName(true, false, CONTEXT_RAMP)}
-          />
-          {") of its prediction, or execution halts."}
+          {"Each measured output must land within "}
+          <span className="whitespace-nowrap">
+            {"± max("}
+            <SourcedValue
+              value={bounds.absWei}
+              pending={false}
+              label="Tolerance absolute floor"
+              chars={1}
+              format={(value) => `${formatUnits(value, 0, 0)} wei`}
+              unavailableReason="unavailable"
+              inline
+              className={slotClassName(true, false, CONTEXT_RAMP)}
+            />
+            {","}
+          </span>{" "}
+          <span className="whitespace-nowrap">
+            {"predicted ÷ "}
+            <SourcedValue
+              value={bounds.relPow}
+              pending={false}
+              label="Tolerance relative divisor"
+              chars={9}
+              format={(value) => formatUnits(value, 0, 0)}
+              unavailableReason="unavailable"
+              inline
+              className={slotClassName(true, false, CONTEXT_RAMP)}
+            />
+            {")"}
+          </span>
+          {" of its prediction, or execution halts."}
         </p>
         {session === null ? null : (
           <p className="text-xs text-muted-foreground">
@@ -300,6 +337,7 @@ export function PreSignReview({
               key={step.id}
               plan={plan}
               step={step}
+              planActor={planActor}
               showFlow={showFlow}
               checkpoint={checkpoint}
             />

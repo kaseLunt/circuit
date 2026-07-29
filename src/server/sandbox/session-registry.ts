@@ -672,11 +672,18 @@ export function createSessionRegistry(
         session.lastExecuteAtMono !== null &&
         at - session.lastExecuteAtMono < config.minExecuteIntervalMs
       ) {
+        // Ceiled to an integer: the monotonic clock is fractional (performance.now),
+        // and the wire contract types retryAfterMs as a non-negative INTEGER — the
+        // client's strict parser refuses a fractional value as malformed-wire, which
+        // turned this refusal into a dead stop mid-run (found by the §3 steps 5-7
+        // e2e gate). Ceil, never round: "retry after" must not understate the wait.
         return {
           ok: false,
           refusal: {
             kind: "rate-limited",
-            retryAfterMs: config.minExecuteIntervalMs - (at - session.lastExecuteAtMono),
+            retryAfterMs: Math.ceil(
+              config.minExecuteIntervalMs - (at - session.lastExecuteAtMono),
+            ),
           },
         };
       }
