@@ -177,6 +177,37 @@ test.describe("SPEC §3 step 7 — connect a wallet, live gating", () => {
     await expect(armButton(page)).toHaveAttribute("aria-disabled", "true");
   });
 
+  test("clears the gate with a scenario-fed live simulation, then regates on plan drift (F2/F3)", async ({
+    page,
+  }) => {
+    // Hermetic variant of the F2 clearing beat: the demo capture source serves the
+    // committed reads log as the wallet's pinned chain state, so the WHOLE gate walk —
+    // connect → simulate → standing → clear → drift → regate — runs with no chain and no
+    // secrets. The fork suite's sibling beat is the authoritative proof of the real
+    // wallet-router capture; this one keeps the walk green on every external PR.
+    await openComposer(page);
+    await page.getByRole("button", { name: "Connect Mock Connector" }).click();
+    await expect(
+      page.getByText("No simulation against this wallet's balances yet").first(),
+    ).toBeVisible();
+    await expect(armButton(page)).toHaveAttribute("aria-disabled", "true");
+
+    await page.getByRole("button", { name: "Simulate against this wallet" }).click();
+    await expect(armButton(page)).not.toHaveAttribute("aria-disabled", "true");
+    await expect(page.getByText("No simulation against this wallet's balances yet")).toHaveCount(0);
+
+    // One slider step is a different plan. Address unchanged, clock barely moved — the
+    // refusal is DRIFT, stated as such, checked before staleness (a drifted simulation is
+    // not old, it answers a different question).
+    await walkSliderTo(page, TEMPLATE_BORROW_BPS + STEP_BPS);
+    await expect(
+      page.getByText("The strategy changed after it was simulated").first(),
+    ).toBeVisible();
+    await expect(armButton(page)).toHaveAttribute("aria-disabled", "true");
+    // Drift is exactly what a fresh simulation answers, so the clearing control returns.
+    await expect(page.getByRole("button", { name: "Simulate against this wallet" })).toBeVisible();
+  });
+
   test("refuses a wallet already holding an Aave position (the SPEC §2 footprint predicate)", async ({
     page,
   }) => {

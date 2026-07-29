@@ -30,7 +30,11 @@
  * every committed frame is evidence and none is a race.
  */
 import { expect, test, type Locator, type Page } from "@playwright/test";
+import { getAddress, toFunctionSelector } from "viem";
+import { borrowLimitVerdict } from "../src/core/borrow-limit";
+import { decodeRevert } from "../src/core/errors";
 import {
+  WAD,
   formatAddress,
   formatHealthFactor,
   formatToken,
@@ -649,6 +653,192 @@ test.describe("Sandbox execution — run all steps, watch attribution, read the 
         liquidationRatio: formatWadRatio(valueOf(ratioWad)),
         runMs,
       });
+    });
+  });
+});
+
+// ————— SPEC §3 step 4 on the fork: the decoded revert, and the full re-simulation —————
+
+/** The ceiling the pinned snapshot admits — the source of the LT figure below. */
+const TARGET_CEILING = (() => {
+  const verdict = borrowLimitVerdict(DOC, SNAPSHOT);
+  if (verdict.status !== "within") throw new Error("the flagship at 70% must be within the limit");
+  return verdict.ceiling;
+})();
+
+/**
+ * The first slider step whose modeled post-borrow HF sits STRICTLY below 1 with rounding
+ * headroom (SPEC §3 step 4: "strictly above the block-pinned liquidation threshold with
+ * rounding headroom") — computed from the same risk walk the app runs, never typed. The
+ * 0.1% margin is the headroom: at exactly LT, HF = 1 PASSES Aave's check and the LTV error
+ * would fire instead of the HF error this beat asserts.
+ */
+const OVER_LT_BPS = (() => {
+  const margin = WAD / 1_000n;
+  const first = (Math.floor(TARGET_CEILING.ltBps / STEP_BPS) + 1) * STEP_BPS;
+  for (let bps = first; bps <= 10_000; bps += STEP_BPS) {
+    const ledger = riskLedger(leveragedRestakeLoop(undefined, bps), SNAPSHOT);
+    if (!ledger.ok || ledger.min === null) continue;
+    const wad = hfWadValue(ledger.min.healthFactor);
+    if (wad !== null && wad <= WAD - margin) return bps;
+  }
+  throw new Error("no slider allocation drives the flagship strictly past LT with headroom");
+})();
+
+const OVER_PLAN: PlanSuccess = (() => {
+  const built = buildPlan(leveragedRestakeLoop(undefined, OVER_LT_BPS), SNAPSHOT);
+  if (!built.ok) {
+    // buildPlan deliberately does NOT refuse on LTV — the over-limit document must stay
+    // plannable so the override can run it and the chain can answer (SPEC §5.7).
+    throw new Error(`the flagship at ${OVER_LT_BPS}bps must still plan`);
+  }
+  return built;
+})();
+
+const BORROW_STEP = (() => {
+  const step = OVER_PLAN.steps.find((candidate) => candidate.functionName === "borrow");
+  if (step === undefined) throw new Error("the over-LT plan lost its borrow step");
+  return step;
+})();
+
+/**
+ * Codex's D-011 ruling, verified against the deployed revision's sources rather than taken
+ * on faith: v3.7 `BorrowLogic.executeBorrow` MINTS the debt (BorrowLogic.sol:69-76) before
+ * `validateHFAndLtv` (BorrowLogic.sol:95-103), and that validation checks
+ * `healthFactor >= 1e18` (HealthFactorLowerThanLiquidationThreshold,
+ * ValidationLogic.sol:376-379) BEFORE collateral coverage
+ * (CollateralCannotCoverNewBorrow, ValidationLogic.sol:381-384). A position strictly above
+ * LT fails the HF line first, so the fork's revert is deterministically this selector —
+ * and the assertions below read what the fork ACTUALLY returned, so a deployed revision
+ * that disagreed with upstream main would fail here, not pass politely.
+ */
+const HF_ERROR_SELECTOR = toFunctionSelector("HealthFactorLowerThanLiquidationThreshold()");
+const HF_ERROR = decodeRevert(HF_ERROR_SELECTOR);
+if (HF_ERROR.source !== "custom-error") {
+  throw new Error("core/errors.ts no longer decodes the deployed revision's HF error");
+}
+
+/** Walk the borrow slider to any step-aligned target, in either direction. */
+async function walkBorrowSliderTo(page: Page, target: number): Promise<void> {
+  const slider = borrowSlider(page);
+  await slider.focus();
+  const from = Number(await slider.inputValue());
+  const presses = Math.abs(target - from) / STEP_BPS;
+  const key = target > from ? "ArrowRight" : "ArrowLeft";
+  for (let i = 0; i < presses; i += 1) await slider.press(key);
+  await expect(slider).toHaveValue(String(target));
+}
+
+test.describe("SPEC §3 step 4 on the fork — override, decoded revert, full re-simulation", () => {
+  test("refuses inline, overrides to the fork's own HF revert, and re-simulates the whole bundle", async ({
+    page,
+  }) => {
+    await page.goto("/composer");
+    await expect(node(page, "borrow")).toBeVisible({ timeout: 30_000 });
+    await walkBorrowSliderTo(page, OVER_LT_BPS);
+
+    await test.step("the inline step-4 refusal, before any chain is asked", async () => {
+      await expect(node(page, "borrow").locator("[data-block-state]")).toHaveAttribute(
+        "data-block-state",
+        "error",
+      );
+      await expect(node(page, "borrow")).toContainText("Past the borrow limit");
+      const arm = page.getByRole("button", { name: "Review & execute in sandbox" });
+      await expect(arm).toHaveAttribute("aria-disabled", "true");
+    });
+
+    await test.step("Simulate anyway → the borrow step fails with the DECODED revert", async () => {
+      await page.getByRole("button", { name: "Simulate anyway" }).click();
+      const column = await armSandboxRun(page);
+      await column.getByRole("button", { name: "Execute", exact: true }).click();
+
+      // The failure card's fact line IS the decoded message (T21) — core/errors' copy for
+      // the fork's own revert data, not scripted text. `.first()` because the narrator's
+      // polite region may speak the same sentence — one voice, same words.
+      await expect(column.getByText(HF_ERROR.message).first()).toBeVisible({ timeout: 240_000 });
+      // The raw revert data renders in full beside it; for this no-argument custom error
+      // that is exactly the 4-byte selector the decoder matched.
+      await expect(column.getByText(new RegExp(HF_ERROR_SELECTOR)).first()).toBeVisible();
+
+      // The executed prefix stands: every step before the borrow settled and stays green.
+      await expect(column.locator(".text-success")).toHaveCount(BORROW_STEP.index - 1);
+      // A revert is a FAILED state, not a halt: the halted identity does not render.
+      await expect(column.getByText(/HALTED/)).toHaveCount(0);
+
+      emitNotice("fork-decoded-revert", {
+        allocationBps: OVER_LT_BPS,
+        borrowStepIndex: BORROW_STEP.index,
+        selector: HF_ERROR_SELECTOR,
+        decoded: HF_ERROR.message,
+      });
+    });
+
+    await test.step("drag back → Re-simulate reruns the ENTIRE bundle from the base snapshot", async () => {
+      await walkBorrowSliderTo(page, TARGET_BORROW_BPS);
+      await expect(node(page, "borrow").locator("[data-block-state]")).toHaveAttribute(
+        "data-block-state",
+        "warning",
+      );
+      const column = page.getByRole("complementary", { name: "Execution" });
+      await column.getByRole("button", { name: "Re-simulate" }).click();
+
+      // The whole bundle re-plans: a fresh review with the full step list and NO retained
+      // prefix — a failed simulation has no resumable prefix (SPEC §6).
+      await expect(column.getByRole("button", { name: "Execute", exact: true })).toBeVisible({
+        timeout: 180_000,
+      });
+      await expect(
+        column.getByRole("list", { name: "Planned calls" }).getByRole("listitem"),
+      ).toHaveCount(N);
+      await expect(column.locator(".text-success")).toHaveCount(0);
+      // SPEC §6, verbatim: the control is "Re-simulate", never "Resume".
+      await expect(page.getByRole("button", { name: /resume/i })).toHaveCount(0);
+    });
+  });
+});
+
+// ————— SPEC §3 step 7 on the fork: the REAL readiness capture clears the gate —————
+
+/** Must match playwright.fork.config.ts's NEXT_PUBLIC_WALLET_MOCK_ACCOUNTS. */
+const FORK_WALLET = getAddress("0x7f3a921c5be694fa8f3ba14e58cd06897e9dd47e");
+
+test.describe("SPEC §3 step 7 on the fork — live gate cleared by the wallet router's capture", () => {
+  test("captures readiness through our RPC, clears the gate, and regates on plan drift", async ({
+    page,
+  }) => {
+    await page.goto("/composer");
+    await expect(node(page, "borrow")).toBeVisible({ timeout: 30_000 });
+
+    await page.getByRole("button", { name: "Connect Mock Connector" }).click();
+    await expect(page.locator("header [data-mode]")).toHaveAttribute("data-mode", "live");
+    await expect(page.getByTestId("wallet-address")).toHaveAttribute("title", FORK_WALLET);
+
+    // The connect seam is the SAME wallet-router capture (NEXT_PUBLIC_WALLET_LIVE_SOURCE=rpc):
+    // eth_getCode + the §2 footprint sweep against the pinned upstream. Until it resolves the
+    // gate refuses on the unread seam; once clear, the freshness gate is what remains.
+    await expect(
+      page.getByText("No simulation against this wallet's balances yet").first(),
+    ).toBeVisible({ timeout: 120_000 });
+    const arm = page.getByRole("button", { name: "Review & execute in sandbox" });
+    await expect(arm).toHaveAttribute("aria-disabled", "true");
+
+    // The F2 clearing path, against the REAL procedure: capture, simulate, standing.
+    await page.getByRole("button", { name: "Simulate against this wallet" }).click();
+    await expect(arm).not.toHaveAttribute("aria-disabled", "true", { timeout: 180_000 });
+    await expect(page.getByText("No simulation against this wallet's balances yet")).toHaveCount(0);
+
+    // The F3 beat on the same standing: one slider step is a different plan, and the gate
+    // says THAT — drift, not staleness — before any clock is consulted.
+    await walkBorrowSliderTo(page, TEMPLATE_BORROW_BPS + STEP_BPS);
+    await expect(
+      page.getByText("The strategy changed after it was simulated").first(),
+    ).toBeVisible();
+    await expect(arm).toHaveAttribute("aria-disabled", "true");
+    await expect(page.getByRole("button", { name: "Simulate against this wallet" })).toBeVisible();
+
+    emitNotice("fork-live-gate-cleared", {
+      wallet: FORK_WALLET,
+      clearedThen: "plan-drift on one slider step",
     });
   });
 });
