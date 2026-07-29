@@ -17,13 +17,13 @@ deliverables:
   - SPEC.md
   - TRANSPLANT.md
 evidence_receipts:
-  - roadmap/evidence/E-W02-founding-docs.md
+  - roadmap/evidence/E-W02-founding-docs-r2.md
 invalidated_by:
   - SPEC.md
   - TRANSPLANT.md
 review_when: event:invalidated-by-change
 updated: 2026-07-25
-evidence_fingerprint: sha256:0a8b0077488dedb23f820cb15d5708a0f60a986fef4e23b807766f5597f2cb52
+evidence_fingerprint: sha256:a8dfef7d8a9ebb4e0348203c41c32113278729ab22888ef1d5321c323a8cb17f
 ---
 
 # W02 — Land founding product docs
@@ -58,7 +58,7 @@ python roadmap/tools/doctor.py
 
 ## Evidence
 
-`roadmap/evidence/E-W02-founding-docs.md` — docs landed at the tested commit; anti-goal
+`roadmap/evidence/E-W02-founding-docs-r2.md` — docs landed at the tested commit; anti-goal
 compliance reviewed; doctor green.
 
 ## Handoff

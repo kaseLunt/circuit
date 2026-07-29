@@ -3,7 +3,7 @@ id: W07
 type: work
 title: P3a execution — sandbox session service and the tx UX family on the fork
 phase: P3
-status: active
+status: achieved
 evidence_target: sandbox-execution-arc-green-on-fork-in-ci
 priority: 1
 depends_on: [W05, W06]
@@ -54,7 +54,8 @@ deliverables:
   - eslint.config.mjs
   - SPEC.md
   - .github/workflows/ci.yml
-evidence_receipts: []
+evidence_receipts:
+  - roadmap/evidence/E-W07-p3-execution.md
 invalidated_by:
   - SPEC.md
   - src/core/**
@@ -69,6 +70,7 @@ invalidated_by:
   - package.json
 review_when: phase:P3:exit
 updated: 2026-07-26
+evidence_fingerprint: sha256:3535bd9156cf8904bac8cfc05167dca73d0964d52134a61778da8431a95bc33c
 ---
 
 # W07 — P3a execution

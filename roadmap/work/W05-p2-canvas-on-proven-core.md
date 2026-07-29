@@ -60,7 +60,7 @@ deliverables:
   - playwright.config.ts
   - .github/workflows/ci.yml
 evidence_receipts:
-  - roadmap/evidence/E-W05-p2-canvas-on-proven-core.md
+  - roadmap/evidence/E-W05-p2-canvas-on-proven-core-r2.md
 invalidated_by:
   - SPEC.md
   - TRANSPLANT.md
@@ -73,7 +73,7 @@ invalidated_by:
   - package.json
 review_when: event:invalidated-by-change
 updated: 2026-07-26
-evidence_fingerprint: sha256:311497289ce13a81c3f4298b78aa2adf71bd131692c50ff615dab46c8a81ee85
+evidence_fingerprint: sha256:154bbc221c46f02e98afde6575e033e276ce5aabc1b18bd253006900c3ebb904
 ---
 
 # W05 — P2 canvas on the proven core
