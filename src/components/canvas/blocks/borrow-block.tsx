@@ -74,6 +74,17 @@ function formatMinHealthFactor(hf: HealthFactor): string {
   return formatHealthFactor(hfWadValue(hf));
 }
 
+/**
+ * Which LTV/LT regime the refusal is quoting. SPEC §3 step 4 names getting this wrong as a
+ * correctness bug, so the sentence states it rather than leaving the reader to assume the
+ * reserve-level numbers when an e-mode category is active (they differ, often by a lot).
+ */
+function regimeLabel(categoryId: number | null): string {
+  return categoryId === null
+    ? "This reserve's own configuration"
+    : `E-mode category ${categoryId}`;
+}
+
 /** The prose a settled-but-empty risk read gets. Never a dash, never a zero. */
 const LIQUIDATION_UNAVAILABLE = "Liquidation level unavailable. The risk read did not resolve.";
 
@@ -134,8 +145,17 @@ export function BorrowBlock({ id, data, selected }: NodePropsFor<BorrowBlockData
   // "1.5" is authored here, so moving HF_WARN_WAD moves this copy with it.
   const warnThreshold = formatHealthFactor(HF_WARN_WAD);
 
+  // SPEC §3 step 4. The verdict is `core/borrow-limit.ts`'s, over the same block-pinned read
+  // set every other figure on this block comes from; this component chooses no numbers and
+  // authors no thresholds — it renders the ceiling's own fields.
+  const limit = runtime.borrowLimit;
+  const overLimit =
+    limit !== null && limit.status === "over-limit" && limit.ceiling.blockId === id
+      ? limit.ceiling
+      : null;
+
   const state: BlockState =
-    rejection.reason !== null || !data.isValid
+    rejection.reason !== null || !data.isValid || overLimit !== null
       ? "error"
       : risk === "warning" || !data.isConfigured
         ? "warning"
@@ -145,11 +165,22 @@ export function BorrowBlock({ id, data, selected }: NodePropsFor<BorrowBlockData
       ? rejection.reason
       : !data.isValid
         ? data.errorMessage
-        : risk === "warning"
-          ? `Health factor is below the ${warnThreshold} warning threshold.`
-          : !data.isConfigured
-            ? "Choose how much of the collateral value to borrow."
-            : undefined;
+        : overLimit !== null
+          ? // Not scripted copy: every figure is read off the ceiling, which read them off
+            // the ACTIVE configuration. The in-eMode and outside-eMode regimes differ, so the
+            // sentence says which one it is quoting.
+            `Past the borrow limit. ${regimeLabel(overLimit.categoryId)} allows ${formatBpsAsPercent(
+              overLimit.ltvBps,
+            )} of collateral value as debt (liquidation threshold ${formatBpsAsPercent(
+              overLimit.ltBps,
+            )}); this asks for ${formatBpsAsPercent(overLimit.requestedAllocationBps)}. The most it admits is ${formatBpsAsPercent(
+              overLimit.maxAllocationBps,
+            )}.`
+          : risk === "warning"
+            ? `Health factor is below the ${warnThreshold} warning threshold.`
+            : !data.isConfigured
+              ? "Choose how much of the collateral value to borrow."
+              : undefined;
 
   const ratio = runtime.liquidationRatioWad;
   const sentence = liquidationSentence(

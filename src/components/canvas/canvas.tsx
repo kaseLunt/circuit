@@ -90,6 +90,7 @@ import {
   type LoadSource,
 } from "../../app/store/composer-store";
 import { useComposerStore, useComposerStoreApi } from "../../app/store/composer-provider";
+import type { BorrowLimitVerdict } from "../../core/borrow-limit";
 import { layoutGraph } from "../../lib/strategy/layout";
 import { getTemplate } from "../../lib/strategy/templates";
 import {
@@ -646,6 +647,14 @@ export interface StrategyCanvasProps {
   /** The block currently executing (P3). Null outside an execution. */
   executingBlockId?: string | null;
   /**
+   * SPEC §3 step 4's client-side borrow verdict, derived by the host beside the simulation
+   * (`useBorrowLimit`). Passed in rather than computed here for the same reason the
+   * simulation is: the canvas observes nothing and derives nothing.
+   */
+  borrowLimit?: BorrowLimitVerdict | null;
+  /** T26: the run's write-lock sentence, or null. Reads are never locked. */
+  writeLockReason?: string | null;
+  /**
    * Filled by the canvas with a resolver for "the middle of what the user is looking at",
    * in flow coordinates. The shell's keyboard-add path needs a position at the moment of
    * the keystroke and only the canvas knows the live viewport — but the canvas owns its
@@ -693,6 +702,8 @@ function CanvasInner({
   simulation,
   simulationPending,
   executingBlockId = null,
+  borrowLimit = null,
+  writeLockReason = null,
   dropPositionRef,
 }: StrategyCanvasProps) {
   const api = useComposerStoreApi();
@@ -893,12 +904,23 @@ function CanvasInner({
       inputAmounts,
       borrowAllocations,
       executingBlockId,
+      borrowLimit,
+      writeLockReason,
       ...runtimeRiskFields(simulation),
       pending: simulationPending,
       pendingEdit,
       docRev: rev,
-      setBlockParam: (id, key, value) => api.getState().setBlockParam(id, key, value),
-      setBorrowAllocationBps: (id, bps) => api.getState().setBorrowAllocationBps(id, bps),
+      // T26: the lock is applied HERE, at the one place every block write goes through, so
+      // no control can forget it and every refusal arrives in the store's own ActionResult
+      // shape — which is what the typed-rejection strip already renders.
+      setBlockParam: (id, key, value) =>
+        writeLockReason === null
+          ? api.getState().setBlockParam(id, key, value)
+          : { ok: false, reason: writeLockReason },
+      setBorrowAllocationBps: (id, bps) =>
+        writeLockReason === null
+          ? api.getState().setBorrowAllocationBps(id, bps)
+          : { ok: false, reason: writeLockReason },
       beginEdit: (label) => api.getState().beginEdit(label),
       endEdit: () => api.getState().endEdit(),
     };
@@ -912,6 +934,8 @@ function CanvasInner({
     simulation,
     simulationPending,
     executingBlockId,
+    borrowLimit,
+    writeLockReason,
   ]);
 
   const isValidConnection = useMemo(() => makeIsValidConnection(doc), [doc]);

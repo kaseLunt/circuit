@@ -4,6 +4,7 @@ import { createContext, useContext, useId, useState, type ReactNode } from "reac
 import { Handle, Position } from "@xyflow/react";
 import { AlertTriangle } from "lucide-react";
 import type { ActionResult } from "../../../app/store/composer-store";
+import type { BorrowLimitVerdict } from "../../../core/borrow-limit";
 import { formatBpsAsPercent } from "../../../core/format";
 import type { HealthFactor } from "../../../core/health-factor";
 import { valueOf, type Derived, type Provenanced } from "../../../core/provenance";
@@ -78,6 +79,19 @@ export interface BlockRuntime {
   readonly minHealthFactor: Provenanced<HealthFactor> | null;
   /** Collateral/debt oracle ratio at liquidation, WAD. A correlated pair has no USD price. */
   readonly liquidationRatioWad: Provenanced<bigint> | null;
+  /**
+   * SPEC §3 step 4: whether the requested borrow is past the limit, and the LTV/LT math from
+   * the ACTIVE e-mode configuration that says so. Derived in `core/borrow-limit.ts` over the
+   * same block-pinned snapshot everything else here reads; null before a snapshot resolves.
+   */
+  readonly borrowLimit: BorrowLimitVerdict | null;
+  /**
+   * T26: while a run holds the document, WRITES refuse with this sentence and READS stay
+   * live. Null outside a run. There is no veil, no dimming and no blur anywhere in this
+   * treatment — a dimmed canvas at the moment money moves says "don't look", which is
+   * exactly backwards.
+   */
+  readonly writeLockReason: string | null;
   /**
    * True while the snapshot/simulation is in flight. `pending` + null renders a skeleton;
    * settled + null renders the unavailable prose. A block never guesses which a null means.
