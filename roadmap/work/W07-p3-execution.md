@@ -3,7 +3,7 @@ id: W07
 type: work
 title: P3a execution — sandbox session service and the tx UX family on the fork
 phase: P3
-status: active
+status: achieved
 evidence_target: sandbox-execution-arc-green-on-fork-in-ci
 priority: 1
 depends_on: [W05, W06]
@@ -70,7 +70,7 @@ invalidated_by:
   - package.json
 review_when: phase:P3:exit
 updated: 2026-07-26
-evidence_fingerprint: sha256:59dcd51d96f0c53ced940b1f881237a3d3762b52318a2d0ce61602b82d3f7cb1
+evidence_fingerprint: sha256:3535bd9156cf8904bac8cfc05167dca73d0964d52134a61778da8431a95bc33c
 ---
 
 # W07 — P3a execution
