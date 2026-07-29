@@ -3,7 +3,7 @@ id: W08
 type: work
 title: P3b — wallet boundary, live gating, and the prevention-and-override beat
 phase: P3
-status: candidate
+status: active
 evidence_target: spec-3-steps-4-and-7-green-with-mock-connector
 priority: 1
 depends_on: [W07]
@@ -33,7 +33,7 @@ invalidated_by:
   - src/server/**
   - eslint.config.mjs
 review_when: event:invalidated-by-change
-updated: 2026-07-28
+updated: 2026-07-29
 ---
 
 # W08 — P3b: wallet boundary and live gating
