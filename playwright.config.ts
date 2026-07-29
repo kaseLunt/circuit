@@ -45,6 +45,22 @@ export default defineConfig({
   projects: [{ name: "chromium", use: { ...devices["Desktop Chrome"] } }],
   webServer: {
     command: `npm run build && npm run start -- -p ${PORT}`,
+    /*
+     * SPEC §3: "wallet interactions driven by a wagmi mock connector". These are BUILD-TIME
+     * values — Next inlines `NEXT_PUBLIC_*` — so they are set on the whole webServer command,
+     * build included, and a production deployment that does not set them ships exactly one
+     * connector (`injected`) and no scenario table at all.
+     *
+     * Two accounts, and what each one stands for, declared together. The scenario is what
+     * makes step 7's footprint refusal executable: one wallet reads clear, the other reads as
+     * already holding an Aave Core position. They drive REFUSALS only — no money-math reads
+     * them and no quantity is derived from them.
+     */
+    env: {
+      NEXT_PUBLIC_WALLET_MOCK_ACCOUNTS:
+        "0x1111111111111111111111111111111111111111,0x2222222222222222222222222222222222222222",
+      NEXT_PUBLIC_WALLET_MOCK_OCCUPIED: "0x2222222222222222222222222222222222222222",
+    },
     url: BASE_URL,
     reuseExistingServer: !process.env["CI"],
     timeout: 240_000,
