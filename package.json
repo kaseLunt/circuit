@@ -11,10 +11,10 @@
     "start": "next start",
     "lint": "eslint --max-warnings=0",
     "typecheck": "tsc --noEmit",
-    "check:scripts": "node --check scripts/protocol-reads.mjs && node --check scripts/lint-boundaries.mjs",
+    "check:scripts": "node --check scripts/protocol-reads.mjs && node --check scripts/lint-boundaries.mjs && node --check scripts/check-coverage-manifest.mjs && node --check scripts/coverage.config.mjs",
     "check:lint-boundaries": "node scripts/lint-boundaries.mjs",
     "test": "vitest run",
-    "test:coverage": "vitest run --coverage",
+    "test:coverage": "node scripts/check-coverage-manifest.mjs && vitest run --coverage",
     "test:fork": "vitest run --config vitest.fork.config.ts",
     "test:e2e": "playwright test",
     "test:e2e:fork": "playwright test --config=e2e/playwright.fork.config.ts"

@@ -1,6 +1,7 @@
 /**
  * SPEC §3, the demo script, executed. W05's evidence target is steps 1–3 and 8 on the
- * recorded read set; steps 4–7 need the sandbox provider and the wallet path and land in P3.
+ * recorded read set; the sandbox execution arc runs under e2e/playwright.fork.config.ts,
+ * and the remaining §3 beats (prevention/override, live gating) are W08/P3b scope.
  *
  * THE EXPECTED NUMBERS ARE COMPUTED, NEVER TYPED. Every figure asserted below comes from
  * `core/risk.ts` over the same `sandboxSnapshot()` the browser is running on, shaped by the

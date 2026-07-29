@@ -1,5 +1,6 @@
 /**
  * The sandbox execution arc — arm, review, execute, attribute, receipt — against a real
+ * session fork.
  *
  * A SIBLING of demo-script.spec.ts rather than an extension of it, because the two suites
  * have different environmental truths: steps 1–3 and 8 run on the recorded read set alone
@@ -379,7 +380,7 @@ test.describe("Sandbox execution — run all steps, watch attribution, read the 
     const probe = await page.evaluate(() => window.__execProbe);
     if (probe === undefined) throw new Error("the execution probe did not survive the run");
 
-    await test.step("step 5 — per-step progression and the single narrator", async () => {
+    await test.step("execute — per-step progression and the single narrator", async () => {
       // The region the run was narrated into held the ready sentence when the probe
       // attached — T31's one voice, already speaking before the commit.
       expect(probe.announcements[0]).toBe(`Simulation complete: ${N} steps.`);
@@ -447,7 +448,7 @@ test.describe("Sandbox execution — run all steps, watch attribution, read the 
 
     const rows = column.getByRole("list", { name: "Execution steps" }).getByRole("listitem");
 
-    await test.step("step 6 — attribution facts: mechanisms, receipts, gas, consumed approvals", async () => {
+    await test.step("attribute — mechanisms, receipts, gas, consumed approvals", async () => {
       await expect(rows).toHaveCount(N);
 
       // Every settled row carries its receipt evidence: the hash with its copy
@@ -568,7 +569,7 @@ test.describe("Sandbox execution — run all steps, watch attribution, read the 
       });
     });
 
-    await test.step("step 7 — the completion receipt, still", async () => {
+    await test.step("receipt — the completion receipt, still", async () => {
       const receipt = column.locator('section[aria-labelledby="execution-complete-heading"]');
       await expect(receipt).toBeVisible();
 

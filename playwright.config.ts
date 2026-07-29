@@ -19,8 +19,9 @@ const BASE_URL = `http://localhost:${PORT}`;
 
 export default defineConfig({
   testDir: "./e2e",
-  // Steps 4–7 need a live sandbox upstream and run under playwright.fork.config.ts;
-  // this suite must stay green with no chain and no secrets on every external PR.
+  // The sandbox execution arc needs a live sandbox upstream and runs under
+  // playwright.fork.config.ts; this suite must stay green with no chain and no
+  // secrets on every external PR.
   testIgnore: "**/demo-script-fork.spec.ts",
   // A demo script whose steps interleave is a gate whose failures cannot be reproduced.
   // Determinism is the product of this suite; parallelism is not.
