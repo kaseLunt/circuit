@@ -21,6 +21,7 @@ import type { Hex } from "viem";
 import type { PlanSuccess } from "../../core/plan";
 import type { DecodedRevert } from "../../core/errors";
 import { SANDBOX_OUTPUT_TOLERANCE, type OutputTolerance } from "./tolerance";
+import { haltClaimMismatch, stepResultClaimMismatch } from "./output-claims";
 import type { ShareDeltaMeasurement } from "./attribution";
 import {
   createRecord,
@@ -35,6 +36,7 @@ import type { ExecutionMachine } from "./machine";
 import type {
   ExecutionPhase,
   HaltFact,
+  HaltedStepFact,
   OutputMechanism,
   ReceiptRef,
   RecordRefusal,
@@ -613,6 +615,16 @@ export type ResumeRefusal =
     }
   | { readonly kind: "malformed-summary"; readonly detail: string }
   | { readonly kind: "malformed-wire"; readonly detail: string }
+  | {
+      /**
+       * A persisted result whose money claims fail the recompute-and-compare validator
+       * (output-claims.ts): the record is NOT adopted, the machine is NOT replaced.
+       * This is the same gate the driver's live path applies — a reload must never
+       * adopt what the live path refused (Codex thread 019fa749 finding 1).
+       */
+      readonly kind: "money-claim-mismatch";
+      readonly detail: string;
+    }
   | { readonly kind: "missing-recovery"; readonly phase: string }
   | { readonly kind: "recovery-kind-mismatch"; readonly phase: string; readonly recovery: string }
   | { readonly kind: "unresumable-refusal"; readonly refusal: WireRefusal["kind"] }
@@ -712,6 +724,7 @@ function adoptExecuted(
   plan: PlanSuccess,
   planHash: Hex,
   executed: readonly WireStepResult[],
+  tolerance: OutputTolerance,
 ): { record: ExecutionRecord } | { refusal: ResumeRefusal } {
   let record = createRecord(planHash);
   for (let i = 0; i < executed.length; i += 1) {
@@ -737,6 +750,13 @@ function adoptExecuted(
           receivedId: result.stepId,
         },
       };
+    }
+    // The money-claim gate runs on EVERY identity-valid adopted entry — session
+    // summaries and tombstones alike flow through here, so no rehydration path can
+    // skip it (thread 019fa749 finding 1). Identity problems keep their own refusal.
+    const claimMismatch = stepResultClaimMismatch(plan, tolerance, result);
+    if (claimMismatch !== null) {
+      return { refusal: { kind: "money-claim-mismatch", detail: claimMismatch } };
     }
     if (result.status === "halted") {
       if (i !== executed.length - 1) {
@@ -787,6 +807,32 @@ function machineOf(
   };
 }
 
+/**
+ * Canonical serialization of a halt's FACTS, for agreement between two wire copies of
+ * the same event (the executed record's halt and the phase payload's duplicate). This
+ * is fact-agreement, NOT step sameness — D4's reference-identity rule governs which
+ * step is which and stays untouched; here two copies of one claim must simply say the
+ * same thing, field for field.
+ */
+const expectationKeyOf = (expected: RiskExpectationFact): string =>
+  expected.status === "healthy"
+    ? `healthy:${expected.hfWad}`
+    : expected.status === "unknown"
+      ? `unknown:${expected.reason}`
+      : "no-debt";
+
+function haltKeyOf(halt: HaltFact): string {
+  const receipt = `${halt.receipt.txHash}:${halt.receipt.blockNumber}:${halt.receipt.blockHash}:${halt.receipt.gasUsed}`;
+  switch (halt.kind) {
+    case "output-divergence":
+      return `output:${halt.stepIndex}:${halt.stepId}:${halt.mechanism}:${halt.predictedWei}:${halt.attributedWei}:${halt.toleranceWei}:${halt.detail}:${receipt}`;
+    case "hf-disagreement":
+      return `hf:${halt.stepIndex}:${halt.stepId}:${expectationKeyOf(halt.expected)}:${halt.chainHfWad}:${receipt}`;
+    case "residual-allowance":
+      return `residual:${halt.stepIndex}:${halt.stepId}:${halt.spender}:${halt.residualAllowanceWei}:${receipt}`;
+  }
+}
+
 /** Identity gate for a recovery payload against the frozen plan and the settled prefix. */
 function recoveryIdentityRefusal(
   plan: PlanSuccess,
@@ -823,6 +869,7 @@ export function resumePlan(input: ResumeInput): ResumeOutcome {
 
 function resumeUnguarded(input: ResumeInput): ResumeOutcome {
   const { plan, planHash, response } = input;
+  const tolerance = input.tolerance ?? SANDBOX_OUTPUT_TOLERANCE;
   assertRecord(response, "response");
   if (!response.ok) {
     assertRecord(response.refusal, "response.refusal");
@@ -844,7 +891,7 @@ function resumeUnguarded(input: ResumeInput): ResumeOutcome {
         detail: "tombstone step count disagrees with its executed record",
       });
     }
-    const adopted = adoptExecuted(plan, planHash, tombstone.executed);
+    const adopted = adoptExecuted(plan, planHash, tombstone.executed, tolerance);
     if ("refusal" in adopted) return refuse(adopted.refusal);
     // A TTL tombstone deliberately ships the interrupted step's evidence (D8) — the
     // pending receipt, retained beforeShares, measurement cell, or dispatch pins would be
@@ -883,7 +930,7 @@ function resumeUnguarded(input: ResumeInput): ResumeOutcome {
       sessionSteps: summary.planStepCount,
     });
   }
-  const adopted = adoptExecuted(plan, planHash, summary.executed);
+  const adopted = adoptExecuted(plan, planHash, summary.executed, tolerance);
   if ("refusal" in adopted) return refuse(adopted.refusal);
   const record = adopted.record;
 
@@ -903,26 +950,54 @@ function resumeUnguarded(input: ResumeInput): ResumeOutcome {
     }
     case "halted": {
       const halt = parseHalt(summary.phase.halt);
-      let halted = record;
-      if (halted.halted === null) {
-        const identityRefusal = recoveryIdentityRefusal(plan, halted, halt.stepIndex, halt.stepId);
+      let haltedRecord = record;
+      let durable: HaltedStepFact;
+      if (record.halted === null) {
+        const identityRefusal = recoveryIdentityRefusal(plan, record, halt.stepIndex, halt.stepId);
         if (identityRefusal !== null) return refuse(identityRefusal);
-        halted = landOnRecord(
-          recordHalt(halted, {
-            stepIndex: halt.stepIndex,
-            stepId: halt.stepId,
-            receipt: halt.receipt,
-            resolvedAmountWei: null,
-            sharesDelta: null,
-            halt,
-          }),
-        );
-      } else if (halted.halted.stepIndex !== halt.stepIndex) {
-        return refuse({ kind: "malformed-summary", detail: "phase halt cites a different step than the executed record" });
+        const claimMismatch = haltClaimMismatch(plan, tolerance, halt);
+        if (claimMismatch !== null) {
+          return refuse({ kind: "money-claim-mismatch", detail: claimMismatch });
+        }
+        const entry: HaltedStepFact = {
+          stepIndex: halt.stepIndex,
+          stepId: halt.stepId,
+          receipt: halt.receipt,
+          resolvedAmountWei: null,
+          sharesDelta: null,
+          halt,
+        };
+        haltedRecord = landOnRecord(recordHalt(record, entry));
+        durable = entry;
+      } else {
+        if (record.halted.stepIndex !== halt.stepIndex) {
+          return refuse({ kind: "malformed-summary", detail: "phase halt cites a different step than the executed record" });
+        }
+        // The phase payload is validated UNCONDITIONALLY (thread 019fa75e): a valid
+        // executed halt must not launder an invalid duplicate through the phase field.
+        const claimMismatch = haltClaimMismatch(plan, tolerance, halt);
+        if (claimMismatch !== null) {
+          return refuse({ kind: "money-claim-mismatch", detail: claimMismatch });
+        }
+        // Two copies of one fact must agree, field for field — otherwise the machine
+        // phase and the durable record would carry different numbers for one event.
+        if (haltKeyOf(record.halted.halt) !== haltKeyOf(halt)) {
+          return refuse({
+            kind: "malformed-summary",
+            detail: "phase halt disagrees with the executed record's halt",
+          });
+        }
+        durable = record.halted;
       }
+      // The machine phase is built from the VALIDATED RECORD's halt — the durable
+      // truth — never from the wire duplicate.
       return {
         ok: true,
-        machine: machineOf(input, halted, { kind: "halted-divergent", stepIndex: halt.stepIndex, halt }),
+        machine: machineOf(input, haltedRecord, {
+          kind: "halted-divergent",
+          stepIndex: durable.stepIndex,
+          halt: durable.halt,
+        }),
       };
     }
     case "failed": {

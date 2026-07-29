@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import type { Address, Hex } from "viem";
 import type { BlockFlow, PlanSuccess, TransactionStep } from "../../core/plan";
 import { reduce, type ExecutionMachine } from "./machine";
+import { SANDBOX_OUTPUT_TOLERANCE, toleranceWeiFor } from "./tolerance";
 import {
   refusalFactOf,
   resumePlan,
@@ -21,6 +22,8 @@ import {
 
 const WAD = 10n ** 18n;
 const PREDICTED = 10n * WAD;
+/** The recomputed bound — adoption now refuses any other figure (money-claim gate). */
+const TOLERANCE = toleranceWeiFor(PREDICTED, SANDBOX_OUTPUT_TOLERANCE).toString();
 const ACTOR = "0x00000000000000000000000000000000000000aa" as Address;
 const SPENDER = "0x00000000000000000000000000000000000000bb";
 const PLAN_HASH = `0x${"ab".repeat(32)}` as Hex;
@@ -89,7 +92,7 @@ function wireAttributed(stepIndex: number, stepId: string): WireAttributed {
       mechanism: "share-delta",
       predictedWei: PREDICTED.toString(),
       attributedWei: PREDICTED.toString(),
-      toleranceWei: "1",
+      toleranceWei: TOLERANCE,
     },
     approval: { spender: SPENDER, priorAllowanceWei: "0", approvedWei: PREDICTED.toString() },
     consumedApproval: { spender: SPENDER, residualAllowanceWei: "0" },
@@ -123,7 +126,7 @@ function wireDivergence(
     mechanism: "share-delta",
     predictedWei: PREDICTED.toString(),
     attributedWei: (2n * PREDICTED).toString(),
-    toleranceWei: "1",
+    toleranceWei: TOLERANCE,
     detail: null,
     receipt: wireReceipt(hash(0x77)),
   };
@@ -1199,3 +1202,216 @@ describe("wire adapters", () => {
     expect(!malformed.ok && malformed.refusal.kind).toBe("malformed-wire");
   });
 });
+
+describe("the money-claim gate holds at every adoption seam (thread 019fa749 finding 1)", () => {
+  const widened = (): WireAttributed => {
+    const entry = wireAttributed(0, "s0");
+    if (entry.output === null) throw new Error("fixture");
+    return {
+      ...entry,
+      output: { ...entry.output, toleranceWei: (BigInt(TOLERANCE) + 1n).toString() },
+    };
+  };
+
+  it("refuses a session entry with a widened tolerance — record not adopted", () => {
+    const refusal = resumeRefused(
+      resumeWith(respond(summary({ executed: [widened()], txCount: 1 }))),
+    );
+    expect(refusal).toMatchObject({ kind: "money-claim-mismatch" });
+    if (refusal.kind !== "money-claim-mismatch") throw new Error("unreachable");
+    expect(refusal.detail).toContain("recomputed bound");
+  });
+
+  it("refuses an out-of-bound figure persisted as attributed", () => {
+    const entry = wireAttributed(0, "s0");
+    if (entry.output === null) throw new Error("fixture");
+    const bent = {
+      ...entry,
+      output: { ...entry.output, attributedWei: (2n * PREDICTED).toString() },
+    };
+    const refusal = resumeRefused(
+      resumeWith(respond(summary({ executed: [bent], txCount: 1 }))),
+    );
+    expect(refusal).toMatchObject({ kind: "money-claim-mismatch" });
+    if (refusal.kind !== "money-claim-mismatch") throw new Error("unreachable");
+    expect(refusal.detail).toContain("outside the machine's bound but arrived as attributed");
+  });
+
+  it("refuses a within-bound figure persisted as an output-divergence halt", () => {
+    const halted = wireHalted(0, "s0");
+    const bent = {
+      ...halted,
+      halt: { ...halted.halt, attributedWei: PREDICTED.toString() },
+    };
+    const refusal = resumeRefused(
+      resumeWith(
+        respond(summary({ executed: [bent], txCount: 1, phase: { kind: "halted", halt: bent.halt } })),
+      ),
+    );
+    expect(refusal).toMatchObject({ kind: "money-claim-mismatch" });
+    if (refusal.kind !== "money-claim-mismatch") throw new Error("unreachable");
+    expect(refusal.detail).toContain("within the machine's bound but arrived as a halt");
+  });
+
+  it("the gate covers TOMBSTONE payloads — an expired session cannot smuggle one in", () => {
+    const refusal = resumeRefused(
+      resumeWith({
+        ok: false,
+        refusal: {
+          kind: "session-expired",
+          executedSteps: 1,
+          tombstone: { executedSteps: 1, executed: [widened()], recovery: null },
+        },
+      }),
+    );
+    expect(refusal).toMatchObject({ kind: "money-claim-mismatch" });
+  });
+
+  it("the gate covers the phase-level halt payload", () => {
+    const halt = { ...wireDivergence(0, "s0"), attributedWei: PREDICTED.toString() };
+    const refusal = resumeRefused(
+      resumeWith(respond(summary({ phase: { kind: "halted", halt } }))),
+    );
+    expect(refusal).toMatchObject({ kind: "money-claim-mismatch" });
+  });
+});
+
+describe("the duplicate phase halt cannot bypass the gates (thread 019fa75e)", () => {
+  it("a valid executed halt plus an invalid same-index phase halt refuses money-claim-mismatch", () => {
+    const invalidDuplicate = {
+      ...wireDivergence(0, "s0"),
+      toleranceWei: (BigInt(TOLERANCE) + 1n).toString(),
+    };
+    const refusal = resumeRefused(
+      resumeWith(
+        respond(
+          summary({ executed: [wireHalted(0, "s0")], phase: { kind: "halted", halt: invalidDuplicate } }),
+        ),
+      ),
+    );
+    expect(refusal).toMatchObject({ kind: "money-claim-mismatch" });
+    if (refusal.kind !== "money-claim-mismatch") throw new Error("unreachable");
+    expect(refusal.detail).toContain("recomputed bound");
+  });
+
+  it("a within-bound duplicate wearing the divergence phase refuses too", () => {
+    const withinDuplicate = {
+      ...wireDivergence(0, "s0"),
+      attributedWei: PREDICTED.toString(),
+    };
+    const refusal = resumeRefused(
+      resumeWith(
+        respond(
+          summary({ executed: [wireHalted(0, "s0")], phase: { kind: "halted", halt: withinDuplicate } }),
+        ),
+      ),
+    );
+    expect(refusal).toMatchObject({ kind: "money-claim-mismatch" });
+  });
+
+  it("two individually valid copies that disagree refuse — one event, one set of numbers", () => {
+    // Both beyond the bound, both pass the claim gate; the figures differ.
+    const disagreeing = {
+      ...wireDivergence(0, "s0"),
+      attributedWei: (3n * PREDICTED).toString(),
+    };
+    const refusal = resumeRefused(
+      resumeWith(
+        respond(
+          summary({ executed: [wireHalted(0, "s0")], phase: { kind: "halted", halt: disagreeing } }),
+        ),
+      ),
+    );
+    expect(refusal).toMatchObject({ kind: "malformed-summary" });
+    if (refusal.kind !== "malformed-summary") throw new Error("unreachable");
+    expect(refusal.detail).toContain("disagrees with the executed record's halt");
+  });
+
+  it("the machine phase is the RECORD's halt object, not the wire duplicate", () => {
+    const machine = resumed(
+      resumeWith(
+        respond(
+          summary({ executed: [wireHalted(0, "s0")], phase: { kind: "halted", halt: wireDivergence(0, "s0") } }),
+        ),
+      ),
+    );
+    if (machine.phase.kind !== "halted-divergent") throw new Error("expected halted phase");
+    const recorded = machine.record?.halted;
+    if (recorded === null || recorded === undefined) throw new Error("expected recorded halt");
+    expect(machine.phase.halt).toBe(recorded.halt);
+  });
+
+  const hfHalt = (
+    expected: Extract<WireHalt, { kind: "hf-disagreement" }>["expected"],
+    chainHfWad: string,
+  ): Extract<WireHalt, { kind: "hf-disagreement" }> => ({
+    kind: "hf-disagreement",
+    stepIndex: 0,
+    stepId: "s0",
+    expected,
+    chainHfWad,
+    receipt: wireReceipt(hash(0x77)),
+  });
+
+  it("agreement covers the hf-disagreement family across every expectation arm", () => {
+    for (const expected of [
+      { status: "healthy" as const, hfWad: (2n * WAD).toString() },
+      { status: "unknown" as const, reason: "oracle gap" },
+      { status: "no-debt" as const },
+    ]) {
+      const halt = hfHalt(expected, WAD.toString());
+      const executed = { ...wireHalted(0, "s0"), halt };
+      const machine = resumed(
+        resumeWith(respond(summary({ executed: [executed], phase: { kind: "halted", halt } }))),
+      );
+      expect(machine.phase.kind).toBe("halted-divergent");
+    }
+    const recordedHalt = hfHalt({ status: "healthy", hfWad: (2n * WAD).toString() }, WAD.toString());
+    const disagreeing = hfHalt({ status: "healthy", hfWad: (2n * WAD).toString() }, (3n * WAD).toString());
+    const refusal = resumeRefused(
+      resumeWith(
+        respond(
+          summary({
+            executed: [{ ...wireHalted(0, "s0"), halt: recordedHalt }],
+            phase: { kind: "halted", halt: disagreeing },
+          }),
+        ),
+      ),
+    );
+    expect(refusal).toMatchObject({ kind: "malformed-summary" });
+  });
+
+  it("agreement covers the residual-allowance family", () => {
+    const residual = (wei: string): Extract<WireHalt, { kind: "residual-allowance" }> => ({
+      kind: "residual-allowance",
+      stepIndex: 0,
+      stepId: "s0",
+      spender: SPENDER,
+      residualAllowanceWei: wei,
+      receipt: wireReceipt(hash(0x77)),
+    });
+    const machine = resumed(
+      resumeWith(
+        respond(
+          summary({
+            executed: [{ ...wireHalted(0, "s0"), halt: residual("5") }],
+            phase: { kind: "halted", halt: residual("5") },
+          }),
+        ),
+      ),
+    );
+    expect(machine.phase.kind).toBe("halted-divergent");
+    const refusal = resumeRefused(
+      resumeWith(
+        respond(
+          summary({
+            executed: [{ ...wireHalted(0, "s0"), halt: residual("5") }],
+            phase: { kind: "halted", halt: residual("6") },
+          }),
+        ),
+      ),
+    );
+    expect(refusal).toMatchObject({ kind: "malformed-summary" });
+  });
+});
+

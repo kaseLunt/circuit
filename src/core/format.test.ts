@@ -8,6 +8,7 @@ import {
   formatAddress,
   formatBlockTime,
   formatBpsAsPercent,
+  formatDuration,
   formatEth,
   formatWadAsMultiple,
   formatWadAsPercent,
@@ -185,5 +186,23 @@ describe("component-boundary formatters (W05 canvas batch)", () => {
 
   it("formats an ETH amount with its unit", () => {
     expect(formatEth(1_099_835_630_856_114_428n)).toBe("1.0998 ETH");
+  });
+});
+
+describe("formatDuration (W07 tx family: simulation age, TTL prose)", () => {
+  it("renders seconds, minutes and hours locale-free with zero-padded remainders", () => {
+    expect(formatDuration(0)).toBe("0s");
+    expect(formatDuration(42)).toBe("42s");
+    expect(formatDuration(60)).toBe("1m 00s");
+    expect(formatDuration(185)).toBe("3m 05s");
+    expect(formatDuration(3600)).toBe("1h 00m");
+    expect(formatDuration(8_040)).toBe("2h 14m");
+  });
+
+  it("truncates fractions and clamps a backwards clock to zero, never a negative age", () => {
+    expect(formatDuration(59.9)).toBe("59s");
+    expect(formatDuration(-15)).toBe("0s");
+    expect(formatDuration(Number.NaN)).toBe("0s");
+    expect(formatDuration(Number.POSITIVE_INFINITY)).toBe("0s");
   });
 });

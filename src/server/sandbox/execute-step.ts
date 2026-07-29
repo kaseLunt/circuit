@@ -28,11 +28,10 @@
  * evidence pair; `failed` takes T21's decoded-revert card. The server never emits a
  * state the UX grammar cannot render.
  */
-import { getAddress, keccak256, stringToBytes, type Address, type Hex } from "viem";
+import { getAddress, type Address, type Hex } from "viem";
+import { planHashOf } from "../../lib/execution/plan-hash";
 import {
   buildPlan,
-  type AmountSpec,
-  type CallArg,
   type ChainSnapshot,
   type PlanError,
   type PlanSuccess,
@@ -212,51 +211,13 @@ export interface SandboxService {
   readonly captureSnapshot: (session: Session) => Promise<ChainSnapshot>;
 }
 
-/** ASCII unit/record separators: cannot occur in ids, symbols, or decimal figures. */
-const HASH_FIELD = "\u001f";
-const HASH_ROW = "\u001e";
-
-function serializeArg(arg: CallArg): string {
-  if (arg.kind === "amount") return "amount";
-  return `value:${typeof arg.value}:${String(arg.value)}`;
-}
-
-function serializeAmountSpec(spec: AmountSpec): string {
-  switch (spec.kind) {
-    case "literal":
-      return `literal:${spec.amount.value.toString()}`;
-    case "derived":
-      return `derived:${spec.amount.value.toString()}`;
-    case "step-output":
-      return `step-output:${spec.producerStepId}:${spec.attribution}:${spec.allocationBps}`;
-    case "none":
-      return "none";
-  }
-}
-
 /**
- * keccak over an EXPLICIT field walk of the ordered steps (§2.4) — to, functionName,
- * args, valueSpec, amount spec — not `JSON.stringify` of the step objects, whose key
- * order is an accident of construction. The server computes this from its OWN rebuild;
- * the client presents it on every step call; mismatch is the designed "plan changed"
- * state. Step SAMENESS inside a plan stays reference identity (D4) — this hash names a
- * frozen plan for reconciliation, it never decides which step is which.
+ * The plan fingerprint moved VERBATIM to `src/lib/execution/plan-hash.ts` so the
+ * client's session pointer can bind to the same money-bearing hash (Codex hard-gate
+ * finding, thread 019fa730); re-exported here so every existing consumer keeps its
+ * import path and the two sides provably share ONE definition (§10.10).
  */
-export function planHashOf(steps: readonly TransactionStep[]): Hex {
-  const rows = steps.map((step) =>
-    [
-      step.id,
-      String(step.index),
-      step.blockId,
-      step.to,
-      step.functionName,
-      step.valueSpec,
-      step.args.map(serializeArg).join(","),
-      serializeAmountSpec(step.amount),
-    ].join(HASH_FIELD),
-  );
-  return keccak256(stringToBytes(rows.join(HASH_ROW)));
-}
+export { planHashOf };
 
 /**
  * Which steps are PRODUCERS whose attributed output gates the plan's suffix — exactly

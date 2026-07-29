@@ -52,6 +52,7 @@ import { sandboxSnapshot } from "../../lib/recorded-reads/sandbox-snapshot";
 import { readShareToken } from "../../lib/share/encode";
 import { describeArrivalFailure, type ShareRefusal } from "../../lib/share/share-url";
 import { logError } from "../../lib/log";
+import { ExecutionHost } from "../tx/execution-host";
 import { flagshipStore, resolveArrival, type Arrival } from "./arrival";
 import { ComposerShell } from "./composer-shell";
 import { SandboxChrome } from "./sandbox-chrome";
@@ -91,6 +92,13 @@ function ComposerBody({ snapshot }: { readonly snapshot: SnapshotState }) {
       }
       simulation={simulation}
       simulationPending={simulationPending}
+      panel={
+        <ExecutionHost
+          snapshot={snapshot}
+          simulation={simulation}
+          simulationPending={simulationPending}
+        />
+      }
       resolveDropPosition={resolveDropPosition}
     />
   );
