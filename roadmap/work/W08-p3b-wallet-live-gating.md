@@ -18,7 +18,7 @@ allowed_paths:
   - package.json
   - package-lock.json
   - playwright.config.ts
-  - vitest.config.ts
+  - vitest.config.mjs
   - eslint.config.mjs
   - roadmap/work/W08-p3b-wallet-live-gating.md
 deliverables:

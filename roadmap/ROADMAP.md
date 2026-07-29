@@ -30,7 +30,7 @@ claim the gate is automated unless a validator actually enforces it.
 | W04 | Disposition the P0→P1 boundary review findings | P0 | — | boundary-review-blockers-cleared-and-reconfirmed | achieved |
 | W05 | P2 canvas on the proven core — composer transplanted, reskinned, share-URL round-trip | P2 | W03 | spec-3-steps-1-3-and-8-green-in-playwright-on-mock-reads | achieved |
 | W06 | P2→P3 boundary — public narrative, phase transition, P3 charter | P2 | W05 | readme-license-landed-and-p3-charter-ratified | achieved |
-| W07 | P3 execution — sandbox session service, the tx UX family, live gating | P3 | W05, W06 | sandbox-execution-arc-green-on-fork-in-ci | active |
+| W07 | P3a execution — sandbox session service and the tx UX family on the fork | P3 | W05, W06 | sandbox-execution-arc-green-on-fork-in-ci | active |
 | W08 | P3b — wallet boundary, live gating, and the prevention-and-override beat | P3 | W07 | spec-3-steps-4-and-7-green-with-mock-connector | candidate |
 | W09 | USDC carry leg — uncorrelated borrow, eMode constraint, second template | P3 | W08 | usdc-carry-template-fork-proven-with-emode-constraint | candidate |
 
