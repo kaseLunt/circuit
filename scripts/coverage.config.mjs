@@ -93,6 +93,11 @@ export const coverageConfig = {
     // driver suite) and src/app/api/trpc/[trpc]/route.ts (route-handler binding of
     // covered modules; proven where honest — the router's own suite and the fork
     // gate).
+    // W08 wallet boundary: the live gate is the decision home (doctrine D10) — every
+    // refusal in SPEC §3 step 7 is decided here, so it carries the money-path bar below.
+    // Deliberately NOT enrolled: config.ts/seam.ts/wallet-provider.tsx (connector I/O and
+    // scenario thread-through, proven in live-gating.test.tsx and the e2e beats).
+    "src/lib/wallet/gate.ts",
     "src/lib/tx/driver.ts",
     "src/lib/tx/provenance.ts",
     "src/components/tx/step-status.ts",
@@ -120,5 +125,8 @@ export const coverageConfig = {
     // `scripts/check-coverage-manifest.mjs` runs first (via `npm run test:coverage`)
     // and refuses the run if this glob stops resolving to its named files.
     "src/lib/execution/*.ts": { lines: 100, branches: 100, statements: 100 },
+    // W08: the wallet decision module holds the same bar — a live-mode refusal decided
+    // by an uncovered branch is exactly the drift the execution gate exists to refuse.
+    "src/lib/wallet/gate.ts": { lines: 100, branches: 100, statements: 100 },
   },
 };

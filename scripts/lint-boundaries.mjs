@@ -44,6 +44,32 @@ const EXPECTED = {
   "tests/lint/fixtures/server/leaks-public-env.tsx": [
     ["next-public-env-tsx", "no-restricted-syntax"],
   ],
+  // W08 wallet-seam routes (treatment §1.1/§1.2, doctrine D5): folded in from the
+  // interim tests/lint/w08-boundaries.test.ts gate once scripts/** joined the charter.
+  "tests/lint/fixtures/core/imports-wallet.ts": [
+    ["core-imports-wagmi", "no-restricted-imports"],
+    ["core-imports-wagmi-subpath", "no-restricted-imports"],
+    ["core-imports-wallet-file", "no-restricted-imports"],
+    ["core-imports-wallet-dir", "no-restricted-imports"],
+  ],
+  "tests/lint/fixtures/execution/imports-wallet.ts": [
+    ["execution-imports-wallet-file", "no-restricted-imports"],
+    ["execution-imports-wallet-dir", "no-restricted-imports"],
+  ],
+  "tests/lint/fixtures/server/imports-wallet.ts": [
+    ["server-imports-wagmi", "no-restricted-imports"],
+    ["server-imports-wagmi-subpath", "no-restricted-imports"],
+    ["server-imports-wallet-dir", "no-restricted-imports"],
+    ["server-imports-wallet-file", "no-restricted-imports"],
+  ],
+  "tests/lint/fixtures/wallet/impure.ts": [
+    ["wallet-viem-createClient", "no-restricted-imports"],
+    ["wallet-viem-createPublicClient", "no-restricted-imports"],
+    ["wallet-viem-createTestClient", "no-restricted-imports"],
+    ["wallet-viem-createTransport", "no-restricted-imports"],
+    ["wallet-mints-provenance", "no-restricted-imports"],
+    ["wallet-imports-server", "no-restricted-imports"],
+  ],
   "tests/lint/fixtures/execution/impure.ts": [
     ["react", "no-restricted-imports"],
     ["react-dom", "no-restricted-imports"],

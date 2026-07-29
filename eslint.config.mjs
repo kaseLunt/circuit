@@ -150,9 +150,9 @@ const eslintConfig = [
     // W07 treatment §1.2 / A19, the money↔transport quarantine, scoped to the surface this
     // commit creates. `src/lib/execution/` is the client-side execution driver; it may read
     // the chain-record facet of a receipt, so nothing in `core/` may depend on it without
-    // dragging transport toward money-math. Extend this ban to `wagmi` and `src/lib/wallet`
-    // when those land — they do not exist yet, and a ban on a non-existent path is a claim
-    // the linter cannot check.
+    // dragging transport toward money-math. W08 landed `src/lib/wallet/` and wagmi, so the
+    // ban this comment used to defer is now written: a ban on a non-existent path is a claim
+    // the linter cannot check, and these paths now exist.
     files: ["src/core/**/*.ts", "tests/lint/fixtures/core/**/*.ts"],
     rules: {
       "no-restricted-imports": [
@@ -163,6 +163,19 @@ const eslintConfig = [
               group: ["**/lib/execution/*", "**/lib/execution"],
               message:
                 "core/ must not import the execution driver — transport observation never feeds money-math (CLAUDE.md money rules, treatment §1.2).",
+            },
+            {
+              // W08 treatment §1.2, the wallet half of the same quarantine. The injected
+              // provider is attacker-controllable; a `core/` module that could reach it
+              // could read a forged balance into money-math (seam A1/A19).
+              group: ["wagmi", "wagmi/*", "@wagmi/*"],
+              message:
+                "core/ must not import the wallet stack — the injected provider is transport, and transport never feeds money-math (treatment §1.2, seam A1).",
+            },
+            {
+              group: ["**/lib/wallet", "**/lib/wallet/*"],
+              message:
+                "core/ must not import the wallet boundary — the wallet's address crosses toward money-math only as captureChainSnapshot's `user` argument (treatment §1.1).",
             },
             {
               // W07: src/server now carries the session service (registry, fork
@@ -188,6 +201,62 @@ const eslintConfig = [
         forgedObservedBan,
         ...numericFallbackBan,
         ...publicEnvInServerBan,
+      ],
+      "no-restricted-imports": [
+        "error",
+        {
+          patterns: [
+            {
+              // W08, seam A1 stated from the money side: `src/server/**` is where every
+              // money-bearing read is performed. If it could reach the wallet stack, a
+              // balance, an allowance or a receipt could be read from the injected provider
+              // — the one route the whole boundary exists to close.
+              group: ["wagmi", "wagmi/*", "@wagmi/*", "**/lib/wallet", "**/lib/wallet/*"],
+              message:
+                "src/server must not import the wallet stack — money-bearing reads go through our configured RPC, never the injected provider (treatment §1.1, seam A1).",
+            },
+          ],
+        },
+      ],
+    },
+  },
+  {
+    // W08 treatment §1.1: the wallet boundary observes TRANSPORT. Two routes out of that
+    // contract are closed by name here — minting provenance (it may not: no transport fact
+    // becomes `Observed`), and opening its own chain client (it may not: the seam readings
+    // come from `server/chain`'s configured RPC, and a read this module performed itself
+    // would be a read through the wallet's own stack).
+    files: ["src/lib/wallet/**/*.{ts,tsx}", "tests/lint/fixtures/wallet/**/*.{ts,tsx}"],
+    rules: {
+      "no-restricted-imports": [
+        "error",
+        {
+          paths: [
+            {
+              name: "viem",
+              importNames: [
+                "createClient",
+                "createPublicClient",
+                "createTestClient",
+                "createTransport",
+              ],
+              message:
+                "src/lib/wallet must not open its own chain client — seam readings arrive from server/chain's configured RPC (treatment §1.1, seam A1).",
+            },
+          ],
+          patterns: [
+            {
+              group: ["**/core/provenance", "**/core/provenance/*"],
+              message:
+                "src/lib/wallet must not mint provenance — nothing the wallet observes becomes Observed (treatment §1.1, seam A19).",
+            },
+            {
+              group: ["**/server/**"],
+              message:
+                "src/lib/wallet must not import server modules — chain reads arrive through the injected seam source, never by reaching across the boundary (treatment §1.1).",
+            },
+          ],
+        },
       ],
     },
   },
@@ -244,6 +313,14 @@ const eslintConfig = [
               ],
               message:
                 "src/lib/execution must stay pure — no framework, no wallet stack, no chain client; inject reads instead.",
+            },
+            {
+              // W08: the wallet boundary is React + connector I/O. The execution machine is
+              // handed `WalletSession.address` by its driver; it never reaches for the
+              // wallet itself, or the purity contract this whole block enforces is moot.
+              group: ["**/lib/wallet", "**/lib/wallet/*"],
+              message:
+                "src/lib/execution must stay pure — the wallet boundary is React and connector I/O; the driver passes its facts in (treatment §1.1).",
             },
           ],
         },
