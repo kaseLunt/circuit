@@ -213,9 +213,34 @@ export function recordedProtocol(): RecordedProtocol {
   };
 }
 
-export function snapshotFrom(raw: RecordedProtocol, user: UserSnapshot): ChainSnapshot {
-  const mint = observationMinter(PINNED_BLOCK, Number(PINNED_TS));
-  const windowMint = observationMinter(WINDOW_BLOCK, Number(WINDOW_TS));
+/**
+ * Which block a rebuilt snapshot claims its observations were read at — and, when a staking
+ * window exists, which block its earlier endpoint was read at. Defaults to the committed
+ * reads log's pin, which keeps every existing caller byte-identical; the live capture path
+ * (Codex D-011 F2) passes the identity of ITS OWN capture, because minting a live read
+ * against the log's block would forge the one fact the wire exists to carry.
+ */
+export interface SnapshotPin {
+  readonly block: bigint;
+  readonly timestamp: bigint;
+  /** The staking window's earlier endpoint; unused (and unrequired) when `rateWindow` is null. */
+  readonly windowBlock: bigint;
+  readonly windowTimestamp: bigint;
+}
+
+const LOG_PIN: SnapshotPin = {
+  block: PINNED_BLOCK,
+  timestamp: PINNED_TS,
+  windowBlock: WINDOW_BLOCK,
+  windowTimestamp: WINDOW_TS,
+};
+
+export function snapshotFrom(
+  raw: RecordedProtocol,
+  user: UserSnapshot,
+  pin: SnapshotPin = LOG_PIN,
+): ChainSnapshot {
+  const mint = observationMinter(pin.block, Number(pin.timestamp));
   const reserve = (sym: "WETH" | "weETH", r: RawReserve) => ({
     underlying: r.underlying,
     aToken: r.aToken,
@@ -257,9 +282,15 @@ export function snapshotFrom(raw: RecordedProtocol, user: UserSnapshot): ChainSn
     ),
     deficit: mint.observe(r.deficit, `${sym}.getReserveDeficit`),
   });
+  // The window's earlier endpoint is minted by a SECOND minter pinned to ITS OWN block —
+  // created only when a window exists, so a windowless capture never demands a window pin.
+  const windowMint =
+    raw.etherfi.rateWindow === null
+      ? null
+      : observationMinter(pin.windowBlock, Number(pin.windowTimestamp));
   return {
-    block: PINNED_BLOCK,
-    blockTimestamp: PINNED_TS,
+    block: pin.block,
+    blockTimestamp: pin.timestamp,
     pool: raw.pool,
     reserves: { weETH: reserve("weETH", raw.weETH), WETH: reserve("WETH", raw.WETH) },
     eModeCategories: raw.eModes.map((m) => ({
@@ -281,10 +312,10 @@ export function snapshotFrom(raw: RecordedProtocol, user: UserSnapshot): ChainSn
       weETH: raw.etherfi.weETH,
       totalPooledEther: mint.observe(raw.etherfi.totalPooledEther, "LP.getTotalPooledEther"),
       totalShares: mint.observe(raw.etherfi.totalShares, "eETH.totalShares"),
-      // The window's earlier endpoint is minted by a SECOND minter pinned to ITS OWN block.
-      // Minting it against the pinned block would forge the very thing the quantity is about.
+      // Minting the earlier endpoint against the pinned block would forge the very thing
+      // the quantity is about, hence the second minter above.
       rateWindow:
-        raw.etherfi.rateWindow === null
+        raw.etherfi.rateWindow === null || windowMint === null
           ? null
           : {
               rateNow: mint.observe(raw.etherfi.rateWindow.rateNow, "weETH.getRate"),

@@ -16,9 +16,11 @@ import { createComposerStore } from "../../app/store/composer-store";
 import { ComposerStoreProvider } from "../../app/store/composer-provider";
 import { createWalletConfig } from "../../lib/wallet/config";
 import { demoSeam } from "../../lib/wallet/seam";
-import { WalletProvider } from "../../lib/wallet/wallet-provider";
+import { WalletProvider, useWalletBoundary } from "../../lib/wallet/wallet-provider";
+import { demoLiveCaptureSource } from "../../lib/live/demo-capture";
 import { ExecutionHost } from "../tx/execution-host";
 import { useLiveGate } from "../composer/sandbox-composer";
+import { useLiveSimulation } from "../composer/live-simulation";
 import { ConnectSurface } from "./connect-surface";
 
 const snapshot = fixtureSnapshot();
@@ -62,10 +64,26 @@ const CEILING = (() => {
 })();
 const OVER_BPS = CEILING.maxAllocationBps + 100;
 
-/** The composer's own wiring, isolated: the live gate feeding the execution column. */
-function LiveHost({ allocationBps }: { readonly allocationBps: number }) {
+/**
+ * The composer's own wiring, isolated: the live gate feeding the execution column, with the
+ * F2 live-simulation path composed exactly as `ComposerBody` composes it — the demo capture
+ * source (the committed reads log; hermetic) and a fixed monotonic clock.
+ */
+function LiveHost({
+  allocationBps,
+  captureOccupied,
+}: {
+  readonly allocationBps: number;
+  readonly captureOccupied: readonly Address[];
+}) {
   const state = { status: "ready", snapshot } as const;
-  const live = useLiveGate(state);
+  const wallet = useWalletBoundary();
+  const sessionAddress = wallet.session === null ? null : wallet.session.address;
+  const liveSim = useLiveSimulation(
+    demoLiveCaptureSource({ codeBearing: [], occupied: captureOccupied }),
+    () => 1_000,
+  );
+  const live = useLiveGate(state, liveSim);
   return (
     <ExecutionHost
       snapshot={state}
@@ -74,6 +92,8 @@ function LiveHost({ allocationBps }: { readonly allocationBps: number }) {
       borrowLimit={verdictAt(allocationBps)}
       mode={live.mode}
       liveRefusal={live.refusal}
+      liveSimulationPhase={liveSim.phase}
+      onLiveSimulate={sessionAddress === null ? null : () => liveSim.simulate(sessionAddress)}
       now={() => 1_000}
     />
   );
@@ -83,18 +103,26 @@ function mountLive(options: {
   readonly accounts: readonly Address[];
   readonly occupied: readonly Address[];
   readonly allocationBps: number;
+  /** The CAPTURE's occupied set, when a test needs it to disagree with the connect seam's
+   *  (the connect-clear-then-position-opened race); defaults to the seam's. */
+  readonly captureOccupied?: readonly Address[];
 }) {
-  return render(
+  const store = storeAt(options.allocationBps);
+  const view = render(
     <WalletProvider
       config={createWalletConfig(options.accounts, offlineTransport)}
       seam={demoSeam({ codeBearing: [], occupied: options.occupied })}
     >
-      <ComposerStoreProvider store={storeAt(options.allocationBps)}>
+      <ComposerStoreProvider store={store}>
         <ConnectSurface />
-        <LiveHost allocationBps={options.allocationBps} />
+        <LiveHost
+          allocationBps={options.allocationBps}
+          captureOccupied={options.captureOccupied ?? options.occupied}
+        />
       </ComposerStoreProvider>
     </WalletProvider>,
   );
+  return { store, view };
 }
 
 function mountHost(options: {
@@ -192,6 +220,68 @@ describe("SPEC §3 step 7 — live gating", () => {
       expect(
         screen.getAllByText("No simulation against this wallet's balances yet").length,
       ).toBeGreaterThan(0);
+    });
+    expect(
+      screen
+        .getByRole("button", { name: "Review & execute in sandbox" })
+        .getAttribute("aria-disabled"),
+    ).toBe("true");
+  });
+
+  it("clears the gate with a live simulation against the wallet, then regates on plan drift (F2/F3)", async () => {
+    const { store } = mountLive({ accounts: [CLEAN], occupied: [], allocationBps: 7000 });
+    fireEvent.click(screen.getByRole("button", { name: /Connect Mock/i }));
+    await waitFor(() => {
+      expect(
+        screen.getAllByText("No simulation against this wallet's balances yet").length,
+      ).toBeGreaterThan(0);
+    });
+
+    // The F2 clearing path: one press captures the wallet's pinned chain state (the demo
+    // source here; the wallet router in production), runs the same pure simulation, and
+    // the standing it mints is what lifts the gate — nothing else changed.
+    fireEvent.click(screen.getByRole("button", { name: "Simulate against this wallet" }));
+    await waitFor(() => {
+      expect(
+        screen
+          .getByRole("button", { name: "Review & execute in sandbox" })
+          .getAttribute("aria-disabled"),
+      ).toBeNull();
+    });
+    expect(screen.queryAllByText("No simulation against this wallet's balances yet")).toHaveLength(0);
+
+    // The F3 beat: edit the document — address unchanged, clock unchanged — and the gate
+    // refuses on the DRIFT, not on staleness: the simulated plan is not the current plan.
+    store.setState({ doc: flagshipGraph(10, 7100), rev: 2 });
+    await waitFor(() => {
+      expect(
+        screen.getAllByText("The strategy changed after it was simulated").length,
+      ).toBeGreaterThan(0);
+    });
+    expect(
+      screen
+        .getByRole("button", { name: "Review & execute in sandbox" })
+        .getAttribute("aria-disabled"),
+    ).toBe("true");
+    // The clearing control is offered again — drift is exactly what a re-simulation answers.
+    expect(screen.queryByRole("button", { name: "Simulate against this wallet" })).not.toBeNull();
+  });
+
+  it("states the refusal when the live simulation itself cannot stand behind Execute (F2)", async () => {
+    // The connect seam read clear, but the CAPTURE sees an Aave footprint — the position
+    // was opened between the two reads. The capture succeeds and the SIMULATION refuses
+    // (existing-footprint is a plan constraint), so the stated-absence path renders its
+    // reason rather than silently returning to the gated button.
+    mountLive({ accounts: [CLEAN], occupied: [], allocationBps: 7000, captureOccupied: [CLEAN] });
+    fireEvent.click(screen.getByRole("button", { name: /Connect Mock/i }));
+    await waitFor(() => {
+      expect(screen.queryByRole("button", { name: "Simulate against this wallet" })).not.toBeNull();
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Simulate against this wallet" }));
+    await waitFor(() => {
+      expect(screen.getByTestId("live-simulation-refusal").textContent).toContain(
+        "does not plan against this wallet's captured chain state",
+      );
     });
     expect(
       screen

@@ -27,7 +27,8 @@ import {
   type ReactNode,
 } from "react";
 import type { BorrowLimitVerdict } from "../../core/borrow-limit";
-import type { LiveExecuteRefusal } from "../../lib/wallet/gate";
+import { simulationCanClear, type LiveExecuteRefusal } from "../../lib/wallet/gate";
+import type { LiveSimulationPhase } from "../composer/live-simulation";
 import { LiveRefusalCard, liveRefusalCopy, type ComposerMode } from "../wallet/connect-surface";
 import { formatBpsAsPercent } from "../../core/format";
 import { buildPlan, type PlanSuccess } from "../../core/plan";
@@ -68,6 +69,13 @@ export interface ExecutionHostProps {
    */
   readonly mode?: ComposerMode;
   readonly liveRefusal?: LiveExecuteRefusal | null;
+  /**
+   * The live-simulation path's phase and trigger (Codex D-011 F2). The trigger is offered
+   * only against refusals a fresh simulation can CLEAR (`simulationCanClear` — the pure
+   * gate decides, this component renders); a null trigger means no wallet is connected.
+   */
+  readonly liveSimulationPhase?: LiveSimulationPhase;
+  readonly onLiveSimulate?: (() => void) | null;
   /**
    * An externally owned driver (the composer body creates one so the canvas can read
    * the executing step for its T26 frame). Omitted, the host composes its own from the
@@ -147,6 +155,8 @@ export function ExecutionHost({
   borrowLimit = null,
   mode = "sandbox",
   liveRefusal = null,
+  liveSimulationPhase = { kind: "idle" },
+  onLiveSimulate = null,
   driver: externalDriver,
   transport,
   storage,
@@ -344,6 +354,40 @@ export function ExecutionHost({
                */
               <>
                 {liveRefusal === null ? null : <LiveRefusalCard refusal={liveRefusal} />}
+                {liveSimulationPhase.kind === "refused" ? (
+                  /*
+                   * A capture or simulation that refused is a designed state with its
+                   * reason stated (SPEC §5) — never a silent return to the gated button.
+                   */
+                  <p
+                    role="status"
+                    data-testid="live-simulation-refusal"
+                    className="text-xs text-muted-foreground"
+                  >
+                    {liveSimulationPhase.reason}
+                  </p>
+                ) : null}
+                {onLiveSimulate !== null &&
+                liveRefusal !== null &&
+                simulationCanClear(liveRefusal) ? (
+                  /*
+                   * The F2 clearing path: capture the wallet's block-pinned chain state
+                   * through our RPC, run the same pure simulation, and the standing it
+                   * mints is what lifts the gate. Offered ONLY against refusals a fresh
+                   * simulation can answer — the pure gate decides which those are.
+                   */
+                  <TransactionButton
+                    variant="default"
+                    onClick={onLiveSimulate}
+                    gateReason={
+                      liveSimulationPhase.kind === "capturing"
+                        ? "Capturing this wallet's chain state…"
+                        : null
+                    }
+                  >
+                    Simulate against this wallet
+                  </TransactionButton>
+                ) : null}
                 <p className="text-xs text-muted-foreground">
                   Live execution signs from the connected wallet against Ethereum mainnet.
                   Nothing is sent until a fresh simulation against its real balances passes.

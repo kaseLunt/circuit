@@ -70,6 +70,9 @@ import {
   MOCK_OCCUPIED_ACCOUNTS,
 } from "../../lib/wallet/config";
 import { configuredDemoSeam } from "../../lib/wallet/seam";
+import { demoLiveCaptureSource } from "../../lib/live/demo-capture";
+import { liveSeam, trpcLiveCaptureSource } from "../../lib/live/live-transport";
+import { useLiveSimulation, type LiveSimulationView } from "./live-simulation";
 import { ConnectSurface, type ComposerMode } from "../wallet/connect-surface";
 import { executingBlockIdOf, runLocksDocument, RUN_LOCK_REASON } from "../tx/step-status";
 import { flagshipStore, resolveArrival, type Arrival } from "./arrival";
@@ -95,12 +98,17 @@ export function loadSandboxSnapshot(): SnapshotState {
  * is handed to the gate only so `planRequiresCodeFreeActor` can answer whether this strategy
  * contains a WETH withdrawal. Nothing about the wallet's balances is read from it.
  *
- * `simulation: null` is a STATEMENT, not a stub: no simulation has been run against the
- * connected wallet's real balances, so the gate refuses with `no-fresh-simulation` and
- * Execute stays gated — which is SPEC §3 step 7 verbatim. Wiring a live capture is the first
- * item on `docs/live-execution-checklist.md`.
+ * The SIMULATION standing comes from the live-simulation path (Codex D-011 F2): a
+ * block-pinned capture for the connected address through our configured RPC, the same pure
+ * `buildPlan`/`riskLedger` run over it, and a standing that binds address + plan hash +
+ * block identity + monotonic time. Until one exists the gate refuses with
+ * `no-fresh-simulation` — SPEC §3 step 7 verbatim — and after any drift (document edited,
+ * capture superseded) it refuses with the drift stated (F3).
  */
-export function useLiveGate(snapshot: SnapshotState): {
+export function useLiveGate(
+  snapshot: SnapshotState,
+  liveSim: LiveSimulationView,
+): {
   readonly mode: ComposerMode;
   readonly refusal: LiveExecuteRefusal | null;
 } {
@@ -121,7 +129,9 @@ export function useLiveGate(snapshot: SnapshotState): {
       session: wallet.session,
       readings: wallet.readings,
       plan,
-      simulation: null,
+      simulation: liveSim.standing,
+      currentPlanHash: liveSim.currentPlanHash,
+      currentSnapshot: liveSim.currentSnapshot,
       nowMonotonicMs: wallet.monotonicNow(),
     }),
   };
@@ -129,7 +139,10 @@ export function useLiveGate(snapshot: SnapshotState): {
 
 function ComposerBody({ snapshot }: { readonly snapshot: SnapshotState }) {
   const { simulation, simulationPending } = useSimulation(snapshot);
-  const live = useLiveGate(snapshot);
+  const wallet = useWalletBoundary();
+  const sessionAddress = wallet.session === null ? null : wallet.session.address;
+  const liveSim = useLiveSimulation(liveCaptureSource, wallet.monotonicNow);
+  const live = useLiveGate(snapshot, liveSim);
   // SPEC §3 step 4's verdict, derived once beside the simulation and handed to BOTH the
   // canvas (the block's inline refusal) and the execution column (the Simulate gate). One
   // derivation, two consumers — the two can never disagree about whether the borrow is past
@@ -177,6 +190,10 @@ function ComposerBody({ snapshot }: { readonly snapshot: SnapshotState }) {
           borrowLimit={borrowLimit}
           mode={live.mode}
           liveRefusal={live.refusal}
+          liveSimulationPhase={liveSim.phase}
+          onLiveSimulate={
+            sessionAddress === null ? null : () => liveSim.simulate(sessionAddress)
+          }
           driver={driver}
         />
       }
@@ -259,17 +276,36 @@ function ComposerFrame({
 }
 
 /**
- * The seam the running build uses. A demo/CI build (mock accounts configured) reads the
- * scenario table; a production build has none, so the provider's own stated-unavailable
- * default answers and the live gate REFUSES rather than admitting. Wiring the real
- * `eth_getCode` + footprint reads through `server/chain` is the first item on
- * `docs/live-execution-checklist.md`.
+ * The live capture source and the connect seam this build uses — ONE composition rule for
+ * both, so the readings and the snapshot can never come from different worlds:
+ *
+ *  - A demo/CI build (mock accounts configured) reads the scenario table and the
+ *    committed-reads-log demo capture — hermetic, no chain, no secrets.
+ *  - A production build composes the REAL wallet-router procedure (Codex D-011 F2):
+ *    `eth_getCode` + the §2 footprint + the block-pinned capture, all through our
+ *    configured RPC. With no `LIVE_CHAIN_RPC_URL` in the deployment, the router answers
+ *    its stated refusal, the seam reads as unavailable, and the gate REFUSES — SPEC §5's
+ *    explicit absence, never a permissive default.
+ *  - `NEXT_PUBLIC_WALLET_LIVE_SOURCE=rpc` forces the real procedure even with mock
+ *    accounts configured — the fork e2e rig's posture, where the mock connector supplies
+ *    the SESSION and the wallet router performs the CAPTURE against the pinned fork
+ *    upstream, which is what makes that suite the authoritative proof of this path.
  */
-const demoSeamOrDefault =
-  configuredDemoSeam(
-    { codeBearing: MOCK_CODE_BEARING_ACCOUNTS, occupied: MOCK_OCCUPIED_ACCOUNTS },
-    MOCK_ACCOUNTS.length > 0,
-  ) ?? undefined;
+const hasMockAccounts = MOCK_ACCOUNTS.length > 0;
+const forceRpcCapture = process.env.NEXT_PUBLIC_WALLET_LIVE_SOURCE === "rpc";
+const liveCaptureSource =
+  hasMockAccounts && !forceRpcCapture
+    ? demoLiveCaptureSource({
+        codeBearing: MOCK_CODE_BEARING_ACCOUNTS,
+        occupied: MOCK_OCCUPIED_ACCOUNTS,
+      })
+    : trpcLiveCaptureSource();
+const demoSeamOrDefault = forceRpcCapture
+  ? liveSeam(liveCaptureSource)
+  : (configuredDemoSeam(
+      { codeBearing: MOCK_CODE_BEARING_ACCOUNTS, occupied: MOCK_OCCUPIED_ACCOUNTS },
+      hasMockAccounts,
+    ) ?? liveSeam(liveCaptureSource));
 
 export function SandboxComposer() {
   const [store, setStore] = useState(flagshipStore);
