@@ -873,6 +873,90 @@ def test_historical_drift_review(root: Path) -> None:
     )
 
 
+def test_same_phase_successor_drift(root: Path) -> None:
+    print("Same-phase successor drift (currency relaxed while a successor is active; re-arms at rest)")
+    repo = root / "successor-drift"
+    baseline = build_candidate(repo)
+    set_work_state(repo, "achieved", ["src/**"])
+    receipt = "roadmap/evidence/E-SYNTHETIC.md"
+    work_path = repo / "roadmap" / "work" / "W0.md"
+    write(
+        work_path,
+        read(work_path).replace(
+            "evidence_receipts: []", f"evidence_receipts:\n  - {receipt}"
+        ),
+    )
+    write(repo / receipt, evidence_text(baseline, *receipt_basis(repo, baseline)))
+    must(git(repo, "add", "roadmap"), "stage achieved contract and receipt")
+    must(
+        tool(repo, "doctor.py", "--stamp", "W0", "--now", "2030-01-02T00:00:00Z"),
+        "stamp synthetic achieved work",
+    )
+    # A SECOND work item in the SAME phase becomes the active task — the split-phase
+    # shape (W07 achieved, W08 active) whose charter is to evolve the shared inputs.
+    write(
+        repo / "roadmap" / "work" / "W1.md",
+        work_text("active", ["src/**"]).replace("id: W0", "id: W1").replace(
+            "title: Synthetic work", "title: Synthetic successor"
+        ),
+    )
+    write(
+        repo / "roadmap" / "STATUS.md",
+        read(repo / "roadmap" / "STATUS.md").replace(
+            "active_task: none", "active_task: W1"
+        ),
+    )
+    write(
+        repo / "roadmap" / "ROADMAP.md",
+        read(repo / "roadmap" / "ROADMAP.md").replace(
+            "| W0 | Synthetic work | P0 | — | Correct | achieved |",
+            "| W0 | Synthetic work | P0 | — | Correct | achieved |\n"
+            "| W1 | Synthetic successor | P0 | — | Correct | active |",
+        ),
+    )
+    must(tool(repo, "claim.py", "open", "writer", "W1", "--integrator"), "open successor claim")
+    commit_all(repo, "synthetic same-phase successor activation")
+    quiet = tool(repo, "doctor.py", "--now", "2030-01-02T00:00:00Z")
+    write(repo / "src" / "allowed.txt", "the successor evolved a shared input\n")
+    commit_all(repo, "synthetic successor drift")
+    relaxed = tool(repo, "doctor.py", "--now", "2030-01-02T00:00:00Z")
+    check(
+        "successor:drift-relaxed-while-active",
+        quiet.returncode == 0 and relaxed.returncode == 0,
+        "\n".join(map(output, (quiet, relaxed))),
+    )
+    # The phase comes to rest: the successor releases and active_task returns to
+    # none — the ERROR-level checks re-arm, so the drift cannot go unexplained.
+    must(tool(repo, "claim.py", "release", "writer"), "release successor claim")
+    write(
+        repo / "roadmap" / "STATUS.md",
+        read(repo / "roadmap" / "STATUS.md").replace(
+            "active_task: W1", "active_task: none"
+        ),
+    )
+    write(
+        repo / "roadmap" / "work" / "W1.md",
+        read(repo / "roadmap" / "work" / "W1.md").replace(
+            "status: active", "status: candidate"
+        ),
+    )
+    write(
+        repo / "roadmap" / "ROADMAP.md",
+        read(repo / "roadmap" / "ROADMAP.md").replace(
+            "| W1 | Synthetic successor | P0 | — | Correct | active |",
+            "| W1 | Synthetic successor | P0 | — | Correct | candidate |",
+        ),
+    )
+    commit_all(repo, "synthetic phase rest")
+    rearmed = tool(repo, "doctor.py", "--now", "2030-01-02T00:00:00Z")
+    check(
+        "successor:currency-re-arms-at-rest",
+        rearmed.returncode == 1
+        and "differ from the tested commit" in output(rearmed),
+        output(rearmed),
+    )
+
+
 def test_enforcement_posture(root: Path) -> None:
     print("Evidence-backed enforcement posture")
     repo = root / "enforcement-posture"
@@ -1728,6 +1812,7 @@ def main() -> int:
         test_reviewer_core_rules(root)
         test_evidence_round_trip(root)
         test_historical_drift_review(root)
+        test_same_phase_successor_drift(root)
         test_enforcement_posture(root)
         test_project_completion(root)
         test_owner_semantics_and_immutability(root)

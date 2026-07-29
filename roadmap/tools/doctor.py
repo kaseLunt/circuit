@@ -773,11 +773,24 @@ def main() -> int:
                     # moved on), an achieved item is historical — its receipt stays valid
                     # as of its immutable tested_commit, and later phases legitimately
                     # evolve shared inputs (package.json, configs) without unachieving it.
+                    # W08 activation surfaced the same-phase version of that truth: while
+                    # a SUCCESSOR work item in the same phase is active (a split phase's
+                    # second item), evolving the shared inputs IS that item's charter —
+                    # per-commit currency would block every landing it makes. Drift under
+                    # an active successor is therefore serviced by the drift-receipt
+                    # discipline instead: when the phase comes to rest (active_task
+                    # returns to none) this check re-arms, so nothing achieves, releases,
+                    # or exits the phase with the drift unexplained.
                     # Recorded-vs-tested integrity is always checked regardless.
                     in_active_phase = (not active_phase) or (phase == active_phase)
+                    successor_active = active_task not in ("", "none") and active_task != object_id
                     for receipt in receipts:
                         validate_evidence_receipt(
-                            snapshot, receipt, object_id, now, check_currency=in_active_phase
+                            snapshot,
+                            receipt,
+                            object_id,
+                            now,
+                            check_currency=in_active_phase and not successor_active,
                         )
                     for invalidation_scope in invalidated:
                         if not any(
@@ -792,11 +805,13 @@ def main() -> int:
                     stored = scalar(data, "evidence_fingerprint", path)
                     if not stored:
                         errors.append(f"{path}: achieved without evidence_fingerprint; verify then run doctor.py --stamp {object_id}")
-                    elif invalidated_raw and in_active_phase:
+                    elif invalidated_raw and in_active_phase and not successor_active:
                         # Freshness (stamped fingerprint vs current inputs) is an
                         # active-phase guarantee (D-006), mirroring the receipt-currency
                         # scope: a completed phase's attainment is historical and is not
-                        # invalidated by later phases evolving shared inputs.
+                        # invalidated by later phases evolving shared inputs — and, same
+                        # relaxation, an active same-phase successor's charter is to
+                        # evolve them; the check re-arms with active_task: none.
                         current = evidence_fingerprint(snapshot, data, path)
                         if current != stored:
                             errors.append(f"{path}: evidence INVALIDATED ({stored} != {current})")
