@@ -20,7 +20,7 @@ allowed_paths:
   - tsconfig.json
   - next.config.ts
   - eslint.config.mjs
-  - vitest.config.ts
+  - vitest.config.mjs
   - playwright.config.ts
   - postcss.config.mjs
   - README.md

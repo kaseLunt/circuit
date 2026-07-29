@@ -17,7 +17,7 @@ allowed_paths:
   - src/app/layout.tsx
   - package.json
   - package-lock.json
-  - vitest.config.ts
+  - vitest.config.mjs
   - eslint.config.mjs
   - .github/**
   - roadmap/work/W03-p1-finance-core.md
