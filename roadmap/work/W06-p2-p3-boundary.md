@@ -19,13 +19,13 @@ deliverables:
   - README.md
   - LICENSE
 evidence_receipts:
-  - roadmap/evidence/E-W06-p2-p3-boundary.md
+  - roadmap/evidence/E-W06-p2-p3-boundary-r2.md
 invalidated_by:
   - SPEC.md
   - roadmap/decisions/**
 review_when: event:invalidated-by-change
 updated: 2026-07-26
-evidence_fingerprint: sha256:77586685fb11512699913b10f80bff6b92e5b5a7160b67273c845e9807d94fb2
+evidence_fingerprint: sha256:8965ea64db6d1d94b19f25b9a6c5b411ac33ab06899989517a30b6c3ddd367dc
 ---
 
 # W06 — P2→P3 boundary

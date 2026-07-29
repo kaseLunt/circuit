@@ -54,7 +54,8 @@ deliverables:
   - eslint.config.mjs
   - SPEC.md
   - .github/workflows/ci.yml
-evidence_receipts: []
+evidence_receipts:
+  - roadmap/evidence/E-W07-p3-execution.md
 invalidated_by:
   - SPEC.md
   - src/core/**
@@ -69,6 +70,7 @@ invalidated_by:
   - package.json
 review_when: phase:P3:exit
 updated: 2026-07-26
+evidence_fingerprint: sha256:59dcd51d96f0c53ced940b1f881237a3d3762b52318a2d0ce61602b82d3f7cb1
 ---
 
 # W07 — P3a execution
