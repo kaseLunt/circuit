@@ -79,6 +79,7 @@ jobs:
   # webServer builds and serves the production bundle (e2e/playwright.fork.config.ts), so
   # there is deliberately no separate build step here to drift from it.
   e2e-fork:
+    needs: fork
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
