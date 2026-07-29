@@ -82,6 +82,23 @@ export function liveRefusalCopy(refusal: LiveExecuteRefusal): {
         title: "The simulation belongs to a different wallet",
         explanation: `It was run against ${refusal.simulatedFor}, and ${refusal.connected} is connected. A simulation against another wallet's balances answers a different question.`,
       };
+    case "plan-drift":
+      return {
+        title: "The strategy changed after it was simulated",
+        explanation:
+          refusal.current === null
+            ? "The document no longer produces a plan over the captured chain state, so the simulated result is about a strategy that no longer exists. Re-simulate to price what is on the canvas now."
+            : "The plan on the canvas is not the plan that was simulated — an edit changed its steps or amounts. A drifted simulation is not stale, it answers a different question; re-simulate to price this one.",
+      };
+    case "snapshot-drift":
+      return {
+        title: "The simulation is pinned to different chain state",
+        explanation: `It priced against block ${refusal.simulatedAt.block}${
+          refusal.current === null
+            ? ", and no captured chain state is currently in hand"
+            : `, and the capture in hand is block ${refusal.current.block}`
+        }. Re-simulate so the result and the state it is about are the same thing.`,
+      };
   }
 }
 

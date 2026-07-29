@@ -1,24 +1,23 @@
 import { describe, expect, it } from "vitest";
 import { getAddress, type Address } from "viem";
-import { buildPlan, type PlanSuccess } from "../../core/plan";
-import { flagshipGraph } from "../../../tests/helpers/graphs";
-import { fixtureSnapshot } from "../../../tests/helpers/chain-snapshot";
+import type { PlanSuccess } from "../../core/plan";
+import { canonicalFlagshipPlan } from "../../../tests/helpers/plans";
 import { LIVE_SIMULATION_MAX_AGE_MS } from "../execution/tolerance";
 import {
   LIVE_CHAIN_ID,
   liveConnectRefusalOf,
   liveExecuteRefusalOf,
   planRequiresCodeFreeActor,
+  simulationCanClear,
   walletDeparted,
+  type LiveExecuteRefusal,
 } from "./gate";
 import type { WalletSeamReadings, WalletSession } from "./types";
 
-/** The canonical 13-step flagship — the plan every live gate in the product runs against. */
-const canonicalPlan: PlanSuccess = (() => {
-  const result = buildPlan(flagshipGraph(), fixtureSnapshot());
-  if (!result.ok) throw new Error("canonical flagship plan failed to build");
-  return result;
-})();
+/** The canonical 13-step flagship — the plan every live gate in the product runs against.
+ *  Built OUTSIDE the wallet directory (tests/helpers/plans.ts): the F5b quarantine bans
+ *  core money-math value imports here, tests included, and the fixture respects it. */
+const canonicalPlan: PlanSuccess = canonicalFlagshipPlan();
 
 /** The same plan with the WETH withdrawal removed — no stipend send, so no code gate. */
 const noWithdrawPlan: PlanSuccess = {
@@ -137,85 +136,176 @@ describe("liveConnectRefusalOf", () => {
 });
 
 describe("liveExecuteRefusalOf", () => {
+  /** The hash the composer computed when the gating simulation ran (planHashOf's shape). */
+  const SIMULATED_HASH = `0x${"ab".repeat(32)}` as const;
+  /** A different document's hash — one byte moved. */
+  const EDITED_HASH = `0x${"ab".repeat(31)}cd` as const;
+  const PINNED = { block: 22_000_000n, blockHash: `0x${"11".repeat(32)}` } as const;
+  const OTHER_BLOCK = { block: 22_000_010n, blockHash: `0x${"22".repeat(32)}` } as const;
+
   const standing = (atMs: number, simulatedFor: Address = WALLET) => ({
     simulatedFor,
     simulatedAtMonotonicMs: atMs,
+    planHash: SIMULATED_HASH,
+    snapshot: PINNED,
+  });
+
+  /** The inputs of the happy path; each test states only what it breaks. */
+  const inputs = (overrides: Partial<Parameters<typeof liveExecuteRefusalOf>[0]> = {}) => ({
+    session: session(),
+    readings: CLEAR,
+    plan: canonicalPlan,
+    simulation: standing(0),
+    currentPlanHash: SIMULATED_HASH as `0x${string}` | null,
+    currentSnapshot: PINNED as (typeof PINNED) | null,
+    nowMonotonicMs: 0,
+    ...overrides,
   });
 
   it("refuses with no wallet at all", () => {
-    expect(
-      liveExecuteRefusalOf({
-        session: null,
-        readings: CLEAR,
-        plan: canonicalPlan,
-        simulation: standing(0),
-        nowMonotonicMs: 0,
-      }),
-    ).toEqual({ kind: "not-connected" });
+    expect(liveExecuteRefusalOf(inputs({ session: null }))).toEqual({ kind: "not-connected" });
   });
 
   it("propagates the connect refusal rather than inventing a second vocabulary", () => {
-    expect(
-      liveExecuteRefusalOf({
-        session: session({ chainId: 10 }),
-        readings: CLEAR,
-        plan: canonicalPlan,
-        simulation: standing(0),
-        nowMonotonicMs: 0,
-      }),
-    ).toEqual({ kind: "wrong-chain", chainId: 10, expected: LIVE_CHAIN_ID });
+    expect(liveExecuteRefusalOf(inputs({ session: session({ chainId: 10 }) }))).toEqual({
+      kind: "wrong-chain",
+      chainId: 10,
+      expected: LIVE_CHAIN_ID,
+    });
   });
 
   it("refuses until a simulation exists — SPEC §3 step 7's fresh-simulation gate", () => {
-    expect(
-      liveExecuteRefusalOf({
-        session: session(),
-        readings: CLEAR,
-        plan: canonicalPlan,
-        simulation: null,
-        nowMonotonicMs: 0,
-      }),
-    ).toEqual({ kind: "no-fresh-simulation" });
+    expect(liveExecuteRefusalOf(inputs({ simulation: null }))).toEqual({
+      kind: "no-fresh-simulation",
+    });
   });
 
   it("refuses a simulation captured for a different wallet's balances", () => {
-    expect(
-      liveExecuteRefusalOf({
-        session: session(),
-        readings: CLEAR,
-        plan: canonicalPlan,
-        simulation: standing(0, OTHER),
-        nowMonotonicMs: 0,
-      }),
-    ).toEqual({ kind: "simulation-address-drift", simulatedFor: OTHER, connected: WALLET });
+    expect(liveExecuteRefusalOf(inputs({ simulation: standing(0, OTHER) }))).toEqual({
+      kind: "simulation-address-drift",
+      simulatedFor: OTHER,
+      connected: WALLET,
+    });
   });
 
-  it("admits a fresh simulation for the connected wallet", () => {
+  it("admits a fresh simulation for the connected wallet over the same plan and capture", () => {
     expect(
-      liveExecuteRefusalOf({
-        session: session(),
-        readings: CLEAR,
-        plan: canonicalPlan,
-        simulation: standing(1_000),
-        nowMonotonicMs: 1_000 + LIVE_SIMULATION_MAX_AGE_MS,
-      }),
+      liveExecuteRefusalOf(
+        inputs({
+          simulation: standing(1_000),
+          nowMonotonicMs: 1_000 + LIVE_SIMULATION_MAX_AGE_MS,
+        }),
+      ),
     ).toBeNull();
+  });
+
+  it("refuses when the allocation is edited after simulating — plan drift, address and clock unchanged (Codex D-011 F3)", () => {
+    // The exact hole the finding names: simulate plan A, edit the allocation, press Execute
+    // on plan B inside the freshness window. Address identical, zero milliseconds elapsed —
+    // only the document moved, and the gate must refuse on THAT.
+    expect(liveExecuteRefusalOf(inputs({ currentPlanHash: EDITED_HASH }))).toEqual({
+      kind: "plan-drift",
+      simulated: SIMULATED_HASH,
+      current: EDITED_HASH,
+    });
+  });
+
+  it("refuses as plan drift when the current document no longer plans over the capture at all", () => {
+    expect(liveExecuteRefusalOf(inputs({ currentPlanHash: null }))).toEqual({
+      kind: "plan-drift",
+      simulated: SIMULATED_HASH,
+      current: null,
+    });
+  });
+
+  it("refuses when the capture in hand is a different pinned block — snapshot drift", () => {
+    expect(liveExecuteRefusalOf(inputs({ currentSnapshot: OTHER_BLOCK }))).toEqual({
+      kind: "snapshot-drift",
+      simulatedAt: PINNED,
+      current: OTHER_BLOCK,
+    });
+  });
+
+  it("refuses as snapshot drift when a hash mismatch impersonates the pinned block number", () => {
+    const reorged = { block: PINNED.block, blockHash: OTHER_BLOCK.blockHash };
+    expect(liveExecuteRefusalOf(inputs({ currentSnapshot: reorged }))).toEqual({
+      kind: "snapshot-drift",
+      simulatedAt: PINNED,
+      current: reorged,
+    });
+  });
+
+  it("compares block hashes case-insensitively — a checksum casing is not a reorg", () => {
+    const uppercased = {
+      block: PINNED.block,
+      blockHash: PINNED.blockHash.toUpperCase() as `0x${string}`,
+    };
+    expect(liveExecuteRefusalOf(inputs({ currentSnapshot: uppercased }))).toBeNull();
+  });
+
+  it("refuses as snapshot drift when the capture the standing pinned is gone", () => {
+    expect(liveExecuteRefusalOf(inputs({ currentSnapshot: null }))).toEqual({
+      kind: "snapshot-drift",
+      simulatedAt: PINNED,
+      current: null,
+    });
+  });
+
+  it("reports drift, never staleness, when both apply — drift is a different question, not an old one", () => {
+    const refusal = liveExecuteRefusalOf(
+      inputs({
+        currentPlanHash: EDITED_HASH,
+        simulation: standing(0),
+        nowMonotonicMs: LIVE_SIMULATION_MAX_AGE_MS + 60_000,
+      }),
+    );
+    expect(refusal).toEqual({ kind: "plan-drift", simulated: SIMULATED_HASH, current: EDITED_HASH });
   });
 
   it("regates one millisecond past the named max age, and names the bound it applied", () => {
     expect(
-      liveExecuteRefusalOf({
-        session: session(),
-        readings: CLEAR,
-        plan: canonicalPlan,
-        simulation: standing(1_000),
-        nowMonotonicMs: 1_001 + LIVE_SIMULATION_MAX_AGE_MS,
-      }),
+      liveExecuteRefusalOf(
+        inputs({
+          simulation: standing(1_000),
+          nowMonotonicMs: 1_001 + LIVE_SIMULATION_MAX_AGE_MS,
+        }),
+      ),
     ).toEqual({
       kind: "stale-simulation",
       ageMs: LIVE_SIMULATION_MAX_AGE_MS + 1,
       maxAgeMs: LIVE_SIMULATION_MAX_AGE_MS,
     });
+  });
+});
+
+describe("simulationCanClear", () => {
+  const PINNED = { block: 1n, blockHash: `0x${"11".repeat(32)}` } as const;
+
+  it("offers the simulate control against every refusal a fresh simulation can answer", () => {
+    const clearable: LiveExecuteRefusal[] = [
+      { kind: "no-fresh-simulation" },
+      { kind: "stale-simulation", ageMs: 1, maxAgeMs: 0 },
+      { kind: "simulation-address-drift", simulatedFor: OTHER, connected: WALLET },
+      { kind: "plan-drift", simulated: `0x${"ab".repeat(32)}`, current: null },
+      { kind: "snapshot-drift", simulatedAt: PINNED, current: null },
+    ];
+    for (const refusal of clearable) {
+      expect(simulationCanClear(refusal), refusal.kind).toBe(true);
+    }
+  });
+
+  it("never offers it against a connect-level refusal — a simulation cannot answer those", () => {
+    const connectLevel: LiveExecuteRefusal[] = [
+      { kind: "not-connected" },
+      { kind: "wrong-chain", chainId: 10, expected: LIVE_CHAIN_ID },
+      { kind: "code-bearing-wallet" },
+      { kind: "code-unknown", reason: "not read" },
+      { kind: "existing-footprint" },
+      { kind: "footprint-unknown", reason: "not read" },
+    ];
+    for (const refusal of connectLevel) {
+      expect(simulationCanClear(refusal), refusal.kind).toBe(false);
+    }
   });
 });
 

@@ -13,7 +13,7 @@
  * `LIVE_SIMULATION_MAX_AGE_MS`, is imported from `tolerance.ts` where it is named and
  * justified.
  */
-import { getAddress, type Address } from "viem";
+import { getAddress, type Address, type Hex } from "viem";
 import type { PlanSuccess } from "../../core/plan";
 import { LIVE_SIMULATION_MAX_AGE_MS } from "../execution/tolerance";
 import type { WalletSeamReadings, WalletSession } from "./types";
@@ -70,7 +70,42 @@ export type LiveExecuteRefusal =
       readonly kind: "simulation-address-drift";
       readonly simulatedFor: Address;
       readonly connected: Address;
+    }
+  /**
+   * The document moved since the gating simulation ran: the standing's plan hash no longer
+   * matches the hash of the plan the document derives NOW. A drifted simulation is not a
+   * stale one — it is about a different question — so this is its own refusal kind, checked
+   * BEFORE the staleness clock is even consulted (Codex D-011 F3: simulate plan A, edit
+   * allocation, execute plan B inside the freshness window is exactly the hole this closes).
+   * `current` is null when the current document produces no plan over the pinned capture at
+   * all — which is drift stated at its most severe, not a pass.
+   */
+  | {
+      readonly kind: "plan-drift";
+      readonly simulated: Hex;
+      readonly current: Hex | null;
+    }
+  /**
+   * The block-pinned capture the standing simulated against is no longer the capture in
+   * hand. Same doctrine as `plan-drift`: a simulation against another block's state answers
+   * a different question, whatever the clock says.
+   */
+  | {
+      readonly kind: "snapshot-drift";
+      readonly simulatedAt: LiveSnapshotIdentity;
+      readonly current: LiveSnapshotIdentity | null;
     };
+
+/** The block identity a live capture is pinned to — number AND hash, so a reorg cannot
+ *  impersonate the block the simulation priced against. */
+export interface LiveSnapshotIdentity {
+  readonly block: bigint;
+  readonly blockHash: Hex;
+}
+
+function sameSnapshotIdentity(a: LiveSnapshotIdentity, b: LiveSnapshotIdentity): boolean {
+  return a.block === b.block && a.blockHash.toLowerCase() === b.blockHash.toLowerCase();
+}
 
 /**
  * The connect-time seam checks, in the order their evidence arrives.
@@ -114,6 +149,15 @@ export interface LiveSimulationStanding {
   readonly simulatedFor: Address;
   /** Monotonic reading at `plan-ready` — enforcement never reads wall time (D9). */
   readonly simulatedAtMonotonicMs: number;
+  /**
+   * `planHashOf` over the steps the gating simulation ran — computed by the COMPOSER, which
+   * owns the plan, and carried here as an opaque fingerprint. The gate only compares; it
+   * never hashes, so the wallet module's one value-route into `lib/execution` stays the
+   * tolerance constant and nothing else (Codex D-011 F5 seam ruling).
+   */
+  readonly planHash: Hex;
+  /** The capture the simulation priced against, by block number AND hash. */
+  readonly snapshot: LiveSnapshotIdentity;
 }
 
 export interface LiveExecuteGateInputs {
@@ -121,6 +165,15 @@ export interface LiveExecuteGateInputs {
   readonly readings: WalletSeamReadings;
   readonly plan: PlanSuccess;
   readonly simulation: LiveSimulationStanding | null;
+  /**
+   * `planHashOf` over the plan the CURRENT document derives from the pinned live capture —
+   * recomputed by the composer on every document change, null when the current document no
+   * longer plans over that capture. Compared against `simulation.planHash`: inequality is
+   * the F3 plan-drift refusal.
+   */
+  readonly currentPlanHash: Hex | null;
+  /** The capture currently in hand, null when none is. */
+  readonly currentSnapshot: LiveSnapshotIdentity | null;
   /** Monotonic reading now (D9). */
   readonly nowMonotonicMs: number;
 }
@@ -142,11 +195,53 @@ export function liveExecuteRefusalOf(inputs: LiveExecuteGateInputs): LiveExecute
   if (simulatedFor !== connected) {
     return { kind: "simulation-address-drift", simulatedFor, connected };
   }
+  // Drift BEFORE staleness (Codex D-011 F3): a simulation about a different document or a
+  // different pinned block is not "old", it is about a different question, and reporting it
+  // as merely stale would invite a re-press of Execute rather than a re-simulation.
+  if (
+    inputs.currentSnapshot === null ||
+    !sameSnapshotIdentity(standing.snapshot, inputs.currentSnapshot)
+  ) {
+    return {
+      kind: "snapshot-drift",
+      simulatedAt: standing.snapshot,
+      current: inputs.currentSnapshot,
+    };
+  }
+  if (inputs.currentPlanHash === null || inputs.currentPlanHash !== standing.planHash) {
+    return { kind: "plan-drift", simulated: standing.planHash, current: inputs.currentPlanHash };
+  }
   const ageMs = inputs.nowMonotonicMs - standing.simulatedAtMonotonicMs;
   if (ageMs > LIVE_SIMULATION_MAX_AGE_MS) {
     return { kind: "stale-simulation", ageMs, maxAgeMs: LIVE_SIMULATION_MAX_AGE_MS };
   }
   return null;
+}
+
+/**
+ * Which refusals a fresh simulation against the connected wallet can CLEAR — the decision
+ * behind the composer's "Simulate against this wallet" control (D10: the control renders
+ * what is decided here). Connect-level refusals are scope boundaries or mistakes a
+ * simulation cannot answer (wrong chain, code-bearing wallet, existing footprint, unread
+ * seams), so offering the button against them would promise something the product refuses
+ * to deliver.
+ */
+export function simulationCanClear(refusal: LiveExecuteRefusal): boolean {
+  switch (refusal.kind) {
+    case "no-fresh-simulation":
+    case "stale-simulation":
+    case "simulation-address-drift":
+    case "plan-drift":
+    case "snapshot-drift":
+      return true;
+    case "not-connected":
+    case "wrong-chain":
+    case "code-bearing-wallet":
+    case "code-unknown":
+    case "existing-footprint":
+    case "footprint-unknown":
+      return false;
+  }
 }
 
 /**
