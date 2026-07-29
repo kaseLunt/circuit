@@ -143,18 +143,24 @@ async function armSandboxRun(page: Page): Promise<Locator> {
 }
 
 /**
- * The sibling suite's tooltip reader — opened the way a keyboard user does — with the
- * lookup scoped to the SLOT'S OWN wrapper rather than the page. The page-level lookup is
- * ambiguous here: a pointer parked by an earlier click can sit over a neighbouring slot
- * (Chromium recomputes hover when content changes underneath it), holding a second
- * tooltip open, and DOM order then hands back the wrong evidence. The tooltip a slot's
- * focus opens is its sibling inside the same wrapper span, so that is where it is read.
+ * The provenance reader for the execution column's DISCLOSURE surface (the column moved
+ * off floating tooltips when they clipped against the aside — the panel slots open an
+ * inline `role="group"` evidence panel on click, per the W05 panel contract). Scoped to
+ * the slot's own wrapper for the same reason the old reader was: page-level lookups can
+ * read a neighbouring slot's evidence. Escape closes and returns focus to the trigger,
+ * so successive reads never stack panels.
  */
 async function citationOf(slot: Locator): Promise<{ label: string; lines: string[] }> {
-  await slot.focus();
-  const tooltip = slot.locator("xpath=ancestor::span[1]").getByRole("tooltip");
-  await expect(tooltip).toBeVisible();
-  const [label = "", ...lines] = await tooltip.locator("> span").allTextContents();
+  // Once open, the wrapper also contains the panel's Close button — the bare slot
+  // locator goes strict-mode ambiguous, so the trigger is pinned before the click.
+  const trigger = slot.first();
+  await trigger.click();
+  const panel = trigger.locator("xpath=ancestor::span[1]").getByRole("group");
+  await expect(panel).toBeVisible();
+  const label = (await panel.getAttribute("aria-label")) ?? "";
+  const lines = (await panel.locator("span").allTextContents()).filter((t) => t.trim().length > 0);
+  await panel.press("Escape");
+  await expect(panel).toBeHidden();
   return { label, lines };
 }
 
