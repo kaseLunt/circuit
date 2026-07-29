@@ -1,5 +1,5 @@
 /**
- * SPEC §3, the demo script's EXECUTION beats — steps 4–7 — against a real sandbox session.
+ * The sandbox execution arc — arm, review, execute, attribute, receipt — against a real
  *
  * A SIBLING of demo-script.spec.ts rather than an extension of it, because the two suites
  * have different environmental truths: steps 1–3 and 8 run on the recorded read set alone
@@ -171,7 +171,7 @@ function emitNotice(title: string, payload: unknown): void {
   console.log(`::notice title=${title}::${escaped}`);
 }
 
-test.describe("SPEC §3 step 4 — the pre-execute review on the session fork", () => {
+test.describe("Sandbox execution — the pre-execute review on the session fork", () => {
   test("reviews every planned call, the tolerance contract, the block pin and the session facts", async ({
     page,
   }) => {
@@ -291,7 +291,7 @@ declare global {
   }
 }
 
-test.describe("SPEC §3 steps 5–7 — execute, watch attribution, read the receipt", () => {
+test.describe("Sandbox execution — run all steps, watch attribution, read the receipt", () => {
   /**
    * One continuous test for the three beats, deliberately: they are claims about ONE run
    * (§6 — a failed or re-armed run has no resumable prefix, so re-executing per beat

@@ -77,7 +77,17 @@ export default defineConfig({
         "src/components/tx/execution-host.tsx",
       ],
       exclude: ["src/**/*.test.{ts,tsx}"],
-      thresholds: { lines: 95, branches: 90, functions: 95, statements: 95 },
+      thresholds: {
+        lines: 95,
+        branches: 90,
+        functions: 95,
+        statements: 95,
+        // The execution money path holds 100% as an enforced, commit-bound claim
+        // (phase-review finding: a percentage nobody enforces is a claim, not evidence).
+        // process-exit.ts carries one uncovered function: the never-invoked no-op
+        // placeholder its promise executor replaces at construction.
+        "src/lib/execution/*.ts": { lines: 100, branches: 100, statements: 100 },
+      },
     },
   },
 });

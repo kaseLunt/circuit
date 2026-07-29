@@ -27,7 +27,7 @@ jobs:
       # deliberately-violating fixtures under tests/lint/fixtures/ with ignores disabled and
       # fails if any of them has stopped erroring (W07 finding 4).
       - run: npm run check:lint-boundaries
-      - run: npm test
+      - run: npm run test:coverage
 
   # SPEC §3 steps 1-3 and 8 against the recorded read set — no chain, no wallet, no secret,
   # so this gate runs on every PR alongside `ci`. The suite's own webServer builds and serves
@@ -70,7 +70,7 @@ jobs:
         env:
           FORK_RPC_URL: ${{ secrets.FORK_RPC_URL }}
 
-  # SPEC §3 steps 4-7 — the execution beats — in the browser against a real sandbox
+  # The sandbox execution arc (P3a; SPEC §3 execution beats scoped per W07 rescope) — in the browser against a real sandbox
   # session. Rides the fork job's secret pattern and fails closed without it (external
   # PRs keep `ci` and `e2e` as their green gates). The topology mirrors the local
   # harness: one pristine upstream anvil at the pinned block (the dedicated-upstream
