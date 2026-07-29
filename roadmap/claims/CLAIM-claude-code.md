@@ -1,13 +1,13 @@
 ---
-claim_id: 9ff19774-9724-42a6-a574-8c3cb2fedf27
-generation: 12
+claim_id: 893c505d-4966-4908-a5b2-76cb2a76a145
+generation: 13
 agent: claude-code
 task: W08
 status: active
 integrator: true
 branch: w05
 worktree_id: fcc099da-1d6b-593f-bfcb-bd6915fc89c2
-base_commit: 753a9745173c054c61d71e932d4f897f00b0658f
+base_commit: 57ad0bfcf94e84febe3820e31529a8a12e45366f
 allowed_paths:
   - src/**
   - tests/**
@@ -19,11 +19,12 @@ allowed_paths:
   - playwright.config.ts
   - vitest.config.mjs
   - eslint.config.mjs
+  - scripts/**
   - roadmap/work/W08-p3b-wallet-live-gating.md
-scope_hash: sha256:11d1a8f359a79c378f490d748cb576c6fa7d45d3ab781542018603cd56a1f455
-issued_at: 2026-07-29T17:31:18Z
-lease_expires: 2026-07-30T01:31:18Z
-updated_at: 2026-07-29T17:31:18Z
+scope_hash: sha256:12e46061eaf1ce494010ec80c6929e0e92ef85b3f1ea4aff093a3c333f03d754
+issued_at: 2026-07-29T19:06:49Z
+lease_expires: 2026-07-30T03:06:49Z
+updated_at: 2026-07-29T19:06:49Z
 ---
 
 # Claim: claude-code -> W08

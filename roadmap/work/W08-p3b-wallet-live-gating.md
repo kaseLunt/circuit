@@ -20,6 +20,7 @@ allowed_paths:
   - playwright.config.ts
   - vitest.config.mjs
   - eslint.config.mjs
+  - scripts/**
   - roadmap/work/W08-p3b-wallet-live-gating.md
 deliverables:
   - src/lib/wallet/types.ts
@@ -92,3 +93,7 @@ npx playwright test            # steps 1-3, 8 + the new 4 and 7 beats
   treatment §1 (wallet boundary), SPEC §2 (footprint), SPEC §3 steps 4 and 7.
 - hazards: the machine already models every live state — resist rebuilding; this is wiring.
   The injected provider is transport only; one read through it into money-math is the failure.
+- scope note (2026-07-29): `scripts/**` joined allowed_paths — the boundary-probe EXPECTED
+  table (`scripts/lint-boundaries.mjs`) and the coverage manifest (`scripts/coverage.config.mjs`)
+  are single-source gates W08's new probes and the wallet decision module must enrol in;
+  W07 carried the same path for the same reason.
