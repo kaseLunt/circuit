@@ -44,6 +44,11 @@ export default defineConfig({
         "src/lib/execution/record.ts",
         "src/lib/execution/machine.ts",
         "src/lib/execution/resume.ts",
+        // W07 hard-gate round: the plan fingerprint, extracted verbatim from
+        // execute-step.ts so the client pointer can bind to it (one definition, §10.10).
+        "src/lib/execution/plan-hash.ts",
+        // W07 verification round: the money-claim validator both adoption seams share.
+        "src/lib/execution/output-claims.ts",
         "src/server/sandbox/session-registry.ts",
         "src/server/sandbox/execute-step.ts",
         "src/server/sandbox/deadlines.ts",
@@ -51,6 +56,25 @@ export default defineConfig({
         "src/server/sandbox/process-exit.ts",
         "src/server/sandbox/anvil-args.ts",
         "src/server/trpc/sandbox-router.ts",
+        // W07 tx-family surface: the impure driver, the wire-fact provenance wrappers,
+        // and the components' pure derivations — each shipped and tested this round.
+        // Deliberately NOT enrolled: src/lib/tx/transport.ts (tRPC client composition —
+        // I/O thread-through per D10; its one narrowing helper is exercised through the
+        // driver suite) and src/app/api/trpc/[trpc]/route.ts (route-handler binding of
+        // covered modules; proven where honest — the router's own suite and the fork
+        // gate).
+        "src/lib/tx/driver.ts",
+        "src/lib/tx/provenance.ts",
+        "src/components/tx/step-status.ts",
+        "src/components/tx/announcements.ts",
+        "src/components/tx/step-list.tsx",
+        "src/components/tx/transaction-button.tsx",
+        "src/components/tx/halt-card.tsx",
+        "src/components/tx/failure-card.tsx",
+        "src/components/tx/stop-card.tsx",
+        "src/components/tx/pre-sign-review.tsx",
+        "src/components/tx/execution-flow.tsx",
+        "src/components/tx/execution-host.tsx",
       ],
       exclude: ["src/**/*.test.{ts,tsx}"],
       thresholds: { lines: 95, branches: 90, functions: 95, statements: 95 },

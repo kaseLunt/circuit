@@ -28,6 +28,12 @@ export interface ComposerShellProps {
   simulation: SimulationResult | null;
   simulationPending: boolean;
   /**
+   * Replaces the right column wholesale when provided (the W07 execution host, which
+   * owns the simulation-panel/execution-flow swap). Omitted, the shell renders the
+   * simulation panel exactly as before — the shell stays structural either way.
+   */
+  panel?: ReactNode;
+  /**
    * Canvas-space coordinate for a keyboard-placed block, resolved at the moment of the
    * keystroke because only the canvas knows the live viewport. The shell never invents
    * a position.
@@ -39,6 +45,7 @@ export function ComposerShell({
   canvas,
   simulation,
   simulationPending,
+  panel,
   resolveDropPosition,
 }: ComposerShellProps) {
   const api = useComposerStoreApi();
@@ -74,7 +81,11 @@ export function ComposerShell({
           "Strategy canvas" label, and a second landmark with the same name would be
           announced twice. */}
       <div className="relative min-w-0 flex-1">{canvas}</div>
-      <SimulationPanel result={simulation} pending={simulationPending} />
+      {panel === undefined ? (
+        <SimulationPanel result={simulation} pending={simulationPending} />
+      ) : (
+        panel
+      )}
     </div>
   );
 }

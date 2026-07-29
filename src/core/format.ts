@@ -183,3 +183,22 @@ export function formatWadAsMultiple(wad: bigint): string {
 export function formatEth(wei: bigint): string {
   return `${formatToken(wei, 4)} ETH`;
 }
+
+/**
+ * A duration in whole seconds, locale-free: "42s", "3m 05s", "2h 14m". Truncates toward
+ * zero and clamps negatives to "0s" — a clock that ran backwards is a display artifact,
+ * never a negative age (durations here are display-only; enforcement clocks are the
+ * server's monotonic track).
+ */
+export function formatDuration(totalSeconds: number): string {
+  const clamped = Number.isFinite(totalSeconds) ? Math.max(0, Math.trunc(totalSeconds)) : 0;
+  if (clamped < 60) return `${clamped}s`;
+  if (clamped < 3600) {
+    const minutes = Math.trunc(clamped / 60);
+    const seconds = clamped % 60;
+    return `${minutes}m ${seconds.toString().padStart(2, "0")}s`;
+  }
+  const hours = Math.trunc(clamped / 3600);
+  const minutes = Math.trunc((clamped % 3600) / 60);
+  return `${hours}h ${minutes.toString().padStart(2, "0")}m`;
+}

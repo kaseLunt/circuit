@@ -37,6 +37,7 @@
     --motion-fast: 120ms;
     --motion-slow: 240ms;
     --motion-shimmer: 2s;
+    --motion-spin: 1s;
     --ease-standard: cubic-bezier(0.2, 0, 0, 1);
   }
 
@@ -250,6 +251,20 @@
     }
   }
 
+  /* The active execution step's spinner (tx treatment T2): linear, because an eased
+     rotation pulses and pulses are banned. This is the ONE transform-animation site in
+     the product beside edge particles; under reduced motion the glyph stands still and
+     the state stays stated in text and ARIA. */
+  .step-spinner {
+    animation: step-spin var(--motion-spin) linear infinite;
+  }
+
+  @keyframes step-spin {
+    to {
+      transform: rotate(360deg);
+    }
+  }
+
   .focus-ring {
     outline: none;
   }
@@ -299,6 +314,10 @@
   .skeleton-value {
     animation: none;
     background-image: none;
+  }
+
+  .step-spinner {
+    animation: none;
   }
 
   .value-up,
