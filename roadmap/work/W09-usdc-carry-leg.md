@@ -17,7 +17,7 @@ allowed_paths:
   - scripts/**
   - package.json
   - package-lock.json
-  - vitest.config.ts
+  - vitest.config.mjs
   - roadmap/work/W09-usdc-carry-leg.md
 deliverables:
   - src/lib/strategy/templates.ts

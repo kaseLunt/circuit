@@ -18,7 +18,7 @@ allowed_paths:
   - package.json
   - package-lock.json
   - playwright.config.ts
-  - vitest.config.ts
+  - vitest.config.mjs
   - tsconfig.json
   - eslint.config.mjs
   - .gitignore

@@ -1,13 +1,13 @@
 ---
-claim_id: 5d628762-4d3b-4954-9fa2-fbf65d0364c2
-generation: 10
+claim_id: b0a09c01-77e5-46e4-bd62-f77db512b80d
+generation: 11
 agent: claude-code
 task: W07
 status: active
 integrator: true
 branch: w05
 worktree_id: fcc099da-1d6b-593f-bfcb-bd6915fc89c2
-base_commit: c7cee46014ed4cdbb7d0c0c0a20c839947669450
+base_commit: 528f58af6d01f70ef81a72c10beb364701bb8426
 allowed_paths:
   - src/**
   - tests/**
@@ -19,15 +19,17 @@ allowed_paths:
   - package-lock.json
   - playwright.config.ts
   - vitest.config.ts
+  - vitest.config.mjs
   - vitest.fork.config.ts
   - tsconfig.json
   - eslint.config.mjs
+  - SPEC.md
   - next.config.ts
   - roadmap/work/W07-p3-execution.md
-scope_hash: sha256:25edf6b51b50acc9058eb02fd571fdefd0aa5e4b93b4c89fe0b732e2a09c1d38
-issued_at: 2026-07-26T23:16:40Z
-lease_expires: 2026-07-27T07:16:40Z
-updated_at: 2026-07-26T23:16:40Z
+scope_hash: sha256:8a238a40ac0a5dec2be267d557c6cfb9352df16a4805a9e8fe332a958b8ce289
+issued_at: 2026-07-29T08:51:54Z
+lease_expires: 2026-07-29T16:51:54Z
+updated_at: 2026-07-29T08:51:54Z
 ---
 
 # Claim: claude-code -> W07

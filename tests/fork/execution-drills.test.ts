@@ -50,6 +50,7 @@ import { PINNED_BLOCK, readsMeta } from "../helpers/protocol-reads";
 import { flagshipGraph } from "../helpers/graphs";
 import { encodeShareGraph } from "../../src/lib/share/encode";
 import { buildPlan } from "../../src/core/plan";
+import { decodeRevert } from "../../src/core/errors";
 import { planHashOf } from "../../src/lib/execution/plan-hash";
 import { resumePlan, type WireSessionResponse } from "../../src/lib/execution/resume";
 import { SANDBOX_OUTPUT_TOLERANCE, toleranceWeiFor } from "../../src/lib/execution/tolerance";
@@ -185,6 +186,55 @@ async function findAllowanceSlotAt(
     throw new Error(`allowance-slot scan must find exactly one slot; found ${matches.length}`);
   }
   return matches[0]!;
+}
+
+/**
+ * Replay a mined transaction against the SESSION fork at the parent block of its receipt —
+ * same from/to/gas/data/value, pre-state — so the CHAIN yields the revert payload. A local
+ * replay rather than a reused one, deliberately: `harness.replayRevert` is bound to the base
+ * anvil's URL and the drills tamper with per-session forks, and calling the service's own
+ * `revertDataOf` would compare the recorded evidence against the code that recorded it.
+ * Throws unless the replay reverts WITH data — a drill that cannot obtain the chain's own
+ * bytes has nothing to compare against and must not pass quietly.
+ */
+async function replayRevertAt(url: string, txHash: Hex, minedBlock: bigint): Promise<Hex> {
+  const tx = await rpcAt<Record<string, unknown> | null>(url, "eth_getTransactionByHash", [txHash]);
+  if (tx === null) throw new Error(`revert replay: ${txHash} is not in the session fork's history`);
+  if (BigInt(tx["blockNumber"] as string) !== minedBlock) {
+    throw new Error(`revert replay: ${txHash} is not mined in block ${minedBlock}`);
+  }
+  const payload: Record<string, string> = {
+    from: tx["from"] as string,
+    to: tx["to"] as string,
+    gas: tx["gas"] as string,
+    data: (tx["input"] ?? tx["data"]) as string,
+  };
+  const value = tx["value"] as string | undefined;
+  if (value !== undefined && BigInt(value) > 0n) payload["value"] = value;
+  // Raw fetch: the error body IS the datum here, so `rpcAt`'s throw-on-error is wrong.
+  const res = await fetch(url, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      jsonrpc: "2.0",
+      id: (rpcId += 1),
+      method: "eth_call",
+      params: [payload, `0x${(minedBlock - 1n).toString(16)}`],
+    }),
+  });
+  const body = (await res.json()) as { error?: { message?: string; data?: unknown } };
+  if (body.error === undefined) {
+    throw new Error(`revert replay: ${txHash} succeeded at its parent block — no revert bytes`);
+  }
+  const direct = body.error.data;
+  if (typeof direct === "string") return direct as Hex;
+  if (typeof direct === "object" && direct !== null) {
+    const nested = (direct as { data?: unknown }).data;
+    if (typeof nested === "string") return nested as Hex;
+  }
+  throw new Error(
+    `revert replay: no revert data for ${txHash} (${body.error.message ?? "no message"})`,
+  );
 }
 
 describe("W07 fork gate — execution drills against the real session composition", () => {
@@ -438,16 +488,33 @@ describe("W07 fork gate — execution drills against the real session compositio
     expect(failure.stepIndex).toBe(2);
     expect(failure.stepId).toBe("wrap1:wrap");
     expect(failure.txHash).toMatch(/^0x[0-9a-f]{64}$/);
-    // The revert evidence is preserved: raw bytes and the decoded reading side by side.
-    expect(failure.raw).not.toBeNull();
-    expect(failure.decoded).not.toBeNull();
     const minedRevert = await chain.receiptOf(failure.txHash);
     if (minedRevert === null) throw new Error("failed step has no mined receipt on the fork");
     expect(minedRevert.status).toBe(0n);
+
+    // The revert evidence is THE CHAIN'S OWN BYTES, not merely non-null bytes. The mined
+    // transaction is replayed here independently of the service — eth_call of the same
+    // fields at the parent block of its receipt — and the recorded `raw` must equal that
+    // payload exactly. Asserting non-null would have passed on any string the engine
+    // invented; this cannot.
+    const replayed = await replayRevertAt(url, failure.txHash, minedRevert.blockNumber);
+    expect(replayed).toMatch(/^0x[0-9a-fA-F]{8,}$/);
+    expect(failure.raw).toBe(replayed);
+
+    // And the decoded reading is a reading OF THOSE BYTES: the pure decoder run over the
+    // chain's payload reproduces the recorded evidence field for field, so the two cannot
+    // drift apart. The selector claim below is stated as a precondition — this revert is a
+    // bare custom error, so the decoded signal IS the payload's leading four bytes.
+    const decodedFailure = failure.decoded;
+    if (decodedFailure === null) throw new Error("the failure carries no decoded revert reading");
+    expect(decodedFailure).toEqual(decodeRevert(replayed));
+    expect(decodedFailure.source).toBe("unknown");
+    expect(decodedFailure.raw).toBe(replayed.slice(0, 10).toLowerCase());
+    expect(replayed.toLowerCase().startsWith(decodedFailure.raw)).toBe(true);
     record(
-      `failure drill: wrap reverted on-chain (${failure.txHash}); decoded "${
-        failure.decoded?.message ?? ""
-      }" raw ${failure.raw ?? "null"}`,
+      `failure drill: wrap reverted on-chain (${failure.txHash}); recorded raw ${failure.raw} ` +
+        `equals the independent replay at block ${minedRevert.blockNumber - 1n}; ` +
+        `decoded "${decodedFailure.message}" [${decodedFailure.source} ${decodedFailure.raw}]`,
     );
 
     // The executed prefix stays settled: replays return the recorded results, no new tx.

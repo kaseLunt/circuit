@@ -18,7 +18,7 @@ allowed_paths:
   - scripts/**
   - package.json
   - package-lock.json
-  - vitest.config.ts
+  - vitest.config.mjs
   - vitest.fork.config.ts
   - tsconfig.json
   - eslint.config.mjs
@@ -51,7 +51,7 @@ invalidated_by:
   - src/core/**
   - src/server/**
   - tests/**
-  - vitest.config.ts
+  - vitest.config.mjs
   - vitest.fork.config.ts
   - eslint.config.mjs
   - package.json

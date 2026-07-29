@@ -1,12 +1,13 @@
 import { defineConfig, devices } from "@playwright/test";
 
 /**
- * SPEC §3 steps 4–7 — the execution beats — against a REAL sandbox session. A separate
- * config from playwright.config.ts because the two suites have different environmental
- * truths: the main suite runs on the recorded read set alone and must stay green with no
- * chain and no secrets on every external PR, while this one REQUIRES a pristine upstream
- * anvil at the pinned block for the session service to fork from (`SANDBOX_FORK_URL`,
- * server-only env — fork-session.ts throws per request rather than defaulting).
+ * The sandbox execution arc — arm, review, execute, attribute, receipt — against a REAL
+ * sandbox session. A separate config from playwright.config.ts because the two suites have
+ * different environmental truths: the main suite runs on the recorded read set alone and
+ * must stay green with no chain and no secrets on every external PR, while this one
+ * REQUIRES a pristine upstream anvil at the pinned block for the session service to fork
+ * from (`SANDBOX_FORK_URL`, server-only env — fork-session.ts throws per request rather
+ * than defaulting).
  *
  * Locally this reuses the running sandbox harness (`next dev` on :3000 beside the anvil
  * upstream on :8547) — dev is NOT what CI measures, and the difference is real (on-demand

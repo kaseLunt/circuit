@@ -1,7 +1,7 @@
 ---
 id: W07
 type: work
-title: P3 execution — sandbox session service, the tx UX family, live gating
+title: P3a execution — sandbox session service and the tx UX family on the fork
 phase: P3
 status: active
 evidence_target: sandbox-execution-arc-green-on-fork-in-ci
@@ -20,9 +20,11 @@ allowed_paths:
   - package-lock.json
   - playwright.config.ts
   - vitest.config.ts
+  - vitest.config.mjs
   - vitest.fork.config.ts
   - tsconfig.json
   - eslint.config.mjs
+  - SPEC.md
   - next.config.ts
   - roadmap/work/W07-p3-execution.md
 deliverables:
@@ -47,7 +49,10 @@ deliverables:
   - tests/fork/execution-drills.test.ts
   - tests/fork/session-isolation.test.ts
   - e2e/demo-script.spec.ts
+  - e2e/demo-script-fork.spec.ts
+  - e2e/playwright.fork.config.ts
   - eslint.config.mjs
+  - SPEC.md
   - .github/workflows/ci.yml
 evidence_receipts: []
 invalidated_by:
@@ -60,12 +65,13 @@ invalidated_by:
   - e2e/**
   - tests/**
   - eslint.config.mjs
+  - SPEC.md
   - package.json
 review_when: phase:P3:exit
 updated: 2026-07-26
 ---
 
-# W07 — P3 execution
+# W07 — P3a execution
 
 **Why this advances the vision:** P1 proved the money-math on a fork with nothing to look at;
 P2 made it visible without making it dishonest. P3 is where the numbers move money — the phase
@@ -77,19 +83,20 @@ or transport observation (nonce, gas, injected-provider reads) reaching `Provena
 
 ## Objective
 
-Implement SPEC §6 and SPEC §3 steps 4–7 on top of P1's proven model and P2's canvas, under the
+Implement SPEC §6 and the P3a sandbox execution arc (per the 2026-07-28 amendment) on top of P1's proven model and P2's canvas, under the
 binding pre-implementation treatment at
 `C:\Users\kasel\AppData\Local\Temp\w05\p3-execution-treatment.md` (Protocol-Execution Security
 Director, circuit, delivered 2026-07-26). **This charter constrains and points; the treatment is
-the specification.** Its eight surfaces — wallet boundary, execution state machine, approval
-scoping, pre-sign review, sandbox session service, attribution, the A1–A19 seam table, and the
-taste handoffs — are in scope in full, and its §10 conditions are pre-announced review verdicts,
-not advisory notes.
+the specification.** Of its eight surfaces, six are in scope here — execution state machine,
+approval scoping, pre-sign review, sandbox session service, attribution, and the taste handoffs,
+under the A1–A24+ seam table — and its §10 conditions are pre-announced review verdicts, not
+advisory notes. The wallet boundary and live-gating surfaces are W08's (the 2026-07-28
+amendment); the treatment binds them there unchanged.
 
 New code lands in the module homes the treatment fixes, and nowhere else:
 
 ```
-src/lib/wallet/          wagmi config, connect boundary, transport observation (client-only)
+src/lib/wallet/          (W08 — wagmi config, connect boundary, transport observation)
 src/lib/execution/       plan/step state machines, attribution, tolerances, execution record,
                          resumePlan — client-side driver
 src/server/sandbox/      session registry, fork lifecycle, per-step execute path
@@ -181,22 +188,20 @@ quarantine is enforced there, and it is in `invalidated_by` for the same reason:
 ```text
 npm test                    # vitest unit suite incl. attribution + machine + resume tests
 npm run test:fork           # anvil fork suite: flagship + the treatment §9 drills
-npm run test:e2e            # Playwright §3 steps 4-7 (mock connector for step 7)
+npm run test:e2e:fork      # Playwright: the sandbox execution arc against the session fork
 npm run build && npm run typecheck && npm run lint && npm run check:scripts
 python roadmap/tools/doctor.py --snapshot index
 ```
 
 ## Handoff
 
-- next: activation is owner-gated and this object is `candidate` until then. On activation, the
-  first commit is the treatment §6.4 extraction — `src/lib/execution/attribution.ts` plus the
-  fork-suite refactor that deletes both in-file copies — because it is the only change that
-  touches already-proven code and every later surface consumes it. Then the session service
-  (registry, fork identity verification, idempotent execute), then the tx family, then live
-  gating. Provider provisioning per the P0 spike is a prerequisite of the session service and
-  should be confirmed before the second commit.
+- next: the P3a close — evidence receipt over the CI-green sandbox arc, phase-exit approval
+  per D-007/D-011, claim release, then the owner-gated W08 activation (wallet boundary and
+  live gating live there; the treatment's §1 surface binds W08 unchanged). The build sequence
+  this handoff originally ordered (attribution extraction → session service → tx family) is
+  complete and merged.
 - read_first: `C:\Users\kasel\AppData\Local\Temp\w05\p3-execution-treatment.md` in full — it is
-  binding, and §10 lists the eleven review verdicts already announced. Then SPEC §3 steps 4–7,
+  binding, and §10 lists the eleven review verdicts already announced. Then SPEC §3 (execution beats),
   §5.5 (attribution whitelist), §5.7 (validation set), §6 (the whole transaction-UX contract),
   §11 P3a/P3b rows; `src/core/plan.ts` `AmountSpec`/`encodeStep` and the `BlockFlow` header;
   `src/core/risk.ts` `riskLedger` and `postActionDebtOf`; `tests/fork/flagship-plan.test.ts`
