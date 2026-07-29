@@ -94,19 +94,33 @@ export interface SidebarProps {
    * template load that never happened.
    */
   onClear: () => boolean;
+  /**
+   * T26: the sentence every write refusal states while an execution holds the document.
+   * Null outside a run. The palette does NOT dim, veil or blur — it states the refusal.
+   */
+  lockReason?: string | null;
 }
 
 interface PaletteRowProps {
   readonly type: BlockType;
   readonly collapsed: boolean;
   readonly onAdd: (type: BlockType) => void;
+  /** T26: why writes are refused right now, or null. Never `disabled` — always a reason. */
+  readonly lockReason: string | null;
 }
 
-function PaletteRow({ type, collapsed, onAdd }: PaletteRowProps) {
+function PaletteRow({ type, collapsed, onAdd, lockReason }: PaletteRowProps) {
   const entry = PALETTE[type];
   const Icon = entry.icon;
 
   function handleDragStart(event: DragEvent<HTMLButtonElement>): void {
+    // T26: the drag SOURCE deactivates while a run holds the document — refusing the drop
+    // after the user has already dragged across the screen is a worse refusal than never
+    // letting the drag start.
+    if (lockReason !== null) {
+      event.preventDefault();
+      return;
+    }
     event.dataTransfer.setData(BLOCK_DRAG_MIME, type);
     event.dataTransfer.effectAllowed = "move";
   }
@@ -117,17 +131,24 @@ function PaletteRow({ type, collapsed, onAdd }: PaletteRowProps) {
   function handleKeyDown(event: KeyboardEvent<HTMLButtonElement>): void {
     if (event.key !== "Enter" && event.key !== " ") return;
     event.preventDefault();
+    if (lockReason !== null) return;
     onAdd(type);
   }
 
   return (
     <button
       type="button"
-      draggable
+      draggable={lockReason === null}
       data-block-type={type}
       onDragStart={handleDragStart}
-      onClick={() => onAdd(type)}
+      onClick={() => {
+        // `aria-disabled` with the click intercepted, never `disabled` (B3 forward rule):
+        // a disabled control cannot be focused, so it cannot announce why it refused.
+        if (lockReason !== null) return;
+        onAdd(type);
+      }}
       onKeyDown={handleKeyDown}
+      {...(lockReason === null ? {} : { "aria-disabled": true, title: lockReason })}
       {...(collapsed ? { "aria-label": `${entry.label} block`, title: entry.label } : {})}
       className={cn(
         "focus-ring transition-fast flex h-9 shrink-0 cursor-grab items-center gap-2 rounded-sm",
@@ -152,7 +173,7 @@ interface Announcement {
   readonly nonce: number;
 }
 
-export function Sidebar({ onAddBlock, onLoadTemplate, onClear }: SidebarProps) {
+export function Sidebar({ onAddBlock, onLoadTemplate, onClear, lockReason = null }: SidebarProps) {
   const baseId = useId();
   const [collapsed, setCollapsed] = useState(false);
   const [tab, setTab] = useState<TabId>("blocks");
@@ -233,7 +254,7 @@ export function Sidebar({ onAddBlock, onLoadTemplate, onClear }: SidebarProps) {
       {collapsed ? (
         <div id={contentId} className="flex flex-col items-center gap-1 overflow-y-auto pt-4">
           {COLLAPSED_ORDER.map((type) => (
-            <PaletteRow key={type} type={type} collapsed onAdd={handleAdd} />
+            <PaletteRow key={type} type={type} collapsed lockReason={lockReason} onAdd={handleAdd} />
           ))}
         </div>
       ) : (
@@ -278,7 +299,13 @@ export function Sidebar({ onAddBlock, onLoadTemplate, onClear }: SidebarProps) {
                   {section.label}
                 </p>
                 {section.types.map((type) => (
-                  <PaletteRow key={type} type={type} collapsed={false} onAdd={handleAdd} />
+                  <PaletteRow
+                    key={type}
+                    type={type}
+                    collapsed={false}
+                    lockReason={lockReason}
+                    onAdd={handleAdd}
+                  />
                 ))}
               </div>
             ))}

@@ -39,6 +39,8 @@ export interface ComposerShellProps {
    * a position.
    */
   resolveDropPosition: () => BlockPosition;
+  /** T26 write-lockdown reason while a run holds the document; null outside a run. */
+  lockReason?: string | null;
 }
 
 export function ComposerShell({
@@ -47,6 +49,7 @@ export function ComposerShell({
   simulationPending,
   panel,
   resolveDropPosition,
+  lockReason = null,
 }: ComposerShellProps) {
   const api = useComposerStoreApi();
 
@@ -76,6 +79,7 @@ export function ComposerShell({
         onAddBlock={handleAddBlock}
         onLoadTemplate={handleLoadTemplate}
         onClear={handleClear}
+        lockReason={lockReason}
       />
       {/* Unlabelled on purpose: the canvas wrapper carries role=application and the
           "Strategy canvas" label, and a second landmark with the same name would be

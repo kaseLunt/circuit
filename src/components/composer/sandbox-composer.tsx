@@ -57,17 +57,27 @@ import { CANVAS_ORIGIN, StrategyCanvas } from "../canvas/canvas";
 import { ComposerStoreProvider, useComposerStore } from "../../app/store/composer-provider";
 import type { BlockPosition } from "../../app/store/composer-store";
 import { sandboxSnapshot } from "../../lib/recorded-reads/sandbox-snapshot";
+import { buildPlan } from "../../core/plan";
 import { readShareToken } from "../../lib/share/encode";
 import { describeArrivalFailure, type ShareRefusal } from "../../lib/share/share-url";
 import { logError } from "../../lib/log";
 import { ExecutionHost, createDefaultSandboxDriver } from "../tx/execution-host";
-import { executingBlockIdOf } from "../tx/step-status";
+import { liveExecuteRefusalOf, type LiveExecuteRefusal } from "../../lib/wallet/gate";
+import { WalletProvider, useWalletBoundary } from "../../lib/wallet/wallet-provider";
+import {
+  MOCK_ACCOUNTS,
+  MOCK_CODE_BEARING_ACCOUNTS,
+  MOCK_OCCUPIED_ACCOUNTS,
+} from "../../lib/wallet/config";
+import { configuredDemoSeam } from "../../lib/wallet/seam";
+import { ConnectSurface, type ComposerMode } from "../wallet/connect-surface";
+import { executingBlockIdOf, runLocksDocument, RUN_LOCK_REASON } from "../tx/step-status";
 import { flagshipStore, resolveArrival, type Arrival } from "./arrival";
 import { ComposerShell } from "./composer-shell";
 import { SandboxChrome } from "./sandbox-chrome";
 import { ShareLink } from "./share-link";
 import { ShareRefusalBand } from "./share-refusal";
-import { useSimulation, type SnapshotState } from "./simulation-host";
+import { useBorrowLimit, useSimulation, type SnapshotState } from "./simulation-host";
 
 export function loadSandboxSnapshot(): SnapshotState {
   try {
@@ -78,8 +88,53 @@ export function loadSandboxSnapshot(): SnapshotState {
   }
 }
 
+/**
+ * SPEC §3 step 7's gate, assembled where the wallet and the document meet.
+ *
+ * The plan is built over the SANDBOX read set — that is what the canvas is showing — and it
+ * is handed to the gate only so `planRequiresCodeFreeActor` can answer whether this strategy
+ * contains a WETH withdrawal. Nothing about the wallet's balances is read from it.
+ *
+ * `simulation: null` is a STATEMENT, not a stub: no simulation has been run against the
+ * connected wallet's real balances, so the gate refuses with `no-fresh-simulation` and
+ * Execute stays gated — which is SPEC §3 step 7 verbatim. Wiring a live capture is the first
+ * item on `docs/live-execution-checklist.md`.
+ */
+export function useLiveGate(snapshot: SnapshotState): {
+  readonly mode: ComposerMode;
+  readonly refusal: LiveExecuteRefusal | null;
+} {
+  const wallet = useWalletBoundary();
+  const doc = useComposerStore((state) => state.doc);
+  const mode: ComposerMode = wallet.session === null ? "sandbox" : "live";
+  const plan = useMemo(
+    () => (snapshot.status === "ready" ? buildPlan(doc, snapshot.snapshot) : null),
+    [doc, snapshot],
+  );
+  if (mode === "sandbox") return { mode, refusal: null };
+  if (plan === null || !plan.ok) {
+    return { mode, refusal: { kind: "no-fresh-simulation" } };
+  }
+  return {
+    mode,
+    refusal: liveExecuteRefusalOf({
+      session: wallet.session,
+      readings: wallet.readings,
+      plan,
+      simulation: null,
+      nowMonotonicMs: wallet.monotonicNow(),
+    }),
+  };
+}
+
 function ComposerBody({ snapshot }: { readonly snapshot: SnapshotState }) {
   const { simulation, simulationPending } = useSimulation(snapshot);
+  const live = useLiveGate(snapshot);
+  // SPEC §3 step 4's verdict, derived once beside the simulation and handed to BOTH the
+  // canvas (the block's inline refusal) and the execution column (the Simulate gate). One
+  // derivation, two consumers — the two can never disagree about whether the borrow is past
+  // the limit, which is the whole point of deriving it here rather than in each of them.
+  const borrowLimit = useBorrowLimit(snapshot);
 
   // The driver lives HERE so both consumers of one machine state can read it: the host
   // (the execution column) and the canvas (the T26 executing frame — the active step's
@@ -87,6 +142,9 @@ function ComposerBody({ snapshot }: { readonly snapshot: SnapshotState }) {
   const [driver] = useState(createDefaultSandboxDriver);
   const driverSnap = useSyncExternalStore(driver.subscribe, driver.snapshot, driver.snapshot);
   const executingBlockId = executingBlockIdOf(driverSnap.machine);
+  // T26: one derivation of "the document is frozen", handed to the palette and to the
+  // canvas. Reads stay live everywhere; only writes refuse, and they refuse in words.
+  const writeLockReason = runLocksDocument(driverSnap.machine) ? RUN_LOCK_REASON : null;
 
   // Filled by the canvas once it has a viewport (see StrategyCanvasProps.dropPositionRef).
   // Read only inside the shell's keyboard handler, so the composer does not re-render when
@@ -105,6 +163,8 @@ function ComposerBody({ snapshot }: { readonly snapshot: SnapshotState }) {
           simulationPending={simulationPending}
           dropPositionRef={dropPosition}
           executingBlockId={executingBlockId}
+          borrowLimit={borrowLimit}
+          writeLockReason={writeLockReason}
         />
       }
       simulation={simulation}
@@ -114,10 +174,14 @@ function ComposerBody({ snapshot }: { readonly snapshot: SnapshotState }) {
           snapshot={snapshot}
           simulation={simulation}
           simulationPending={simulationPending}
+          borrowLimit={borrowLimit}
+          mode={live.mode}
+          liveRefusal={live.refusal}
           driver={driver}
         />
       }
       resolveDropPosition={resolveDropPosition}
+      lockReason={writeLockReason}
     />
   );
 }
@@ -150,6 +214,8 @@ function ComposerFrame({
   readonly snapshot: SnapshotState;
   readonly arrival: Arrival;
 }) {
+  const wallet = useWalletBoundary();
+  const mode: ComposerMode = wallet.session === null ? "sandbox" : "live";
   const hasStrategy = useComposerStore((state) => state.doc.blocks.length > 0);
   const rev = useComposerStore((state) => state.rev);
   const [composeRefusal, setComposeRefusal] = useState<ShareRefusal | null>(null);
@@ -167,7 +233,16 @@ function ComposerFrame({
 
   return (
     <div className="flex h-dvh flex-col overflow-hidden bg-background">
-      <SandboxChrome snapshot={snapshot} actions={<ShareLink onRefused={setComposeRefusal} />} />
+      <SandboxChrome
+        snapshot={snapshot}
+        mode={mode}
+        actions={
+          <>
+            <ConnectSurface />
+            <ShareLink onRefused={setComposeRefusal} />
+          </>
+        }
+      />
       {composeRefusal !== null ? (
         <ShareRefusalBand refusal={composeRefusal} onDismiss={() => setComposeRefusal(null)} />
       ) : showArrival && arrival.kind === "share-refused" ? (
@@ -182,6 +257,19 @@ function ComposerFrame({
     </div>
   );
 }
+
+/**
+ * The seam the running build uses. A demo/CI build (mock accounts configured) reads the
+ * scenario table; a production build has none, so the provider's own stated-unavailable
+ * default answers and the live gate REFUSES rather than admitting. Wiring the real
+ * `eth_getCode` + footprint reads through `server/chain` is the first item on
+ * `docs/live-execution-checklist.md`.
+ */
+const demoSeamOrDefault =
+  configuredDemoSeam(
+    { codeBearing: MOCK_CODE_BEARING_ACCOUNTS, occupied: MOCK_OCCUPIED_ACCOUNTS },
+    MOCK_ACCOUNTS.length > 0,
+  ) ?? undefined;
 
 export function SandboxComposer() {
   const [store, setStore] = useState(flagshipStore);
@@ -199,8 +287,10 @@ export function SandboxComposer() {
   }, []);
 
   return (
-    <ComposerStoreProvider store={store}>
-      <ComposerFrame snapshot={snapshot} arrival={arrival} />
-    </ComposerStoreProvider>
+    <WalletProvider seam={demoSeamOrDefault}>
+      <ComposerStoreProvider store={store}>
+        <ComposerFrame snapshot={snapshot} arrival={arrival} />
+      </ComposerStoreProvider>
+    </WalletProvider>
   );
 }
