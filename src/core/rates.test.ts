@@ -15,6 +15,7 @@ import {
   rayMulCeil,
   rayDivFloor,
   rayDivCeil,
+  mulDivCeil,
   accruedLiquidityIndexRay,
   accruedVariableBorrowIndexRay,
   aTokenBalance,
@@ -180,6 +181,15 @@ describe("aave v3.7 ray roundings (WadRayMath)", () => {
     expect(() => rayDivCeil(1n, 0n)).toThrow(RangeError);
     expect(() => rayMulFloor(-1n, RAY)).toThrow(RangeError);
     expect(() => rayMul(RAY, -1n)).toThrow(RangeError);
+  });
+
+  it("mulDivCeil rounds an inexact product up and leaves an exact one alone (MathUtils.mulDivCeil)", () => {
+    // GenericLogic._getUserDebtInBaseCurrency's base conversion: ceil(debt × price / unit).
+    expect(mulDivCeil(10n, 10n, 3n)).toBe(34n); // 100/3 = 33.33… → 34
+    expect(mulDivCeil(10n, 9n, 3n)).toBe(30n); // exact — no bump
+    expect(mulDivCeil(0n, 10n, 3n)).toBe(0n);
+    expect(() => mulDivCeil(1n, 1n, 0n)).toThrow(RangeError);
+    expect(() => mulDivCeil(-1n, 1n, 3n)).toThrow(RangeError);
   });
 });
 

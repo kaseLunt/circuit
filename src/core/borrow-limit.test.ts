@@ -59,9 +59,34 @@ describe("borrowLimitVerdict", () => {
     const past = ceilingAt(9_900);
     expect(past.requestedAllocationBps).toBe(9_900);
     expect(past.debtBase).toBeGreaterThan(past.ceilingBase);
-    // The ceiling in allocation terms is the effective LTV when one reserve is the
-    // collateral — arrived at from the base figures, never assumed equal to it.
-    expect(past.maxAllocationBps).toBe(past.ltvBps);
+    // One bp BELOW the effective LTV, not equal to it: the protocol's ceil-rounded debt
+    // chain (mint rayDivCeil → read-back rayMulCeil → mulDivCeil base conversion) pushes
+    // the allocation exactly at LTV one base-unit over the ceiling. Asserted numerically
+    // in the pinned boundary test below.
+    expect(past.maxAllocationBps).toBe(past.ltvBps - 1);
+  });
+
+  it("pins the protocol-rounding boundary: 9299 is accepted, 9300 is rejected (Codex D-011 F1)", () => {
+    // The pre-remediation floor-everything debt admitted 9300: floor-rounded debtBase came
+    // to 1_789_196_181_658 — one base-unit UNDER the ceiling — while Aave v3.7's own chain
+    // (GenericLogic._getUserDebtInBaseCurrency: ceil-scaled mint, ceil balance read-back,
+    // mulDivCeil base conversion) values the same borrow at 1_789_196_181_660, one OVER.
+    // Both sides of the corrected boundary are pinned with the fixture's exact figures so
+    // a regression in any leg of the rounding chain moves a number, not a vibe.
+    const within = borrowLimitVerdict(graphAt(9_299), snapshot);
+    expect(within.status).toBe("within");
+    if (within.status !== "within") throw new Error("unreachable");
+    expect(within.ceiling.debtBase).toBe(1_789_003_794_973n);
+    expect(within.ceiling.ceilingBase).toBe(1_789_196_181_659n);
+    expect(within.ceiling.collateralBase).toBe(1_923_866_861_999n);
+    expect(within.ceiling.maxAllocationBps).toBe(9_299);
+
+    const over = borrowLimitVerdict(graphAt(9_300), snapshot);
+    expect(over.status).toBe("over-limit");
+    if (over.status !== "over-limit") throw new Error("unreachable");
+    expect(over.ceiling.debtBase).toBe(1_789_196_181_660n);
+    expect(over.ceiling.ceilingBase).toBe(1_789_196_181_659n);
+    expect(over.ceiling.maxAllocationBps).toBe(9_299);
   });
 
   it("is not applicable to a document with no borrow", () => {
