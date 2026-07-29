@@ -104,6 +104,7 @@ function AmountLine({ plan, step }: { readonly plan: PlanSuccess; readonly step:
         format={(value) => formatToken(value, 4)}
         unavailableReason="unavailable"
         inline
+        provenance="disclosure"
         className={slotClassName(true, false, CONTEXT_RAMP)}
       />
     </p>
@@ -129,6 +130,7 @@ function FlowLine({ plan, step }: { readonly plan: PlanSuccess; readonly step: T
             format={(value) => formatToken(value, 4)}
             unavailableReason="unavailable"
             inline
+            provenance="disclosure"
             className={slotClassName(true, false, CONTEXT_RAMP)}
           />
         </>
@@ -145,6 +147,7 @@ function FlowLine({ plan, step }: { readonly plan: PlanSuccess; readonly step: T
             format={(value) => formatToken(value, 4)}
             unavailableReason="unavailable"
             inline
+            provenance="disclosure"
             className={slotClassName(true, false, CONTEXT_RAMP)}
           />
         </>
@@ -186,6 +189,7 @@ function RiskLine({
         format={formatHealthFactor}
         unavailableReason="unavailable"
         inline
+        provenance="disclosure"
         className={slotClassName(
           true,
           false,
@@ -268,6 +272,7 @@ export function PreSignReview({
               format={(value) => `${formatToken(value, 4)} ETH`}
               unavailableReason="unavailable"
               inline
+              provenance="disclosure"
               className={slotClassName(true, false, ROW_RAMP)}
             />
           </p>
@@ -291,6 +296,7 @@ export function PreSignReview({
               format={(value) => `${formatUnits(value, 0, 0)} wei`}
               unavailableReason="unavailable"
               inline
+              provenance="disclosure"
               className={slotClassName(true, false, CONTEXT_RAMP)}
             />
             {","}
@@ -305,6 +311,7 @@ export function PreSignReview({
               format={(value) => formatUnits(value, 0, 0)}
               unavailableReason="unavailable"
               inline
+              provenance="disclosure"
               className={slotClassName(true, false, CONTEXT_RAMP)}
             />
             {")"}

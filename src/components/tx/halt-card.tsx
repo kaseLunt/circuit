@@ -85,6 +85,7 @@ function EvidenceSlot({
         chars={chars}
         format={format}
         unavailableReason={unavailableReason}
+        provenance="disclosure"
         className={slotClassName(value !== null, false, EVIDENCE_RAMP)}
       />
     </div>

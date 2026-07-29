@@ -131,6 +131,7 @@ function AmountSlot({
             chars={AMOUNT_CHARS}
             format={(value) => formatToken(value, 4)}
             unavailableReason="unavailable"
+            provenance="disclosure"
             className={slotClassName(true, false, ROW_RAMP)}
           />
         );
@@ -144,6 +145,7 @@ function AmountSlot({
             chars={AMOUNT_CHARS}
             format={(value) => formatToken(value, 4)}
             unavailableReason="unavailable"
+            provenance="disclosure"
             className={slotClassName(true, false, ROW_RAMP)}
           />
         );
@@ -162,6 +164,7 @@ function AmountSlot({
           chars={AMOUNT_CHARS}
           format={(value: bigint) => formatToken(value, 4)}
           unavailableReason="unavailable"
+          provenance="disclosure"
           className={slotClassName(false, true, ROW_RAMP)}
         />
       );
@@ -183,6 +186,7 @@ function AmountSlot({
           chars={AMOUNT_CHARS}
           format={(value) => formatToken(value, 4)}
           unavailableReason="unavailable"
+          provenance="disclosure"
           className={slotClassName(true, false, ROW_RAMP)}
         />
       );
@@ -198,6 +202,7 @@ function AmountSlot({
             chars={AMOUNT_CHARS}
             format={(value) => formatToken(value, 4)}
             unavailableReason="unavailable"
+            provenance="disclosure"
             className={slotClassName(true, false, ROW_RAMP)}
           />
         );
@@ -290,6 +295,7 @@ function SettledDetail({
               chars={AMOUNT_CHARS}
               format={(value) => formatToken(value, 6)}
               unavailableReason="does not match the plan's flows"
+              provenance="disclosure"
               className={slotClassName(predicted !== null, false, PAIR_RAMP)}
             />
           </span>
@@ -308,6 +314,7 @@ function SettledDetail({
               chars={AMOUNT_CHARS}
               format={(value) => formatToken(value, 6)}
               unavailableReason="unavailable"
+              provenance="disclosure"
               className={slotClassName(true, false, PAIR_RAMP)}
             />
           </span>
@@ -324,6 +331,7 @@ function SettledDetail({
             format={formatHealthFactor}
             unavailableReason="unavailable"
             inline
+            provenance="disclosure"
             className={slotClassName(true, false, PAIR_RAMP)}
           />
         </p>
