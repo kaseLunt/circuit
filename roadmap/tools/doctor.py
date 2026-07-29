@@ -217,6 +217,78 @@ def evidence_fingerprint(snapshot: Snapshot, data: dict, path: str) -> str:
     return "sha256:" + digest.hexdigest()
 
 
+def transition_currency_errors(
+    before: Snapshot, after: Snapshot, now: dt.datetime
+) -> list[str]:
+    """The successor relaxation must not survive a terminal transition (Codex, W08).
+
+    Snapshot-level D-006 relaxation lets an active same-phase successor evolve an
+    achieved sibling's inputs; the bypass is the transition that never rests — work
+    flipping to achieved while the next task activates in the same commit, or the
+    active phase advancing directly. THIS is the moment drift would become permanently
+    historical, so the commit gates re-arm strict currency here for exactly the items
+    the transition touches, regardless of which task is active on either side:
+      - every work item that becomes achieved in this transition, and
+      - every achieved item of a phase the transition exits (active_phase moved on,
+        or project_state reached complete).
+    """
+    strict: dict[str, tuple[str, dict]] = {}
+
+    def work_records(snapshot: Snapshot) -> dict[str, tuple[str, dict, str, str]]:
+        records: dict[str, tuple[str, dict, str, str]] = {}
+        for path in snapshot.list("roadmap/work", ".md"):
+            data = parse_frontmatter(snapshot.read_text(path), path, required=True)
+            work_id = scalar(data, "id", path, required=True)
+            records[work_id] = (
+                path,
+                data,
+                scalar(data, "status", path, required=True),
+                scalar(data, "phase", path, required=True),
+            )
+        return records
+
+    def status_field(snapshot: Snapshot, key: str) -> str:
+        path = "roadmap/STATUS.md"
+        if not snapshot.exists(path):
+            return ""
+        data = parse_frontmatter(snapshot.read_text(path), path, required=True)
+        return scalar(data, key, path) or ""
+
+    before_work = work_records(before)
+    after_work = work_records(after)
+    for work_id, (path, data, status, _phase) in after_work.items():
+        old = before_work.get(work_id)
+        if status == "achieved" and (old is None or old[2] != "achieved"):
+            strict[work_id] = (path, data)
+
+    old_phase = status_field(before, "active_phase")
+    new_phase = status_field(after, "active_phase")
+    phase_exited = bool(old_phase) and old_phase != new_phase
+    completed = (
+        status_field(before, "project_state") != "complete"
+        and status_field(after, "project_state") == "complete"
+    )
+    if phase_exited or completed:
+        for work_id, (path, data, status, phase) in after_work.items():
+            if status == "achieved" and (phase == old_phase or completed):
+                strict[work_id] = (path, data)
+
+    errors: list[str] = []
+    for work_id, (path, data) in sorted(strict.items()):
+        try:
+            receipts = string_list(data, "evidence_receipts", path)
+            if not receipts:
+                raise ControlPlaneError(f"{path}: achieved work must name evidence_receipts")
+            for receipt in receipts:
+                validate_evidence_receipt(after, receipt, work_id, now, check_currency=True)
+            stored = scalar(data, "evidence_fingerprint", path)
+            if stored and stored != evidence_fingerprint(after, data, path):
+                raise ControlPlaneError(f"{path}: evidence stamp is stale at a terminal transition")
+        except ControlPlaneError as exc:
+            errors.append(f"terminal transition re-arms D-006 for {work_id}: {exc}")
+    return errors
+
+
 def find_work_record(snapshot: Snapshot, work_id: str) -> tuple[str, dict]:
     for candidate in snapshot.list("roadmap/work", ".md"):
         data = parse_frontmatter(snapshot.read_text(candidate), candidate, required=True)

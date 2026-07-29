@@ -20,6 +20,7 @@ import sys
 import uuid
 from dataclasses import dataclass
 
+import doctor
 from _control_plane import (
     ControlPlaneError,
     Scope,
@@ -875,6 +876,15 @@ def main() -> int:
 
     assert base is not None
     validate_immutable_records(base, staged, paths)
+    # Terminal transitions re-arm D-006 strictly — a hard block, deliberately NOT
+    # covered by the owner acknowledgement flag: an achieve flip or phase exit with
+    # stale evidence is drift becoming permanent, not a reviewable preference.
+    currency_errors = doctor.transition_currency_errors(base, staged, now)
+    if currency_errors:
+        print("scope-gate: BLOCKED -- terminal transition with unexplained drift:")
+        for error in currency_errors:
+            print(f"  - {error}")
+        return 1
     owner_reasons = owner_transition_reasons(base, staged, paths)
     if owner_reasons and not protected_acknowledged:
         print("scope-gate: BLOCKED -- owner acknowledgement required for durable transition:")
