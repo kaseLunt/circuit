@@ -497,7 +497,7 @@ function bitSet(bitmap: bigint, index: number): boolean {
  * Effective LTV in bps for one reserve under a category, per matrix §3
  * (ValidationLogic.getUserReserveLtv, read verbatim). `null` category means no active e-mode.
  */
-function effectiveLtvBps(
+export function effectiveLtvBps(
   reserve: ReserveSnapshot,
   cat: EModeCategorySnapshot | null,
 ): number {
