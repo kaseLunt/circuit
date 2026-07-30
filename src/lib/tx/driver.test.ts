@@ -1873,7 +1873,19 @@ describe("a retained hash binds only to the plan the pointer named (round-9)", (
     // And its corollary: nothing was even looked up, because no answer to that lookup could have
     // been legally adopted — asking only produces another plan's evidence to render against this one.
     expect(sandbox.calls.session).toBe(0);
-    // The pointer retires with the binding it can no longer honour.
+
+    // STORAGE IS LEFT ALONE, and that is round-10 correcting round-9, which asserted the pointer
+    // cleared here. The pointer is origin-wide: this driver cannot prove the bytes now in it are its
+    // own rather than a second tab's valid pointer, and localStorage offers no compare-and-swap that
+    // would keep "clear it if it is mine" true by the time the clear lands. Dropping the in-memory
+    // binding is what refuses the adoption; the pointer is not the thing that had to go.
+    expect(storage.held()).not.toBeNull();
+
+    // Where a stale pointer of our own DOES retire: the next mount, under `restore`, which owns the
+    // read and the refusal together and is entitled to clear what it just read.
+    const remounted = new SandboxDriver({ transport: sandbox.transport, storage, now: () => 5_000 });
+    await remounted.restore(armInputB);
+    expect(remounted.snapshot().machine.phase.kind).toBe("idle");
     expect(storage.held()).toBeNull();
 
     // What remains on offer is a fresh arm of the document on the canvas, and it is B that arms.
@@ -1914,6 +1926,88 @@ describe("a retained hash binds only to the plan the pointer named (round-9)", (
     await driver.execute();
     expect(driver.snapshot().machine.phase.kind).toBe("complete");
     expect(sandbox.calls.session).toBeGreaterThan(0);
+  });
+
+  /**
+   * Codex round-10 — THE POINTER IS ORIGIN-WIDE, THE CAPTURE IS THIS DRIVER'S.
+   *
+   * Round-9's gate re-read the shared pointer and checked only its fingerprint, while the key and
+   * hash it would rehydrate with came from this driver's retained state. That mixes two runs: a
+   * second tab writing its own perfectly valid pointer for a session whose fingerprint happens to
+   * match THIS tab's newest arm waved the adoption through — `session(A)` looked up, plan B adopted
+   * against A's hash and A's evidence. The mirror of it was just as bad: a fingerprint that did not
+   * match had this tab clearing the other tab's live pointer.
+   *
+   * Two tabs on one origin is ordinary use, not hostile storage. The gate now reads the retained
+   * capture, which nobody else can move.
+   */
+  it("adopts nothing when another tab's valid pointer lands between the fault and Retry", async () => {
+    const sandbox = failedRunThenBrokenReset();
+    const { driver, storage } = driverWith(sandbox);
+    await driver.arm(armInput);
+    await driver.execute();
+    expect(driver.snapshot().machine.phase).toMatchObject({ kind: "failed-at", stepIndex: 0 });
+
+    await driver.arm(armInputB);
+    expect(driver.snapshot().fault).toMatchObject({
+      kind: "wire-mismatch",
+      stage: "reset",
+      retry: "reload",
+    });
+
+    // A second tab finishes arming its own run and writes ITS pointer to the shared key. Valid in
+    // every respect, and its fingerprint is plan B's — which is exactly what makes it dangerous to
+    // a gate that reads the fingerprint alone: this tab is holding session A and A's hash.
+    const otherTab = encodePointer({
+      sessionKey: "cd".repeat(32),
+      planHash: `0x${"ab".repeat(32)}`,
+      fingerprint: planHashOf(planB.steps),
+    });
+    storage.write(otherTab);
+
+    await driver.retry();
+
+    // No adoption: the retained capture is plan A's, and no pointer written by anyone else can make
+    // A's session answer for B.
+    expect(sandbox.calls.session).toBe(0);
+    expect(driver.snapshot().machine.phase.kind).toBe("idle");
+    expect(driver.snapshot().machine.record).toBeNull();
+    expect(driver.snapshot().machine.plan).toBeNull();
+    expect(driver.snapshot().fault).toBeNull();
+    // And the other tab's pointer is untouched — its run is still resumable. A driver may only ever
+    // retire a pointer it can prove is about its own pair, and this one provably is not.
+    expect(storage.held()).toBe(otherTab);
+
+    // The landing is the fresh-arm-only state, and arming writes THIS tab's pointer honestly.
+    await driver.arm(armInputB);
+    expect(driver.snapshot().machine.phase.kind).toBe("ready");
+    expect(storage.held()).not.toBe(otherTab);
+  });
+
+  it("still rehydrates its own committed run when another tab overwrites the pointer", async () => {
+    const sandbox = failedRunThenBrokenReset();
+    const { driver, storage } = driverWith(sandbox);
+    await driver.arm(armInput);
+    await driver.execute();
+    await driver.arm(armInput);
+    expect(driver.snapshot().fault).toMatchObject({ stage: "reset", retry: "reload" });
+
+    // The other tab writes a pointer for a run this driver knows nothing about. Under a gate that
+    // re-read storage and demanded the full triple, this legitimate recovery would now REFUSE —
+    // another tab's write would have disabled this tab's discovery of its own committed session.
+    // The capture is the authority, so the reload proceeds exactly as it did before anyone wrote.
+    storage.write(
+      encodePointer({
+        sessionKey: "cd".repeat(32),
+        planHash: `0x${"ab".repeat(32)}`,
+        fingerprint: `0x${"12".repeat(32)}`,
+      }),
+    );
+
+    await driver.retry();
+    expect(sandbox.calls.session).toBe(1);
+    expect(driver.snapshot().machine.phase.kind).not.toBe("idle");
+    expect(driver.snapshot().fault).toBeNull();
   });
 
   it("still rehydrates the reload family when the pointer vouches for the plan", async () => {

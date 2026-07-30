@@ -299,13 +299,16 @@ function sessionVerdictOf(refusal: SandboxRefusalFact): SessionVerdict {
 }
 
 /**
- * The pointer's binding, in ONE definition (Codex round-9): a stored pointer's evidence may bind to
- * exactly one plan — the one whose money-bearing fingerprint it carries. Step identity cannot stand
- * in for this: two plans with the same topology and different amounts agree step for step, and a
+ * The binding, in ONE definition (Codex round-9): a run's evidence may bind to exactly one plan —
+ * the one whose money-bearing fingerprint the run was captured with. Step identity cannot stand in
+ * for this: two plans with the same topology and different amounts agree step for step, and a
  * session whose only record is a first-step failure has no settled money row left to disagree over.
+ *
+ * It takes the fingerprint VALUE, so each caller supplies the one it is entitled to consult — the
+ * parsed pointer at mount restore, this driver's own retained capture everywhere else (round-10).
  */
-function pointerVouchesFor(pointer: SessionPointer | null, plan: PlanSuccess): boolean {
-  return pointer !== null && planHashOf(plan.steps) === pointer.fingerprint;
+function fingerprintBinds(fingerprint: Hex | null, plan: PlanSuccess): boolean {
+  return fingerprint !== null && planHashOf(plan.steps) === fingerprint;
 }
 
 /** The two plan-stage refusal kinds the resume mirror deliberately omits. */
@@ -335,6 +338,18 @@ export class SandboxDriver {
    * pointer.
    */
   private retainedPlanHash: Hex | null = null;
+  /**
+   * The third leg of the retained triple (Codex round-10): the money-bearing fingerprint of the plan
+   * this driver captured `sessionKey`/`retainedPlanHash` WITH. Written and cleared with them, at the
+   * same two capture sites, so the three can never name different runs.
+   *
+   * It exists because the pointer lives in origin-wide storage and a second tab writes its own
+   * valid pointer there. Re-reading that pointer to decide what THIS driver may adopt reads one
+   * run's fingerprint against another run's key and hash: a pointer vouching for the newest arm
+   * would wave through an adoption of the retained session's evidence. The capture is immutable
+   * from this driver's side, so it is what the gate consults.
+   */
+  private retainedFingerprint: Hex | null = null;
   /** True once the session fork has seen any transaction — a re-arm must reset it first. */
   private forkDirty = false;
   private lastArm: ArmInput | null = null;
@@ -528,6 +543,7 @@ export class SandboxDriver {
     this.session = null;
     this.forkDirty = false;
     this.retainedPlanHash = null;
+    this.retainedFingerprint = null;
     this.storage.clear();
   }
 
@@ -696,10 +712,10 @@ export class SandboxDriver {
       return;
     }
     this.plannedAtMs = this.now();
+    const fingerprint = planHashOf(input.plan.steps);
     this.retainedPlanHash = planHash;
-    this.storage.write(
-      encodePointer({ sessionKey: key, planHash, fingerprint: planHashOf(input.plan.steps) }),
-    );
+    this.retainedFingerprint = fingerprint;
+    this.storage.write(encodePointer({ sessionKey: key, planHash, fingerprint }));
     this.notify();
   }
 
@@ -814,6 +830,7 @@ export class SandboxDriver {
     const refusal = parsed.value;
     if (refusal.kind === "session-expired") {
       this.retainedPlanHash = null;
+      this.retainedFingerprint = null;
       this.storage.clear();
     }
     const result = reduce(this.machine, { type: "step-refused", refusal });
@@ -902,6 +919,7 @@ export class SandboxDriver {
     const refusal = parsed.value;
     if (refusal.kind === "session-expired") {
       this.retainedPlanHash = null;
+      this.retainedFingerprint = null;
       this.storage.clear();
       // `session-lost` is legal from every reconcile-gated phase (SESSION_LOSABLE).
       this.dispatch({ type: "session-lost", executedSteps: refusal.executedSteps });
@@ -945,10 +963,15 @@ export class SandboxDriver {
    * The pairing is GATED here, at the one place a plan and a hash meet (Codex round-9). A live
    * machine's pair is self-consistent — both were adopted together at `plan-ready` — but the
    * fallback pair is not: `lastArm` is the NEWEST arm and `retainedPlanHash` belongs to the run the
-   * pointer names, and after a failed run is re-simulated those are different plans. So whenever
-   * the plan comes from the fallback, the stored pointer has to vouch for it, exactly as `restore`
-   * demands at mount. It cannot be checked in the callers: `retry`'s reload family is one of three
-   * routes in, and the invariant belongs to the pairing rather than to any one of them.
+   * capture named, and after a failed run is re-simulated those are different plans. It cannot be
+   * checked in the callers: `retry`'s reload family is one of three routes in, and the invariant
+   * belongs to the pairing rather than to any one of them.
+   *
+   * What the gate consults is this driver's RETAINED triple, never storage (Codex round-10). The
+   * pointer is origin-wide and a second tab writes its own valid one; a re-read compares that tab's
+   * fingerprint against this tab's key and hash, which is not one run's evidence but two — a pointer
+   * vouching for our newest arm would wave through an adoption of our retained session's record.
+   * The capture cannot be moved by anyone else, so it is the only honest authority here.
    */
   private async rehydrate(
     silentStale = false,
@@ -966,14 +989,16 @@ export class SandboxDriver {
       });
       return false;
     }
-    if (adopted === null && !pointerVouchesFor(parsePointer(this.storage.read()), plan)) {
-      // The retained hash names a run this plan cannot claim. Nothing is looked up, because there
-      // is no answer that could legally be adopted: the evidence would be another plan's, rendered
-      // against this one. The pointer retires under the stale-pointer ruling and the landing is the
-      // one every discarded attempt reaches — a fresh arm of the current document, and no offer
-      // that re-runs a plan the canvas has replaced.
+    if (adopted === null && !fingerprintBinds(this.retainedFingerprint, plan)) {
+      // The retained capture names a run this plan cannot claim. Nothing is looked up, because no
+      // answer could legally be adopted: the evidence would be another plan's, rendered against
+      // this one. Only the IN-MEMORY binding is dropped — storage is not touched, because this
+      // driver cannot prove the pointer now there is its own (round-10: it may be a second tab's
+      // valid pointer, and there is no compare-and-swap on localStorage that would make
+      // "clear it if it is mine" true by the time the clear lands). A pointer of our own that is
+      // genuinely stale retires at the next mount, where `restore` reads it and refuses it.
       this.retainedPlanHash = null;
-      this.storage.clear();
+      this.retainedFingerprint = null;
       this.notify();
       return false;
     }
@@ -1010,6 +1035,7 @@ export class SandboxDriver {
         this.sessionKey = null;
         this.session = null;
         this.retainedPlanHash = null;
+        this.retainedFingerprint = null;
         this.storage.clear();
         this.machine = createExecutionMachine({ mode: "sandbox" });
         this.plannedAtMs = null;
@@ -1023,6 +1049,7 @@ export class SandboxDriver {
         // pointer is not stale (the fingerprint matched); the server's record failed
         // the recompute gate, and evidence of that is never swallowed — it faults.
         this.retainedPlanHash = null;
+        this.retainedFingerprint = null;
         this.storage.clear();
         this.notify();
         return false;
@@ -1043,6 +1070,7 @@ export class SandboxDriver {
       this.sessionKey = null;
       this.session = null;
       this.retainedPlanHash = null;
+      this.retainedFingerprint = null;
       this.storage.clear();
       this.notify();
       return false;
@@ -1083,15 +1111,16 @@ export class SandboxDriver {
       // Codex hard-gate finding 1: the pointer binds to the MONEY-BEARING fingerprint
       // of the plan that was armed, and the current document's plan must recompute to the
       // same hash BEFORE anything is looked up or adopted. The comparison itself is
-      // `pointerVouchesFor`, shared with `rehydrate` (round-9) so the binding has one
+      // `fingerprintBinds`, shared with `rehydrate` (round-9/round-10) so the binding has one
       // definition. A mismatch retires the pointer silently (the stale-pointer ruling):
       // the run it names belongs to a document no longer on the canvas.
-      if (!pointerVouchesFor(pointer, input.plan)) {
+      if (!fingerprintBinds(pointer.fingerprint, input.plan)) {
         this.storage.clear();
         return;
       }
       this.sessionKey = pointer.sessionKey;
       this.retainedPlanHash = pointer.planHash;
+      this.retainedFingerprint = pointer.fingerprint;
       resumed = await this.rehydrate(true, stillCurrent);
       if (resumed) this.plannedAtMs = null;
       // Re-checked between adoption and continuation (Codex thread 019fa749 finding
@@ -1102,6 +1131,7 @@ export class SandboxDriver {
         this.sessionKey = null;
         this.session = null;
         this.retainedPlanHash = null;
+        this.retainedFingerprint = null;
         this.plannedAtMs = null;
         this.storage.clear();
         this.notify();
@@ -1143,6 +1173,7 @@ export class SandboxDriver {
       // The session fork is untouched (nothing dispatched from ready), so the key is kept
       // for reuse; only the resumable-run pointer retires with the plan it named.
       this.retainedPlanHash = null;
+      this.retainedFingerprint = null;
       this.storage.clear();
       this.notify();
       return;
