@@ -38,6 +38,12 @@ export interface AllocationEdgeData {
    */
   readonly sourceLabel: string;
   readonly targetLabel: string;
+  /**
+   * T26: while a run holds the document, this edge's two WRITE controls state the refusal and
+   * dispatch nothing; the pill, the popover and the numbers stay readable. Null outside a run.
+   * The store refuses both writes as well — that is the backstop, this is the affordance.
+   */
+  readonly writeLockReason: string | null;
   [key: string]: unknown;
 }
 
@@ -136,7 +142,8 @@ function FlowEdgeComponent({
     return <BaseEdge id={id} path={edgePath} className="flow-edge__path" interactionWidth={24} />;
   }
 
-  const { allocationBps, sourceOutgoingBps, sourceLabel, targetLabel } = data;
+  const { allocationBps, sourceOutgoingBps, sourceLabel, targetLabel, writeLockReason } = data;
+  const locked = writeLockReason === null ? {} : { "aria-disabled": true, title: writeLockReason };
   const isPartial = allocationBps < FULL_ALLOCATION_BPS;
   const isOverAllocated = sourceOutgoingBps > FULL_ALLOCATION_BPS;
   const allocationText = formatAllocation(allocationBps);
@@ -144,6 +151,9 @@ function FlowEdgeComponent({
   const durationMs = particleDurationMs(allocationBps);
 
   function handleAllocation(next: number): void {
+    // `aria-disabled` with the write intercepted, never `disabled` (the B3 forward rule): a
+    // disabled control cannot be focused, so it cannot announce why it refused.
+    if (writeLockReason !== null) return;
     api.getState().setEdgeAllocationBps(id, next);
   }
 
@@ -235,6 +245,7 @@ function FlowEdgeComponent({
               // sanctioned sites in this family. A slider is not one of them.
               className="focus-ring mt-3 w-full accent-foreground"
               onChange={(event) => handleAllocation(Number(event.target.value))}
+              {...locked}
             />
 
             <dl className="mt-3 space-y-1 text-xs">
@@ -264,9 +275,11 @@ function FlowEdgeComponent({
               // (Codex phase finding 2). The Unlink glyph carries the semantics.
               className="mt-3 w-full justify-start text-muted-foreground hover:text-foreground"
               onClick={() => {
+                if (writeLockReason !== null) return;
                 api.getState().disconnect(id);
                 setOpen(false);
               }}
+              {...locked}
             >
               <Unlink aria-hidden="true" />
               Disconnect

@@ -11,12 +11,22 @@
  * route into that module stays the tolerance constant. The gate receives two opaque hashes
  * and compares them; this file is where they are minted.
  *
- * The decisions are pure exports (`liveStandingOf`, `currentPlanHashOf`) so every refusal
- * is unit-provable without a DOM (doctrine D10); the hook is thread-through — state, a
- * supersession guard for in-flight captures, and nothing else.
+ * The decisions are pure exports (`liveStandingOf`, `currentPlanHashOf`, `captureIdentityOf`)
+ * so every refusal is unit-provable without a DOM (doctrine D10); the hook is thread-through —
+ * state keyed on the session it is about, a supersession guard for in-flight captures, and
+ * nothing else.
+ *
+ * WHAT A STANDING IS ABOUT (Codex round-3 finding 1). Held state is keyed on the FULL
+ * `ReadingTarget` — address AND connector — and the hook is HANDED that target rather than
+ * taking one per press. Keyed on the address alone, a demo capture minted for a mock session
+ * survived a disconnect and a reconnect through `injected` at the same address, and the gate
+ * accepted it: it binds address + plan hash + block identity, all of which still matched. So
+ * the identity is part of the key, a change of either half drops the capture, the standing and
+ * the phase in the same render, and a capture pressed for the old identity cannot adopt state
+ * when it settles.
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import type { Address, Hex } from "viem";
+import { getAddress, type Address, type Hex } from "viem";
 import type { StrategyGraph } from "../../core/graph";
 import { buildPlan } from "../../core/plan";
 import { riskLedger } from "../../core/risk";
@@ -83,6 +93,25 @@ export function currentPlanHashOf(doc: StrategyGraph, capture: LiveCapture | nul
   return plan.ok ? planHashOf(plan.steps) : null;
 }
 
+/**
+ * WHO a capture belongs to, as one comparable value: the address AND the connector it arrived
+ * by. Null means no session — itself an identity, and the one a disconnect moves to.
+ *
+ * The connector is in the key because it is the only thing that tells a fabricated wallet from
+ * a real one (`lib/wallet/types.ts` on `ReadingTarget`: fabricated readings may only ever
+ * attach to fabricated wallets). A capture routed to the demo source
+ * (`lib/live/readiness-source.ts`) is evidence about a mock session and about nothing else, so
+ * it may not outlive one.
+ *
+ * The same `address@connectorId` shape the wallet boundary resets its seam readings on
+ * (`wallet-provider.tsx`), for the same reason and with the same consequence: a change of
+ * either half is a different wallet, and nothing read for the old one carries over. Addresses
+ * are checksum-normalized so one wallet cannot present as two.
+ */
+export function captureIdentityOf(target: ReadingTarget | null): string | null {
+  return target === null ? null : `${getAddress(target.address)}@${target.connectorId}`;
+}
+
 export type LiveSimulationPhase =
   | { readonly kind: "idle" }
   | { readonly kind: "capturing" }
@@ -95,23 +124,53 @@ export interface LiveSimulationView {
   readonly currentPlanHash: Hex | null;
   readonly currentSnapshot: LiveSnapshotIdentity | null;
   /**
-   * The whole session target, not just its address: the capture source routes on the
-   * connector (`src/lib/live/readiness-source.ts`), so a simulation is always run by the
-   * source that is allowed to answer for the wallet in hand.
+   * Captures for the session the hook was HANDED, and takes no target of its own (round-3
+   * finding 1): a caller that could name the target could name one the held state is not
+   * keyed on, which is precisely the hole this signature closes. No session, no capture.
    */
-  simulate(target: ReadingTarget): void;
+  simulate(): void;
+}
+
+/**
+ * Everything the hook holds, in one atom keyed by the identity it is ABOUT.
+ *
+ * One atom rather than three pieces of state because they must move together: what made the
+ * round-3 finding possible was a held capture that outlived the session it was captured for,
+ * beside a phase that only advanced when another press started.
+ *
+ * `ticket` is the supersession token, as object identity rather than a counter: a press mints
+ * one, every reset drops it, and a resolution adopts state only while its own ticket is still
+ * the held one. A counter would have to be bumped by hand at every reset site — the forgettable
+ * shape this replaces.
+ */
+interface CaptureState {
+  readonly identity: string | null;
+  readonly ticket: symbol | null;
+  readonly phase: LiveSimulationPhase;
+  readonly held: {
+    readonly capture: LiveCapture;
+    readonly standing: LiveSimulationStanding;
+  } | null;
+}
+
+/** Nothing captured and nothing in flight, for a stated identity. */
+function idleFor(identity: string | null): CaptureState {
+  return { identity, ticket: null, phase: { kind: "idle" }, held: null };
 }
 
 export function useLiveSimulation(
   source: LiveCaptureSource,
   monotonicNow: () => number,
+  /**
+   * The session this hook is FOR — the whole target, address and connector. Null when no
+   * wallet is connected, which is an identity change like any other: a disconnect discards
+   * the standing rather than parking it for whoever connects next.
+   */
+  target: ReadingTarget | null,
 ): LiveSimulationView {
   const doc = useComposerStore((state) => state.doc);
-  const [phase, setPhase] = useState<LiveSimulationPhase>({ kind: "idle" });
-  const [held, setHeld] = useState<{
-    readonly capture: LiveCapture;
-    readonly standing: LiveSimulationStanding;
-  } | null>(null);
+  const identity = captureIdentityOf(target);
+  const [state, setState] = useState<CaptureState>(() => idleFor(identity));
 
   // The document the standing is minted against is the one CURRENT when the capture
   // RESOLVES — the simulation genuinely ran over it — so the ref tracks the committed
@@ -123,46 +182,73 @@ export function useLiveSimulation(
   useEffect(() => {
     docRef.current = doc;
   }, [doc]);
-  // Supersession: a stale capture resolving after a newer press (or a disconnect) must not
-  // adopt state — the same discard rule the wallet provider's seam read applies.
-  const flight = useRef(0);
 
-  const simulate = useCallback(
-    (target: ReadingTarget) => {
-      const ticket = flight.current + 1;
-      flight.current = ticket;
-      setPhase({ kind: "capturing" });
-      void source
-        .capture(target)
-        .then((outcome) => {
-          if (flight.current !== ticket) return;
-          if (!outcome.ok) {
-            setPhase({ kind: "refused", reason: outcome.reason });
-            return;
-          }
-          const minted = liveStandingOf(
-            docRef.current,
-            outcome.capture,
-            target.address,
-            monotonicNow(),
-          );
-          if (!minted.ok) {
-            setPhase({ kind: "refused", reason: minted.reason });
-            return;
-          }
-          setHeld({ capture: outcome.capture, standing: minted.standing });
-          setPhase({ kind: "ready" });
-        })
-        .catch((cause: unknown) => {
-          if (flight.current !== ticket) return;
-          setPhase({
-            kind: "refused",
-            reason: `the live capture failed: ${cause instanceof Error ? cause.message : String(cause)}`,
-          });
-        });
-    },
-    [source, monotonicNow],
-  );
+  // Render-time state adjustment — the pattern this codebase uses instead of a setState in an
+  // effect body, and the one `wallet-provider.tsx` resets its seam readings with. The moment
+  // the identity moves (a new address, a new connector, or a disconnect) the capture, the
+  // standing, the phase AND the outstanding ticket are dropped in the same render, so an
+  // in-flight capture pressed for the previous identity cannot adopt state when it settles.
+  if (state.identity !== identity) setState(idleFor(identity));
+  // What the hook EXPOSES is always about the identity it was asked about, never about
+  // whatever it still holds: the adjustment above re-renders, and this covers the render that
+  // observed the change first. A standing is served to one identity only, by construction.
+  const current = state.identity === identity ? state : idleFor(identity);
+  const held = current.held;
+
+  const simulate = useCallback(() => {
+    if (target === null) return;
+    const pressedFor = captureIdentityOf(target);
+    const ticket = Symbol("live-capture");
+    setState({
+      identity: pressedFor,
+      ticket,
+      phase: { kind: "capturing" },
+      // A standing for THIS identity stands until the new capture lands — a re-simulation
+      // must not open a hole in the gate. `held` is identity-checked above, so there is
+      // nothing here that could belong to another wallet.
+      held,
+    });
+    /** Adopts a resolution only while this press is still the live one for its identity. */
+    const settle = (resolve: (previous: CaptureState) => CaptureState): void => {
+      setState((previous) => (previous.ticket === ticket ? resolve(previous) : previous));
+    };
+    const refuse = (reason: string) => (previous: CaptureState) => ({
+      ...previous,
+      ticket: null,
+      phase: { kind: "refused" as const, reason },
+    });
+    void source
+      .capture(target)
+      .then((outcome) => {
+        if (!outcome.ok) {
+          settle(refuse(outcome.reason));
+          return;
+        }
+        const minted = liveStandingOf(
+          docRef.current,
+          outcome.capture,
+          target.address,
+          monotonicNow(),
+        );
+        if (!minted.ok) {
+          settle(refuse(minted.reason));
+          return;
+        }
+        settle((previous) => ({
+          ...previous,
+          ticket: null,
+          phase: { kind: "ready" },
+          held: { capture: outcome.capture, standing: minted.standing },
+        }));
+      })
+      .catch((cause: unknown) => {
+        settle(
+          refuse(
+            `the live capture failed: ${cause instanceof Error ? cause.message : String(cause)}`,
+          ),
+        );
+      });
+  }, [source, monotonicNow, target, held]);
 
   const currentPlanHash = useMemo(
     () => currentPlanHashOf(doc, held === null ? null : held.capture),
@@ -170,7 +256,7 @@ export function useLiveSimulation(
   );
 
   return {
-    phase,
+    phase: current.phase,
     standing: held === null ? null : held.standing,
     currentPlanHash,
     currentSnapshot: held === null ? null : held.capture.identity,

@@ -33,10 +33,11 @@ import { demoSeam, type WalletSeamSource } from "../../lib/wallet/seam";
 import { WalletProvider, useWalletBoundary } from "../../lib/wallet/wallet-provider";
 import { demoLiveCaptureSource } from "../../lib/live/demo-capture";
 import { liveSeam, type LiveCaptureSource } from "../../lib/live/live-transport";
+import type { ParsedLiveReadiness } from "../../lib/live/snapshot-wire";
 import { routedCaptureSource, routedSeam } from "../../lib/live/readiness-source";
 import { ExecutionHost } from "../tx/execution-host";
 import { useLiveGate } from "../composer/sandbox-composer";
-import { useLiveSimulation } from "../composer/live-simulation";
+import { captureIdentityOf, useLiveSimulation } from "../composer/live-simulation";
 import { ConnectSurface } from "./connect-surface";
 
 const snapshot = fixtureSnapshot();
@@ -153,7 +154,9 @@ function LiveHost({
   const state = { status: "ready", snapshot } as const;
   const wallet = useWalletBoundary();
   const session = wallet.session;
-  const liveSim = useLiveSimulation(source, () => 1_000);
+  // The whole session, exactly as `ComposerBody` hands it over: the hook keys its held capture
+  // on address AND connector, and takes no target per press (round-3 finding 1).
+  const liveSim = useLiveSimulation(source, () => 1_000, session);
   const live = useLiveGate(state, liveSim);
   return (
     <ExecutionHost
@@ -164,7 +167,7 @@ function LiveHost({
       mode={live.mode}
       liveRefusal={live.refusal}
       liveSimulationPhase={liveSim.phase}
-      onLiveSimulate={session === null ? null : () => liveSim.simulate(session)}
+      onLiveSimulate={session === null ? null : liveSim.simulate}
       now={() => 1_000}
     />
   );
@@ -181,6 +184,8 @@ function mountLive(options: {
   readonly config?: WalletConfig;
   /** Override the connect seam alone, to isolate the capture half. */
   readonly seam?: WalletSeamSource;
+  /** Override the CAPTURE source alone — a source whose resolution the test controls. */
+  readonly source?: LiveCaptureSource;
 }) {
   const store = storeAt(options.allocationBps);
   const wiring = composerWiring({
@@ -195,7 +200,7 @@ function mountLive(options: {
     >
       <ComposerStoreProvider store={store}>
         <ConnectSurface />
-        <LiveHost allocationBps={options.allocationBps} source={wiring.source} />
+        <LiveHost allocationBps={options.allocationBps} source={options.source ?? wiring.source} />
       </ComposerStoreProvider>
     </WalletProvider>,
   );
@@ -484,5 +489,231 @@ describe("SPEC §3 step 7 — fabricated readings attach only to fabricated wall
           .getAttribute("aria-disabled"),
       ).toBeNull();
     });
+  });
+});
+
+/**
+ * Codex round-3 finding 1, at the seam that shipped it: a simulation standing belongs to ONE
+ * reading target — address AND connector — and to nothing else.
+ *
+ * The defect: the live-simulation hook keyed its held capture on the address alone and only
+ * superseded an in-flight one when another press started. So a mock session could earn a demo
+ * standing, disconnect, reconnect through `injected` at the SAME address, and the gate — which
+ * binds address + plan hash + block identity, all still matching — would clear on evidence that
+ * was fabricated for a different session. Both mounts below run the DEMO/CI wiring, and both
+ * keep the connect seam permissive on purpose (`demoSeam` over the address, so it reads clear
+ * for either connector): with the seam removed as a variable, the ONLY thing that can refuse is
+ * the standing, which is exactly the property under test.
+ */
+describe("SPEC §3 step 7 — a standing belongs to one address AND one connector", () => {
+  /**
+   * One address, two transports: the mock connector the demo table answers for, and a second
+   * connector re-identified as `injected` for the same address. The re-identification is the
+   * same one `config.ts` performs to tell `mock-2` from `mock` — the only way to drive the real
+   * boundary with two connector ids and no extension in the page.
+   */
+  function dualTransportConfig(account: Address): WalletConfig {
+    const wallet = () => mock({ accounts: [account], features: { defaultConnected: false } });
+    return createConfig({
+      chains: [mainnet],
+      connectors: [
+        wallet(),
+        (config) => ({ ...wallet()(config), id: INJECTED_CONNECTOR_ID, name: "Injected Wallet" }),
+      ],
+      transports: { [mainnet.id]: offlineTransport },
+      storage: null,
+      ssr: false,
+    });
+  }
+
+  /** A capture whose resolution this test controls, so a settle can be timed after a switch. */
+  function heldCapture(): {
+    readonly source: LiveCaptureSource;
+    readonly captured: () => number;
+    settle(): Promise<void>;
+  } {
+    const waiting: (() => void)[] = [];
+    const demo = demoLiveCaptureSource({ accounts: [CLEAN], codeBearing: [], occupied: [] });
+    return {
+      source: {
+        capture: (target) =>
+          new Promise<ParsedLiveReadiness>((resolve) => {
+            waiting.push(() => void demo.capture(target).then(resolve));
+          }),
+      },
+      captured: () => waiting.length,
+      async settle() {
+        // The real demo capture, resolved late: what settles is a genuine standing-worthy
+        // outcome, so a discarded one is discarded on IDENTITY and not on being unusable.
+        for (const release of waiting.splice(0)) release();
+        await Promise.resolve();
+      },
+    };
+  }
+
+  async function connectAndClear() {
+    fireEvent.click(screen.getByRole("button", { name: /Connect Mock/i }));
+    await waitFor(
+      () => {
+        expect(screen.queryByRole("button", { name: "Simulate against this wallet" })).not.toBeNull();
+      },
+      { timeout: 8_000 },
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Simulate against this wallet" }));
+    await waitFor(() => {
+      expect(
+        screen.getByRole("button", { name: "Review & execute in sandbox" }).getAttribute("aria-disabled"),
+      ).toBeNull();
+    });
+  }
+
+  async function switchToInjected() {
+    fireEvent.click(screen.getByRole("button", { name: "Disconnect" }));
+    await waitFor(() => {
+      expect(screen.queryByRole("button", { name: "Connect Injected Wallet" })).not.toBeNull();
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Connect Injected Wallet" }));
+    await waitFor(
+      () => {
+        expect(screen.getByTestId("wallet-address").getAttribute("title")).toBe(CLEAN);
+      },
+      { timeout: 8_000 },
+    );
+  }
+
+  it("drops a demo standing on a reconnect through injected at the same address", async () => {
+    mountLive({
+      accounts: [CLEAN],
+      occupied: [],
+      allocationBps: 7000,
+      config: dualTransportConfig(CLEAN),
+      // Clear readings for the address under either connector, so the seam cannot be what
+      // refuses after the switch.
+      seam: demoSeam({ accounts: [CLEAN], codeBearing: [], occupied: [] }),
+    });
+
+    await connectAndClear();
+    await switchToInjected();
+
+    // The retained demo standing is GONE: the gate refuses on the absence of a simulation for
+    // this session, not on a drifted or stale one — there is nothing to drift.
+    await waitFor(() => {
+      expect(
+        screen.getAllByText("No simulation against this wallet's balances yet").length,
+      ).toBeGreaterThan(0);
+    });
+    expect(
+      screen.getByRole("button", { name: "Review & execute in sandbox" }).getAttribute("aria-disabled"),
+    ).toBe("true");
+
+    // And what the wallet needs now is a CHAIN-armed capture: the router sends an injected
+    // session to the RPC arm, which in this deployment reads nothing and says so.
+    fireEvent.click(screen.getByRole("button", { name: "Simulate against this wallet" }));
+    await waitFor(() => {
+      expect(screen.getByTestId("live-simulation-refusal").textContent).toContain(
+        "no live chain source is configured",
+      );
+    });
+    expect(
+      screen.getByRole("button", { name: "Review & execute in sandbox" }).getAttribute("aria-disabled"),
+    ).toBe("true");
+  });
+
+  it("discards an in-flight mock capture that settles after the connector switch", async () => {
+    const flight = heldCapture();
+    mountLive({
+      accounts: [CLEAN],
+      occupied: [],
+      allocationBps: 7000,
+      config: dualTransportConfig(CLEAN),
+      seam: demoSeam({ accounts: [CLEAN], codeBearing: [], occupied: [] }),
+      source: flight.source,
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: /Connect Mock/i }));
+    await waitFor(
+      () => {
+        expect(screen.queryByRole("button", { name: "Simulate against this wallet" })).not.toBeNull();
+      },
+      { timeout: 8_000 },
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Simulate against this wallet" }));
+    // In flight, and deliberately unresolved: the press is captured, the answer is not.
+    await waitFor(() => {
+      expect(flight.captured()).toBe(1);
+    });
+
+    await switchToInjected();
+    await flight.settle();
+
+    // The mock session's capture never becomes a standing for the injected session, so the gate
+    // still refuses on having no simulation for this wallet at all.
+    await waitFor(() => {
+      expect(
+        screen.getAllByText("No simulation against this wallet's balances yet").length,
+      ).toBeGreaterThan(0);
+    });
+    expect(
+      screen.getByRole("button", { name: "Review & execute in sandbox" }).getAttribute("aria-disabled"),
+    ).toBe("true");
+    // The phase went with it: the control is offered plainly, not gated on a capture that is
+    // still notionally in flight for a session that no longer exists.
+    const simulate = screen.getByRole("button", { name: "Simulate against this wallet" });
+    expect(simulate.getAttribute("aria-disabled")).toBeNull();
+  });
+});
+
+describe("SPEC §3 step 7 — a capture that throws is a stated refusal, not a silence", () => {
+  it("renders the thrown cause and leaves the gate refused", async () => {
+    const thrown: LiveCaptureSource = {
+      capture: () => Promise.reject(new Error("the socket closed mid-read")),
+    };
+    mountLive({
+      accounts: [CLEAN],
+      occupied: [],
+      allocationBps: 7000,
+      source: thrown,
+    });
+    fireEvent.click(screen.getByRole("button", { name: /Connect Mock/i }));
+    await waitFor(
+      () => {
+        expect(screen.queryByRole("button", { name: "Simulate against this wallet" })).not.toBeNull();
+      },
+      { timeout: 8_000 },
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Simulate against this wallet" }));
+    await waitFor(() => {
+      expect(screen.getByTestId("live-simulation-refusal").textContent).toContain(
+        "the live capture failed: the socket closed mid-read",
+      );
+    });
+    expect(
+      screen.getByRole("button", { name: "Review & execute in sandbox" }).getAttribute("aria-disabled"),
+    ).toBe("true");
+  });
+});
+
+/**
+ * The identity key itself, as a pure decision (doctrine D10): the hook's held state is keyed on
+ * this string, so what counts as "the same wallet" is unit-provable rather than inferable from
+ * a component beat.
+ */
+describe("captureIdentityOf — address AND connector, or nothing", () => {
+  it("separates the same address arriving by two connectors", () => {
+    const viaMock = captureIdentityOf({ address: CLEAN, connectorId: "mock" });
+    const viaInjected = captureIdentityOf({ address: CLEAN, connectorId: INJECTED_CONNECTOR_ID });
+    expect(viaMock).not.toBe(viaInjected);
+    expect(viaMock).toContain(CLEAN);
+  });
+
+  it("is stable across checksum spelling, so one wallet cannot present as two", () => {
+    expect(captureIdentityOf({ address: CLEAN.toLowerCase() as Address, connectorId: "mock" })).toBe(
+      captureIdentityOf({ address: CLEAN, connectorId: "mock" }),
+    );
+  });
+
+  it("answers null for no session — a disconnect is an identity change like any other", () => {
+    expect(captureIdentityOf(null)).toBeNull();
   });
 });

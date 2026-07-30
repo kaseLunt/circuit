@@ -54,7 +54,11 @@ import {
   useSyncExternalStore,
 } from "react";
 import { CANVAS_ORIGIN, StrategyCanvas } from "../canvas/canvas";
-import { ComposerStoreProvider, useComposerStore } from "../../app/store/composer-provider";
+import {
+  ComposerStoreProvider,
+  useComposerStore,
+  useComposerStoreApi,
+} from "../../app/store/composer-provider";
 import type { BlockPosition } from "../../app/store/composer-store";
 import { sandboxSnapshot } from "../../lib/recorded-reads/sandbox-snapshot";
 import { buildPlan } from "../../core/plan";
@@ -142,7 +146,10 @@ function ComposerBody({ snapshot }: { readonly snapshot: SnapshotState }) {
   const { simulation, simulationPending } = useSimulation(snapshot);
   const wallet = useWalletBoundary();
   const session = wallet.session;
-  const liveSim = useLiveSimulation(liveCaptureSource, wallet.monotonicNow);
+  // The whole session, not its address: the hook keys its held capture on the full reading
+  // target, so a reconnect through another connector at the same address starts from nothing
+  // (Codex round-3 finding 1).
+  const liveSim = useLiveSimulation(liveCaptureSource, wallet.monotonicNow, session);
   const live = useLiveGate(snapshot, liveSim);
   // SPEC §3 step 4's verdict, derived once beside the simulation and handed to BOTH the
   // canvas (the block's inline refusal) and the execution column (the Simulate gate). One
@@ -159,6 +166,25 @@ function ComposerBody({ snapshot }: { readonly snapshot: SnapshotState }) {
   // T26: one derivation of "the document is frozen", handed to the palette and to the
   // canvas. Reads stay live everywhere; only writes refuse, and they refuse in words.
   const writeLockReason = runLocksDocument(driverSnap.machine) ? RUN_LOCK_REASON : null;
+
+  /**
+   * The ONE composition point where the store learns the lock (Codex round-3 finding 2).
+   *
+   * The store cannot see a run and must not hold an opinion about one, so the derivation above
+   * is handed to it — and from there every document-mutating action refuses on its own
+   * (`lockGuarded`), which is what makes a control that forgets the lock harmless rather than
+   * destructive. The props below stay: they are the AFFORDANCE (a refusal stated where the user
+   * pressed), and this is the enforcement.
+   *
+   * An effect, not a render-time write: a store write during render is a side effect in render.
+   * Ordering is not a race — the lock's only source is this driver's machine, whose transitions
+   * arrive in commits, and React flushes pending passive effects before it dispatches the next
+   * discrete user event, so no press can land between the transition and this sync.
+   */
+  const storeApi = useComposerStoreApi();
+  useEffect(() => {
+    storeApi.getState().setWriteLock(writeLockReason);
+  }, [storeApi, writeLockReason]);
 
   // Filled by the canvas once it has a viewport (see StrategyCanvasProps.dropPositionRef).
   // Read only inside the shell's keyboard handler, so the composer does not re-render when
@@ -192,7 +218,7 @@ function ComposerBody({ snapshot }: { readonly snapshot: SnapshotState }) {
           mode={live.mode}
           liveRefusal={live.refusal}
           liveSimulationPhase={liveSim.phase}
-          onLiveSimulate={session === null ? null : () => liveSim.simulate(session)}
+          onLiveSimulate={session === null ? null : liveSim.simulate}
           driver={driver}
         />
       }

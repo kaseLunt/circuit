@@ -53,8 +53,9 @@ export function ComposerShell({
 }: ComposerShellProps) {
   const api = useComposerStoreApi();
 
-  function handleAddBlock(type: BlockType): void {
-    api.getState().addBlock(type, resolveDropPosition());
+  /** Null is the store's refusal (T26), never a fabricated id — so the sidebar can say so. */
+  function handleAddBlock(type: BlockType): boolean {
+    return api.getState().addBlock(type, resolveDropPosition()) !== null;
   }
 
   function handleLoadTemplate(templateId: string): boolean {
@@ -65,12 +66,16 @@ export function ComposerShell({
    * `clear` returns void and no-ops on an already-empty document rather than pushing an
    * undo entry for nothing. The sidebar announces what happened, not what was asked for,
    * so the verdict is read from the document here — the store keeps its landed shape.
+   *
+   * The AFTER document is compared, not the before one: while a run holds the document the
+   * store refuses the clear (T26), and reporting a clear that did not happen would be the same
+   * dishonesty as announcing a template load that never landed.
    */
   function handleClear(): boolean {
-    const { doc, clear } = api.getState();
-    if (doc.blocks.length === 0 && doc.edges.length === 0) return false;
-    clear();
-    return true;
+    const before = api.getState().doc;
+    if (before.blocks.length === 0 && before.edges.length === 0) return false;
+    api.getState().clear();
+    return api.getState().doc !== before;
   }
 
   return (

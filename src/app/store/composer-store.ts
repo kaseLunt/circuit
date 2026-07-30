@@ -22,6 +22,11 @@
  * and value domains `lib/share/encode.ts` transports. Without the value half, a
  * whitelisted key (`asset`) carrying an address cleared the UI write path and landed in
  * `doc`, in undo history and in the next share link.
+ *
+ * ONE WRITE BOUNDARY, HELD BY THE STORE (T26; Codex round-3 finding 2): while an execution
+ * holds the document, EVERY action that could change it refuses, and each refuses in its own
+ * return shape. The lock is not a prop the controls promise to honour — it lives here, behind
+ * `lockGuarded`, so a control that forgets it is harmless. Reads and selection stay live.
  */
 import { createStore, type Mutate, type StoreApi } from "zustand/vanilla";
 import { subscribeWithSelector } from "zustand/middleware";
@@ -202,7 +207,13 @@ export type ConnectRejection =
   | { readonly code: "edge-limit" }
   | { readonly code: "input-cannot-consume" }
   | { readonly code: "would-create-cycle" }
-  | { readonly code: "target-already-has-producer"; readonly producerId: string };
+  | { readonly code: "target-already-has-producer"; readonly producerId: string }
+  /**
+   * The document is held by a run (T26). Unlike every other code this is not a property of
+   * the graph — `connectRejection` cannot see it and does not answer it — so it carries the
+   * holder's own sentence instead of copy the canvas restates (§10.10: one definition).
+   */
+  | { readonly code: "document-locked"; readonly reason: string };
 
 export type ConnectResult =
   | { readonly ok: true }
@@ -212,10 +223,18 @@ export type ConnectResult =
  * `failure: null` means there was nothing to load (an ABSENT draft) — silence, not an
  * error state. A non-null failure means a payload WAS present and was rejected, which the
  * canvas must say out loud. `loadFromShare` never returns a null failure.
+ *
+ * `refusal` is the other axis: the payload was never examined at all because the store refused
+ * to load anything (the T26 run lock). A verdict about the payload and a refusal to consider
+ * one are different facts, so they are different fields rather than one overloaded null.
  */
 export type LoadResult =
   | { readonly ok: true }
-  | { readonly ok: false; readonly failure: DecodeFailure | null };
+  | {
+      readonly ok: false;
+      readonly failure: DecodeFailure | null;
+      readonly refusal: string | null;
+    };
 
 export interface ComposerState {
   readonly doc: StrategyGraph;
@@ -244,10 +263,27 @@ export interface ComposerState {
   readonly overrideGateArmed: boolean;
   /** Why the last load failed; drives the designed error state, never a silent blank canvas. */
   readonly lastLoadProblem: DecodeFailure | null;
+  /**
+   * T26's write lock: the sentence every document write refuses with while an execution holds
+   * the document, or null outside a run. Held state rather than a prop threaded through the
+   * tree, because the store is where the refusal has to happen — see `lockGuarded`. Exposed so
+   * a control that dispatched a refused write can render WHY without being told separately.
+   */
+  readonly writeLock: string | null;
 }
 
-export interface ComposerActions {
-  addBlock(type: BlockType, at: BlockPosition): string;
+/**
+ * Every action that can change the DOCUMENT — the ones the run lock refuses.
+ *
+ * Membership here is a contract, not a comment: `lockGuarded` returns a complete
+ * `DocumentActions` written as an explicit object literal, so a new document action is a
+ * compile error until it is wrapped, and an action that genuinely is not a document write has
+ * to be declared in `ViewActions` deliberately. That is the difference between "one write seam
+ * no control can forget" as a claim and as a structure (Codex round-3 finding 2).
+ */
+export interface DocumentActions {
+  /** The id of the block added, or null when the write was refused — never a fabricated id. */
+  addBlock(type: BlockType, at: BlockPosition): string | null;
   removeBlock(id: string): void;
   setBlockParam(id: string, key: string, value: string | number): ActionResult;
   setBorrowAllocationBps(id: string, bps: number): ActionResult;
@@ -267,11 +303,29 @@ export interface ComposerActions {
   undo(): void;
   redo(): void;
 
+  /** View state, but a canvas gesture all the same: a run freezes the picture it is
+   *  executing, so a drag is refused with everything else (T26). */
   moveBlock(id: string, at: BlockPosition): void;
-  setSelection(ids: readonly string[]): void;
-
-  armOverride(): void;
 }
+
+/**
+ * The actions the lock leaves alone. None of them can change `doc`, and T26 is explicit that
+ * reads stay live at full legibility while a run holds the document — inspection is exactly
+ * what matters at the moment money moves.
+ */
+export interface ViewActions {
+  setSelection(ids: readonly string[]): void;
+  /** SPEC §3.4's one-shot override. Not a document write; any graph mutation disarms it. */
+  armOverride(): void;
+  /**
+   * The ONE composition point that hands the store the lock. Called by the composer host from
+   * the execution driver's own machine state (`runLocksDocument` → `RUN_LOCK_REASON`), because
+   * the store cannot see a run and must not invent an opinion about one.
+   */
+  setWriteLock(reason: string | null): void;
+}
+
+export type ComposerActions = DocumentActions & ViewActions;
 
 export type ComposerStore = ComposerState & ComposerActions;
 export type ComposerStoreApi = Mutate<
@@ -608,357 +662,451 @@ const INITIAL_STATE: ComposerState = {
   loadedFrom: { kind: "blank" },
   overrideGateArmed: false,
   lastLoadProblem: null,
+  writeLock: null,
 };
+
+/**
+ * The write boundary (T26, Codex round-3 finding 2).
+ *
+ * The lock used to live in the CONTROLS: the palette honoured it, the template rows and Clear
+ * canvas did not, and the canvas's connect / drop / delete / paste / undo / drag handlers each
+ * carried their own opinion — so "one write seam no control can forget" was a claim about
+ * diligence. Here it is a property of the store: every document-mutating dispatch passes
+ * through this one function, and a control that forgets the lock is HARMLESS rather than
+ * destructive, because the action it dispatches refuses.
+ *
+ * Each refusal is expressed in that action's OWN return shape, so the refusal is a value the
+ * caller can render rather than a silence it has to infer. Where the shape carries no room for
+ * a reason (the void actions), the sentence is readable from `writeLock` in state — which is
+ * the same string, from the same holder, and not a second copy of it.
+ */
+function lockGuarded(
+  actions: DocumentActions,
+  heldBy: () => string | null,
+): DocumentActions {
+  function guard<A extends readonly unknown[], R>(
+    write: (...args: A) => R,
+    refuse: (reason: string) => R,
+  ): (...args: A) => R {
+    return (...args: A) => {
+      const reason = heldBy();
+      return reason === null ? write(...args) : refuse(reason);
+    };
+  }
+  /** The refusal of an action whose shape has nowhere to say why; `writeLock` says it. */
+  const silence = (): void => undefined;
+  return {
+    addBlock: guard(actions.addBlock, () => null),
+    removeBlock: guard(actions.removeBlock, silence),
+    setBlockParam: guard(actions.setBlockParam, (reason) => ({ ok: false, reason })),
+    setBorrowAllocationBps: guard(actions.setBorrowAllocationBps, (reason) => ({
+      ok: false,
+      reason,
+    })),
+    setEdgeAllocationBps: guard(actions.setEdgeAllocationBps, (reason) => ({
+      ok: false,
+      reason,
+    })),
+    connect: guard(actions.connect, (reason) => ({
+      ok: false,
+      rejection: { code: "document-locked", reason },
+    })),
+    disconnect: guard(actions.disconnect, silence),
+    // The count is the truth — nothing was inserted. No UI dispatches this action today; the
+    // one that does will read `writeLock` for the sentence, as every void refusal above does.
+    insertRequiredWraps: guard(actions.insertRequiredWraps, () => ({ inserted: 0 })),
+    beginEdit: guard(actions.beginEdit, silence),
+    endEdit: guard(actions.endEdit, silence),
+    loadTemplate: guard(actions.loadTemplate, () => false),
+    loadFromShare: guard(actions.loadFromShare, (reason) => ({
+      ok: false,
+      failure: null,
+      refusal: reason,
+    })),
+    hydrateLocalDraft: guard(actions.hydrateLocalDraft, (reason) => ({
+      ok: false,
+      failure: null,
+      refusal: reason,
+    })),
+    clear: guard(actions.clear, silence),
+    undo: guard(actions.undo, silence),
+    redo: guard(actions.redo, silence),
+    moveBlock: guard(actions.moveBlock, silence),
+  };
+}
 
 export function createComposerStore(): ComposerStoreApi {
   return createStore<ComposerStore>()(
-    subscribeWithSelector((set, get) => ({
-      ...INITIAL_STATE,
-
-      addBlock: (type, at) => {
-        const state = get();
-        const id = allocateBlockId(type, new Set(state.doc.blocks.map((b) => b.id)));
-        const block: Block = { id, type, params: { ...STRUCTURAL_PARAMS[type] } };
-        set({
-          ...commitDoc(
-            state,
-            { blocks: [...state.doc.blocks, block], edges: state.doc.edges },
-            `add ${type} block`,
-          ),
-          view: { ...state.view, [id]: viewEntry(at, false) },
-        });
-        return id;
-      },
-
-      removeBlock: (id) => {
-        const state = get();
-        if (!state.doc.blocks.some((b) => b.id === id)) return;
-        const blocks = state.doc.blocks.filter((b) => b.id !== id);
-        const edges = state.doc.edges.filter((e) => e.source !== id && e.target !== id);
-        set({
-          ...commitDoc(state, { blocks, edges }, "remove block"),
-          // The view entry is deliberately kept: it is keyed by id and costs nothing, and
-          // keeping it means undoing a delete puts the block back where it was.
-          selectedBlockIds: state.selectedBlockIds.filter((s) => s !== id),
-        });
-      },
-
+    subscribeWithSelector((set, get) => {
       /**
-       * The UI half of the ONE parameter whitelist (R7). Key and value are both checked
-       * against `lib/share/encode.ts`'s table, so the composer cannot author a document
-       * the transport would refuse — and no address can reach `doc`, undo history or the
-       * next share link through a whitelisted key.
+       * The unguarded document actions. Nothing outside this factory ever holds them: they are
+       * handed straight to `lockGuarded`, and what the store exposes is the guarded set.
        */
-      setBlockParam: (id, key, value) => {
-        const state = get();
-        const block = state.doc.blocks.find((b) => b.id === id);
-        if (block === undefined) return { ok: false, reason: `no block ${id}` };
-        if (!isAllowedParamKey(block.type, key)) {
-          return { ok: false, reason: `'${key}' is not a parameter of a ${block.type} block` };
-        }
-        if (!isAllowedParamValue(block.type, key, value)) {
-          return {
-            ok: false,
-            reason: `value for '${key}' is not an accepted ${block.type} parameter value`,
-          };
-        }
-        if (block.params[key] === value) return { ok: true };
-        const blocks = state.doc.blocks.map((b) =>
-          b.id === id ? { ...b, params: { ...b.params, [key]: value } } : b,
-        );
-        set({
-          ...commitDoc(state, { blocks, edges: state.doc.edges }, `set ${key}`),
-          // The value is the user's now, whatever it was before.
-          paramOrigins: retireOrigin(state.paramOrigins, paramOriginKey("block", id, key)),
-        });
-        return { ok: true };
-      },
-
-      /**
-       * SPEC §3.3/§3.4. `allocationBps` on a BORROW block is debt opened as a fraction of
-       * collateral value at open (the `b` in the §5.2 net-APY equation) — deliberately NOT
-       * the same quantity as an edge's `allocationBps` (flow routing).
-       *
-       * Deliberately NOT clamped to the LTV ceiling: §3.4 requires the over-limit value to
-       * be representable so the block can render the rejection math and "Simulate anyway"
-       * can run it. Gating is a derived concern, not a store-level clamp.
-       */
-      setBorrowAllocationBps: (id, bps) => {
-        if (!isAllowedParamValue("borrow", "allocationBps", bps)) {
-          return { ok: false, reason: BPS_RANGE_REASON };
-        }
-        const state = get();
-        const block = state.doc.blocks.find((b) => b.id === id);
-        if (block === undefined || block.type !== "borrow") {
-          return { ok: false, reason: `block ${id} is not a borrow block` };
-        }
-        if (block.params["allocationBps"] === bps) return { ok: true };
-        const blocks = state.doc.blocks.map((b) =>
-          b.id === id ? { ...b, params: { ...b.params, allocationBps: bps } } : b,
-        );
-        set({
-          ...commitDoc(state, { blocks, edges: state.doc.edges }, "set borrow allocation"),
-          paramOrigins: retireOrigin(state.paramOrigins, borrowAllocationOriginKey(id)),
-        });
-        return { ok: true };
-      },
-
-      /**
-       * Sibling edges are NEVER silently rewritten. The predecessor redistributed
-       * `100 - clamped` across siblings in one-decimal floats, destroying user intent and
-       * producing non-integer percentages that splitAmount/validateGraph now reject
-       * outright. Over-allocation is surfaced on the source block via
-       * `overAllocatedSourceIds` and the user resolves it.
-       */
-      setEdgeAllocationBps: (edgeId, bps) => {
-        if (!isAllocationBps(bps)) return { ok: false, reason: BPS_RANGE_REASON };
-        const state = get();
-        const edge = state.doc.edges.find((e) => e.id === edgeId);
-        if (edge === undefined) return { ok: false, reason: `no edge ${edgeId}` };
-        if (edge.allocationBps === bps) return { ok: true };
-        const edges = state.doc.edges.map((e) => (e.id === edgeId ? { ...e, allocationBps: bps } : e));
-        set({
-          ...commitDoc(state, { blocks: state.doc.blocks, edges }, "set edge allocation"),
-          paramOrigins: retireOrigin(state.paramOrigins, edgeAllocationOriginKey(edgeId)),
-        });
-        return { ok: true };
-      },
-
-      connect: (source, target) => {
-        const state = get();
-        const rejection = connectRejection(state.doc, source, target);
-        if (rejection !== null) return { ok: false, rejection };
-        // Reserved against every REACHABLE document, not just the live one — the same
-        // completeness rule the wrap pass uses, and for the same reason: this action stamps
-        // a configured origin on the id it mints, `paramOrigins` does not unwind with undo,
-        // and so reusing an id some restorable document also holds would leave that stamp
-        // sitting on a different edge. Disconnect an edge and reconnect the same endpoints
-        // and the live document alone says the id is free; the undo stack disagrees.
-        const id = allocateEdgeId(target, reservedEdgeIds(state));
-        const edges: Edge[] = [
-          ...state.doc.edges,
-          { id, source, target, allocationBps: FULL_ALLOCATION_BPS },
-        ];
-        const blocks = withInferredStructure(state.doc.blocks, source, target);
-        const added = edges.filter((e) => !state.doc.edges.some((prev) => prev.id === e.id));
-        set({
-          ...commitDoc(state, { blocks, edges }, "connect blocks"),
-          // The user chose to connect; they did not choose the allocation. It is the
-          // store's FULL_ALLOCATION_BPS default until they open the popover.
-          paramOrigins: withEdgeOrigins(
-            state.paramOrigins,
-            added.map((e) => e.id),
-          ),
-        });
-        return { ok: true };
-      },
-
-      disconnect: (edgeId) => {
-        const state = get();
-        if (!state.doc.edges.some((e) => e.id === edgeId)) return;
-        set(
-          commitDoc(
-            state,
-            { blocks: state.doc.blocks, edges: state.doc.edges.filter((e) => e.id !== edgeId) },
-            "disconnect blocks",
-          ),
-        );
-      },
-
-      /**
-       * Pure route-optimizer pass, ONE history entry. A no-op run pushes nothing, so
-       * clicking "Auto" twice does not cost two undos. `optimizeRoute` throws on an id
-       * collision; that is deliberately not caught — colon-bearing block ids are
-       * unreachable from every write path, so a collision is a real invariant violation.
-       *
-       * The canvas is laid out in ONE generation afterwards (R9): an insertion changes the
-       * graph's shape, and copying coordinates for the inserted blocks only would drop a
-       * new block on top of a user-dragged one. The "Auto" badge rides `view`, keyed by the
-       * canonical ids, and survives every later layout because it is merged forward here.
-       */
-      insertRequiredWraps: () => {
-        const state = get();
-        const route = optimizeRoute(state.doc);
-        if (route.autoInsertedBlockIds.length === 0) return { inserted: 0 };
-        const canonical = canonicalizeInserted(
-          route,
-          new Set(state.doc.blocks.map((b) => b.id)),
-          reservedEdgeIds(state),
-        );
-        const inserted = new Set(canonical.insertedBlockIds);
-        const positions = layoutGraph(canonical.graph);
-        const view: Record<string, BlockView> = {};
-        for (const b of canonical.graph.blocks) {
-          const at = positions[b.id];
-          const previous = state.view[b.id];
-          // No coordinate is ever invented: if the layout pass omits a block, its previous
-          // position stands, and if it has none the canvas asks for one.
-          const base = at === undefined ? previous : at;
-          if (base === undefined) continue;
-          const wasAuto = previous !== undefined && previous.isAutoInserted === true;
-          view[b.id] = viewEntry(base, inserted.has(b.id) || wasAuto);
-        }
-        set({
-          ...commitDoc(state, canonical.graph, "insert required wraps"),
-          view,
-          paramOrigins: withInsertedEdgeOrigins(state.paramOrigins, canonical.insertedEdges),
-        });
-        return { inserted: canonical.insertedBlockIds.length };
-      },
-
-      beginEdit: (label) => {
-        if (get().pendingEdit !== null) return;
-        set({ pendingEdit: { label, base: get().doc } });
-      },
-
-      endEdit: () => {
-        const { pendingEdit, doc, past } = get();
-        if (pendingEdit === null) return;
-        if (pendingEdit.base === doc) {
-          // Identity compare: nothing actually moved, so the gesture leaves no trace.
-          set({ pendingEdit: null });
-          return;
-        }
-        set({
-          pendingEdit: null,
-          past: [...past, { label: pendingEdit.label, doc: pendingEdit.base }].slice(-HISTORY_LIMIT),
-          future: [],
-        });
-      },
-
-      /**
-       * R2: a template graph is validated like any other document. The builders take open
-       * parameters, so "it came from a template" is not a trust argument. `false` means
-       * nothing was loaded — either the id is unknown (silence) or the graph was refused,
-       * in which case `lastLoadProblem` names core's own errors.
-       */
-      loadTemplate: (templateId) => {
-        const template = getTemplate(templateId);
-        if (template === undefined) return false;
-        const graph = template.graph();
-        const structural = validateGraph(graph);
-        if (!structural.ok) {
-          set({ lastLoadProblem: { code: "graph-invalid", errors: structural.errors } });
-          return false;
-        }
-        set(loadedState(get(), graph, { kind: "template", templateId }));
-        return true;
-      },
-
-      loadFromShare: (encoded) => {
-        const decoded = decodeShareGraph(encoded);
-        if (!decoded.ok) {
-          // Designed failure state: the canvas says why the link was rejected. Never a
-          // blank canvas, never a partially-applied graph.
-          set({ lastLoadProblem: decoded.failure });
-          return { ok: false, failure: decoded.failure };
-        }
-        set(loadedState(get(), decoded.graph, { kind: "share-url" }));
-        return { ok: true };
-      },
-
-      /**
-       * localStorage is user-writable, so a draft goes through the SAME gates as a
-       * stranger's link — one decode-and-validate pipeline, two transports. This is why
-       * there is no `persist` middleware: it would rehydrate an unvalidated graph.
-       */
-      hydrateLocalDraft: (raw) => {
-        if (raw === null || raw.length === 0) return { ok: false, failure: null };
-        const decoded = decodeShareGraph(raw);
-        if (!decoded.ok) {
-          set({ lastLoadProblem: decoded.failure });
-          return { ok: false, failure: decoded.failure };
-        }
-        set(loadedState(get(), decoded.graph, { kind: "local-draft" }));
-        return { ok: true };
-      },
-
-      clear: () => {
-        const state = get();
-        if (state.doc.blocks.length === 0 && state.doc.edges.length === 0) return;
-        set({
-          ...commitDoc(state, EMPTY_GRAPH, "clear canvas"),
-          selectedBlockIds: [],
-          // The document is no longer the template it was loaded from; claiming otherwise
-          // would make the provenance chip lie. View entries survive so undo restores
-          // positions along with the blocks.
-          loadedFrom: { kind: "blank" },
-          paramOrigins: {},
-        });
-      },
-
-      undo: () => {
-        const { past, future, doc, rev, pendingEdit } = get();
-        if (pendingEdit !== null && pendingEdit.base !== doc) {
-          // Ctrl+Z landing mid-drag: the open gesture IS the newest change and its
-          // pre-gesture doc was never pushed. Popping `past` here would revert both the
-          // gesture and the edit before it — two things for one keystroke.
+      const documentActions: DocumentActions = {
+        addBlock: (type, at) => {
+          const state = get();
+          const id = allocateBlockId(type, new Set(state.doc.blocks.map((b) => b.id)));
+          const block: Block = { id, type, params: { ...STRUCTURAL_PARAMS[type] } };
           set({
-            doc: pendingEdit.base,
-            rev: rev + 1,
+            ...commitDoc(
+              state,
+              { blocks: [...state.doc.blocks, block], edges: state.doc.edges },
+              `add ${type} block`,
+            ),
+            view: { ...state.view, [id]: viewEntry(at, false) },
+          });
+          return id;
+        },
+
+        removeBlock: (id) => {
+          const state = get();
+          if (!state.doc.blocks.some((b) => b.id === id)) return;
+          const blocks = state.doc.blocks.filter((b) => b.id !== id);
+          const edges = state.doc.edges.filter((e) => e.source !== id && e.target !== id);
+          set({
+            ...commitDoc(state, { blocks, edges }, "remove block"),
+            // The view entry is deliberately kept: it is keyed by id and costs nothing, and
+            // keeping it means undoing a delete puts the block back where it was.
+            selectedBlockIds: state.selectedBlockIds.filter((s) => s !== id),
+          });
+        },
+
+        /**
+         * The UI half of the ONE parameter whitelist (R7). Key and value are both checked
+         * against `lib/share/encode.ts`'s table, so the composer cannot author a document
+         * the transport would refuse — and no address can reach `doc`, undo history or the
+         * next share link through a whitelisted key.
+         */
+        setBlockParam: (id, key, value) => {
+          const state = get();
+          const block = state.doc.blocks.find((b) => b.id === id);
+          if (block === undefined) return { ok: false, reason: `no block ${id}` };
+          if (!isAllowedParamKey(block.type, key)) {
+            return { ok: false, reason: `'${key}' is not a parameter of a ${block.type} block` };
+          }
+          if (!isAllowedParamValue(block.type, key, value)) {
+            return {
+              ok: false,
+              reason: `value for '${key}' is not an accepted ${block.type} parameter value`,
+            };
+          }
+          if (block.params[key] === value) return { ok: true };
+          const blocks = state.doc.blocks.map((b) =>
+            b.id === id ? { ...b, params: { ...b.params, [key]: value } } : b,
+          );
+          set({
+            ...commitDoc(state, { blocks, edges: state.doc.edges }, `set ${key}`),
+            // The value is the user's now, whatever it was before.
+            paramOrigins: retireOrigin(state.paramOrigins, paramOriginKey("block", id, key)),
+          });
+          return { ok: true };
+        },
+
+        /**
+         * SPEC §3.3/§3.4. `allocationBps` on a BORROW block is debt opened as a fraction of
+         * collateral value at open (the `b` in the §5.2 net-APY equation) — deliberately NOT
+         * the same quantity as an edge's `allocationBps` (flow routing).
+         *
+         * Deliberately NOT clamped to the LTV ceiling: §3.4 requires the over-limit value to
+         * be representable so the block can render the rejection math and "Simulate anyway"
+         * can run it. Gating is a derived concern, not a store-level clamp.
+         */
+        setBorrowAllocationBps: (id, bps) => {
+          if (!isAllowedParamValue("borrow", "allocationBps", bps)) {
+            return { ok: false, reason: BPS_RANGE_REASON };
+          }
+          const state = get();
+          const block = state.doc.blocks.find((b) => b.id === id);
+          if (block === undefined || block.type !== "borrow") {
+            return { ok: false, reason: `block ${id} is not a borrow block` };
+          }
+          if (block.params["allocationBps"] === bps) return { ok: true };
+          const blocks = state.doc.blocks.map((b) =>
+            b.id === id ? { ...b, params: { ...b.params, allocationBps: bps } } : b,
+          );
+          set({
+            ...commitDoc(state, { blocks, edges: state.doc.edges }, "set borrow allocation"),
+            paramOrigins: retireOrigin(state.paramOrigins, borrowAllocationOriginKey(id)),
+          });
+          return { ok: true };
+        },
+
+        /**
+         * Sibling edges are NEVER silently rewritten. The predecessor redistributed
+         * `100 - clamped` across siblings in one-decimal floats, destroying user intent and
+         * producing non-integer percentages that splitAmount/validateGraph now reject
+         * outright. Over-allocation is surfaced on the source block via
+         * `overAllocatedSourceIds` and the user resolves it.
+         */
+        setEdgeAllocationBps: (edgeId, bps) => {
+          if (!isAllocationBps(bps)) return { ok: false, reason: BPS_RANGE_REASON };
+          const state = get();
+          const edge = state.doc.edges.find((e) => e.id === edgeId);
+          if (edge === undefined) return { ok: false, reason: `no edge ${edgeId}` };
+          if (edge.allocationBps === bps) return { ok: true };
+          const edges = state.doc.edges.map((e) => (e.id === edgeId ? { ...e, allocationBps: bps } : e));
+          set({
+            ...commitDoc(state, { blocks: state.doc.blocks, edges }, "set edge allocation"),
+            paramOrigins: retireOrigin(state.paramOrigins, edgeAllocationOriginKey(edgeId)),
+          });
+          return { ok: true };
+        },
+
+        connect: (source, target) => {
+          const state = get();
+          const rejection = connectRejection(state.doc, source, target);
+          if (rejection !== null) return { ok: false, rejection };
+          // Reserved against every REACHABLE document, not just the live one — the same
+          // completeness rule the wrap pass uses, and for the same reason: this action stamps
+          // a configured origin on the id it mints, `paramOrigins` does not unwind with undo,
+          // and so reusing an id some restorable document also holds would leave that stamp
+          // sitting on a different edge. Disconnect an edge and reconnect the same endpoints
+          // and the live document alone says the id is free; the undo stack disagrees.
+          const id = allocateEdgeId(target, reservedEdgeIds(state));
+          const edges: Edge[] = [
+            ...state.doc.edges,
+            { id, source, target, allocationBps: FULL_ALLOCATION_BPS },
+          ];
+          const blocks = withInferredStructure(state.doc.blocks, source, target);
+          const added = edges.filter((e) => !state.doc.edges.some((prev) => prev.id === e.id));
+          set({
+            ...commitDoc(state, { blocks, edges }, "connect blocks"),
+            // The user chose to connect; they did not choose the allocation. It is the
+            // store's FULL_ALLOCATION_BPS default until they open the popover.
+            paramOrigins: withEdgeOrigins(
+              state.paramOrigins,
+              added.map((e) => e.id),
+            ),
+          });
+          return { ok: true };
+        },
+
+        disconnect: (edgeId) => {
+          const state = get();
+          if (!state.doc.edges.some((e) => e.id === edgeId)) return;
+          set(
+            commitDoc(
+              state,
+              { blocks: state.doc.blocks, edges: state.doc.edges.filter((e) => e.id !== edgeId) },
+              "disconnect blocks",
+            ),
+          );
+        },
+
+        /**
+         * Pure route-optimizer pass, ONE history entry. A no-op run pushes nothing, so
+         * clicking "Auto" twice does not cost two undos. `optimizeRoute` throws on an id
+         * collision; that is deliberately not caught — colon-bearing block ids are
+         * unreachable from every write path, so a collision is a real invariant violation.
+         *
+         * The canvas is laid out in ONE generation afterwards (R9): an insertion changes the
+         * graph's shape, and copying coordinates for the inserted blocks only would drop a
+         * new block on top of a user-dragged one. The "Auto" badge rides `view`, keyed by the
+         * canonical ids, and survives every later layout because it is merged forward here.
+         */
+        insertRequiredWraps: () => {
+          const state = get();
+          const route = optimizeRoute(state.doc);
+          if (route.autoInsertedBlockIds.length === 0) return { inserted: 0 };
+          const canonical = canonicalizeInserted(
+            route,
+            new Set(state.doc.blocks.map((b) => b.id)),
+            reservedEdgeIds(state),
+          );
+          const inserted = new Set(canonical.insertedBlockIds);
+          const positions = layoutGraph(canonical.graph);
+          const view: Record<string, BlockView> = {};
+          for (const b of canonical.graph.blocks) {
+            const at = positions[b.id];
+            const previous = state.view[b.id];
+            // No coordinate is ever invented: if the layout pass omits a block, its previous
+            // position stands, and if it has none the canvas asks for one.
+            const base = at === undefined ? previous : at;
+            if (base === undefined) continue;
+            const wasAuto = previous !== undefined && previous.isAutoInserted === true;
+            view[b.id] = viewEntry(base, inserted.has(b.id) || wasAuto);
+          }
+          set({
+            ...commitDoc(state, canonical.graph, "insert required wraps"),
+            view,
+            paramOrigins: withInsertedEdgeOrigins(state.paramOrigins, canonical.insertedEdges),
+          });
+          return { inserted: canonical.insertedBlockIds.length };
+        },
+
+        beginEdit: (label) => {
+          if (get().pendingEdit !== null) return;
+          set({ pendingEdit: { label, base: get().doc } });
+        },
+
+        endEdit: () => {
+          const { pendingEdit, doc, past } = get();
+          if (pendingEdit === null) return;
+          if (pendingEdit.base === doc) {
+            // Identity compare: nothing actually moved, so the gesture leaves no trace.
+            set({ pendingEdit: null });
+            return;
+          }
+          set({
             pendingEdit: null,
-            future: [{ label: pendingEdit.label, doc }, ...future],
+            past: [...past, { label: pendingEdit.label, doc: pendingEdit.base }].slice(-HISTORY_LIMIT),
+            future: [],
+          });
+        },
+
+        /**
+         * R2: a template graph is validated like any other document. The builders take open
+         * parameters, so "it came from a template" is not a trust argument. `false` means
+         * nothing was loaded — either the id is unknown (silence) or the graph was refused,
+         * in which case `lastLoadProblem` names core's own errors.
+         */
+        loadTemplate: (templateId) => {
+          const template = getTemplate(templateId);
+          if (template === undefined) return false;
+          const graph = template.graph();
+          const structural = validateGraph(graph);
+          if (!structural.ok) {
+            set({ lastLoadProblem: { code: "graph-invalid", errors: structural.errors } });
+            return false;
+          }
+          set(loadedState(get(), graph, { kind: "template", templateId }));
+          return true;
+        },
+
+        loadFromShare: (encoded) => {
+          const decoded = decodeShareGraph(encoded);
+          if (!decoded.ok) {
+            // Designed failure state: the canvas says why the link was rejected. Never a
+            // blank canvas, never a partially-applied graph.
+            set({ lastLoadProblem: decoded.failure });
+            return { ok: false, failure: decoded.failure, refusal: null };
+          }
+          set(loadedState(get(), decoded.graph, { kind: "share-url" }));
+          return { ok: true };
+        },
+
+        /**
+         * localStorage is user-writable, so a draft goes through the SAME gates as a
+         * stranger's link — one decode-and-validate pipeline, two transports. This is why
+         * there is no `persist` middleware: it would rehydrate an unvalidated graph.
+         */
+        hydrateLocalDraft: (raw) => {
+          if (raw === null || raw.length === 0) return { ok: false, failure: null, refusal: null };
+          const decoded = decodeShareGraph(raw);
+          if (!decoded.ok) {
+            set({ lastLoadProblem: decoded.failure });
+            return { ok: false, failure: decoded.failure, refusal: null };
+          }
+          set(loadedState(get(), decoded.graph, { kind: "local-draft" }));
+          return { ok: true };
+        },
+
+        clear: () => {
+          const state = get();
+          if (state.doc.blocks.length === 0 && state.doc.edges.length === 0) return;
+          set({
+            ...commitDoc(state, EMPTY_GRAPH, "clear canvas"),
+            selectedBlockIds: [],
+            // The document is no longer the template it was loaded from; claiming otherwise
+            // would make the provenance chip lie. View entries survive so undo restores
+            // positions along with the blocks.
+            loadedFrom: { kind: "blank" },
+            paramOrigins: {},
+          });
+        },
+
+        undo: () => {
+          const { past, future, doc, rev, pendingEdit } = get();
+          if (pendingEdit !== null && pendingEdit.base !== doc) {
+            // Ctrl+Z landing mid-drag: the open gesture IS the newest change and its
+            // pre-gesture doc was never pushed. Popping `past` here would revert both the
+            // gesture and the edit before it — two things for one keystroke.
+            set({
+              doc: pendingEdit.base,
+              rev: rev + 1,
+              pendingEdit: null,
+              future: [{ label: pendingEdit.label, doc }, ...future],
+              overrideGateArmed: false,
+            });
+            return;
+          }
+          const entry = past[past.length - 1];
+          if (entry === undefined) {
+            if (pendingEdit !== null) set({ pendingEdit: null });
+            return;
+          }
+          set({
+            doc: entry.doc,
+            rev: rev + 1,
+            past: past.slice(0, -1),
+            future: [{ label: entry.label, doc }, ...future],
+            pendingEdit: null,
             overrideGateArmed: false,
           });
-          return;
-        }
-        const entry = past[past.length - 1];
-        if (entry === undefined) {
-          if (pendingEdit !== null) set({ pendingEdit: null });
-          return;
-        }
-        set({
-          doc: entry.doc,
-          rev: rev + 1,
-          past: past.slice(0, -1),
-          future: [{ label: entry.label, doc }, ...future],
-          pendingEdit: null,
-          overrideGateArmed: false,
-        });
-      },
+        },
 
-      redo: () => {
-        const { past, future, doc, rev } = get();
-        const entry = future[0];
-        if (entry === undefined) return;
-        set({
-          doc: entry.doc,
-          rev: rev + 1,
-          past: [...past, { label: entry.label, doc }].slice(-HISTORY_LIMIT),
-          future: future.slice(1),
-          pendingEdit: null,
-          overrideGateArmed: false,
-        });
-      },
+        redo: () => {
+          const { past, future, doc, rev } = get();
+          const entry = future[0];
+          if (entry === undefined) return;
+          set({
+            doc: entry.doc,
+            rev: rev + 1,
+            past: [...past, { label: entry.label, doc }].slice(-HISTORY_LIMIT),
+            future: future.slice(1),
+            pendingEdit: null,
+            overrideGateArmed: false,
+          });
+        },
 
-      moveBlock: (id, at) => {
-        const state = get();
-        if (!state.doc.blocks.some((b) => b.id === id)) return;
-        const previous = state.view[id];
-        // View state: no history entry, no `rev` bump — a drag must not invalidate the
-        // risk projection's memo (§7 out-of-scope list). The badge is not a position and
-        // survives the move.
-        set({
-          view: {
-            ...state.view,
-            [id]: viewEntry(at, previous !== undefined && previous.isAutoInserted === true),
-          },
-        });
-      },
+        moveBlock: (id, at) => {
+          const state = get();
+          if (!state.doc.blocks.some((b) => b.id === id)) return;
+          const previous = state.view[id];
+          // View state: no history entry, no `rev` bump — a drag must not invalidate the
+          // risk projection's memo (§7 out-of-scope list). The badge is not a position and
+          // survives the move.
+          set({
+            view: {
+              ...state.view,
+              [id]: viewEntry(at, previous !== undefined && previous.isAutoInserted === true),
+            },
+          });
+        },
+      };
 
-      setSelection: (ids) => {
-        const state = get();
-        const known = new Set(state.doc.blocks.map((b) => b.id));
-        const next = [...new Set(ids)].filter((id) => known.has(id));
-        const current = state.selectedBlockIds;
-        if (current.length === next.length && next.every((id, i) => current[i] === id)) return;
-        set({ selectedBlockIds: next });
-      },
+      return {
+        ...INITIAL_STATE,
+        // EVERY document write, through one boundary. Spread after the state so the store's
+        // action surface is the guarded set and the unguarded one is unreachable from outside.
+        ...lockGuarded(documentActions, () => get().writeLock),
 
-      armOverride: () => {
-        set({ overrideGateArmed: true });
-      },
-    })),
+        setSelection: (ids) => {
+          const state = get();
+          const known = new Set(state.doc.blocks.map((b) => b.id));
+          const next = [...new Set(ids)].filter((id) => known.has(id));
+          const current = state.selectedBlockIds;
+          if (current.length === next.length && next.every((id, i) => current[i] === id)) return;
+          set({ selectedBlockIds: next });
+        },
+
+        armOverride: () => {
+          set({ overrideGateArmed: true });
+        },
+
+        setWriteLock: (reason) => {
+          const state = get();
+          if (state.writeLock === reason) return;
+          // Engaging the lock CLOSES an open gesture instead of freezing it half-open. The
+          // pre-gesture document is already captured, and a `pendingEdit` left standing across
+          // a run suppresses the history entry of the first edit after the lock lifts — the
+          // same silent end to undo recording `flow-edge.tsx`'s cleanup exists to prevent.
+          // The unguarded action, deliberately: this is the transition INTO the lock.
+          if (reason !== null && state.pendingEdit !== null) documentActions.endEdit();
+          set({ writeLock: reason });
+        },
+      };
+    }),
   );
 }
 
