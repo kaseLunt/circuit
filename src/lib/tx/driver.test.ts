@@ -1334,39 +1334,39 @@ describe("restore is bound to the document generation (thread 019fa749 finding 2
  * Every beat below holds ONE wire call open and lands the edit while it is genuinely out, which is
  * the only way to reach this seam: a transport that answers immediately cannot be interrupted.
  */
-describe("an arm is bound to the document generation (round-6)", () => {
-  /**
-   * A transport that HOLDS one verb: the call is announced as asked and its response withheld
-   * until the test releases it. Everything else answers through the scripted server unchanged, so
-   * the plan agreement and identity checks stay real.
-   */
-  function heldSandbox(verb: "create" | "plan", overrides: ScriptOverrides = {}) {
-    const inner = scriptedSandbox(overrides);
-    let announce!: () => void;
-    const asked = new Promise<void>((resolve) => {
-      announce = () => resolve();
-    });
-    let release!: () => void;
-    const released = new Promise<void>((resolve) => {
-      release = () => resolve();
-    });
-    const hold = async <T>(run: () => Promise<T>): Promise<T> => {
-      announce();
-      await released;
-      return run();
-    };
-    const transport: SandboxTransport = {
-      ...inner.transport,
-      ...(verb === "create"
-        ? { create: () => hold(() => inner.transport.create()) }
-        : {
-            plan: (key: string, document: string) =>
-              hold(() => inner.transport.plan(key, document)),
-          }),
-    };
-    return { ...inner, transport, asked, release };
-  }
+/**
+ * A transport that HOLDS one verb: the call is announced as asked and its response withheld until
+ * the test releases it. Everything else answers through the scripted server unchanged, so the plan
+ * agreement and identity checks stay real. Shared by the round-6 and round-7 beats — an edit or a
+ * second client can only land mid-flight against a call that is genuinely still out.
+ */
+function heldSandbox(verb: "create" | "plan", overrides: ScriptOverrides = {}) {
+  const inner = scriptedSandbox(overrides);
+  let announce!: () => void;
+  const asked = new Promise<void>((resolve) => {
+    announce = () => resolve();
+  });
+  let release!: () => void;
+  const released = new Promise<void>((resolve) => {
+    release = () => resolve();
+  });
+  const hold = async <T>(run: () => Promise<T>): Promise<T> => {
+    announce();
+    await released;
+    return run();
+  };
+  const transport: SandboxTransport = {
+    ...inner.transport,
+    ...(verb === "create"
+      ? { create: () => hold(() => inner.transport.create()) }
+      : {
+          plan: (key: string, document: string) => hold(() => inner.transport.plan(key, document)),
+        }),
+  };
+  return { ...inner, transport, asked, release };
+}
 
+describe("an arm is bound to the document generation (round-6)", () => {
   it("adopts ready when nothing edits the document while the plan call is out", async () => {
     const sandbox = heldSandbox("plan");
     const { driver, storage } = driverWith(sandbox);
@@ -1399,13 +1399,20 @@ describe("an arm is bound to the document generation (round-6)", () => {
     expect(snap.plannedAtMs).toBeNull();
     expect(storage.held()).toBeNull();
 
-    // The session it opened is clean and kept, so the fresh arm reuses it rather than paying to
-    // spawn another — and what it pins is the CURRENT document's plan.
+    // The session it opened is KEPT — the fresh arm reuses the key rather than paying to spawn
+    // another — and what it pins is the CURRENT document's plan.
+    //
+    // The reset here is round-7 correcting round-6: this beat originally asserted `reset === 0`,
+    // on the reasoning that a driver which dispatched nothing leaves a clean fork. That reasoning
+    // does not hold for a SHARED session (the key is persisted, a second tab can execute the
+    // moment the planning mutex frees), and an uncertified fork reused without a reset is how the
+    // `session-dirty` loop below became reachable. The claim was weakened on purpose: one reset
+    // this driver may not have needed, instead of a document that cannot be armed at all.
     await driver.arm(armInput);
     expect(driver.snapshot().machine.phase.kind).toBe("ready");
     expect(storage.held()).not.toBeNull();
     expect(sandbox.calls.create).toBe(1);
-    expect(sandbox.calls.reset).toBe(0);
+    expect(sandbox.calls.reset).toBe(1);
     expect(sandbox.calls.plan).toBe(2);
   });
 
@@ -1474,5 +1481,97 @@ describe("an arm is bound to the document generation (round-6)", () => {
     expect(driver.snapshot().machine.phase.kind).toBe("idle");
     await driver.retry();
     expect(sandbox.calls.create).toBe(1);
+  });
+});
+
+/**
+ * Codex round-7 — A SHARED FORK'S STATE IS NOT THIS CLIENT'S TO CERTIFY.
+ *
+ * `forkDirty` used to mean "did I dispatch anything", and the driver read that as "is the fork
+ * still pinned at its base". The session key is PERSISTED, so those are different questions: a
+ * second tab holding the same key executes the moment the planning mutex frees, and the server then
+ * refuses every re-plan `session-dirty` until a reset restores the base (`planForSession`).
+ *
+ * Both halves of the loop are asserted here. The client stops claiming a fork is clean when it
+ * cannot know (the discard marks it dirty), and it honours the refusal's own remedy when the server
+ * says the fork moved — without either, the fault's Retry re-sends the same plan call for the same
+ * refusal, and the document cannot be armed until a reload or the session's TTL.
+ */
+describe("a shared fork is never certified clean by this client (round-7)", () => {
+  /** The other tab: the same key, the same wire, a step this driver never dispatched. */
+  const executeElsewhere = async (transport: SandboxTransport): Promise<void> => {
+    const response = await transport.executeStep(SCRIPT_SESSION_KEY, SCRIPT_PLAN_HASH, 0);
+    if (!response.ok) throw new Error("the other client's step was refused by the fixture");
+  };
+
+  it("resets the fork a discarded arm could no longer vouch for", async () => {
+    const sandbox = heldSandbox("plan");
+    const { driver, storage } = driverWith(sandbox);
+    const arming = driver.arm(armInput);
+    await sandbox.asked;
+
+    // The canvas moves while the plan call is out, so this attempt is discarded (round-6) — but
+    // the plan it asked for still LANDED server-side, and another client runs a step on it.
+    driver.documentMutated();
+    sandbox.release();
+    await arming;
+    await executeElsewhere(sandbox.transport);
+
+    // One arm, one convergence: the reset restores the base the server requires, and the current
+    // document reaches ready. Before this, the arm planned on a fork the server called dirty and
+    // every Retry repeated the refusal.
+    await driver.arm(armInput);
+    expect(driver.snapshot().machine.phase.kind).toBe("ready");
+    expect(driver.snapshot().fault).toBeNull();
+    expect(sandbox.calls.reset).toBe(1);
+    expect(sandbox.calls.create).toBe(1);
+    expect(storage.held()).not.toBeNull();
+  });
+
+  it("converges on a plan-stage session-dirty refusal instead of looping it", async () => {
+    const sandbox = scriptedSandbox();
+    const { driver } = driverWith(sandbox);
+    await driver.arm(armInput);
+    expect(driver.snapshot().machine.phase.kind).toBe("ready");
+
+    // The fork moves under a driver that dispatched nothing and therefore believes it is clean.
+    await executeElsewhere(sandbox.transport);
+    driver.documentMutated();
+    await driver.arm(armInput);
+
+    // The refusal is designed and its Retry is offered — the question is whether pressing it can
+    // ever succeed.
+    expect(driver.snapshot().fault).toMatchObject({
+      kind: "refusal",
+      stage: "plan",
+      retry: "arm",
+    });
+    expect(driver.snapshot().machine.phase.kind).toBe("idle");
+    const plansBefore = sandbox.calls.plan;
+
+    await driver.retry();
+    expect(driver.snapshot().machine.phase.kind).toBe("ready");
+    expect(driver.snapshot().fault).toBeNull();
+    expect(sandbox.calls.reset).toBe(1);
+    expect(sandbox.calls.plan).toBe(plansBefore + 1);
+  });
+
+  it("falls back to a fresh session when the reset the refusal requires is itself refused", async () => {
+    const sandbox = scriptedSandbox({
+      onReset: () => ({ ok: false, refusal: { kind: "reset-failed" } }),
+    });
+    const { driver } = driverWith(sandbox);
+    await driver.arm(armInput);
+    await executeElsewhere(sandbox.transport);
+    driver.documentMutated();
+    await driver.arm(armInput);
+    expect(driver.snapshot().fault).toMatchObject({ kind: "refusal", stage: "plan" });
+
+    // A session that cannot reset is not reused (`ensureSession`): the convergence still happens,
+    // one step further out, on a fork nobody else holds.
+    await driver.retry();
+    expect(driver.snapshot().machine.phase.kind).toBe("ready");
+    expect(sandbox.calls.reset).toBe(1);
+    expect(sandbox.calls.create).toBe(2);
   });
 });

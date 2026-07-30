@@ -428,13 +428,16 @@ export class SandboxDriver {
    * re-arm), and no fault is minted — the landing is exactly the one the round-5 retirement
    * produces, where the only offer on screen is a fresh arm of the current document.
    *
-   * The SESSION is kept rather than destroyed, which is the honest teardown here: nothing was
-   * dispatched on its fork, so it is clean, and the next arm reuses it and re-plans — the server
-   * accepts that while no step has executed (`recordPlan` overwrites a plan on an entry-free
-   * session, and refuses across a fork generation change). It is not orphaned: the driver still
-   * holds the key, this is the ruling §2.4 already makes for a mutation at `ready` (the fork is
-   * untouched, so the key stays for reuse rather than paying to spawn another), and the registry's
-   * TTL reclaims it on either route.
+   * The SESSION is kept rather than destroyed — but it is no longer CERTIFIED, so the fork is
+   * marked dirty and the next arm resets it first (Codex round-7). "This driver dispatched
+   * nothing" is not proof the fork is still pinned at its base: the key is persisted and shared,
+   * so another tab can hold it and execute the moment the planning mutex frees, after which the
+   * server refuses every re-plan `session-dirty` until a reset restores the base
+   * (`planForSession`). One reset the client may not have needed is the cheap side of that
+   * trade; an un-armable document until reload or TTL is the expensive one. Destroying instead
+   * would be worse: the client owns no teardown surface today, the fork is not orphaned (the
+   * driver still holds the key, and `ensureSession` retires it outright if the reset fails), and
+   * the registry's TTL reclaims it on either route.
    */
   private discardStaleArm(generation: number): boolean {
     if (this.generation === generation) return false;
@@ -442,6 +445,7 @@ export class SandboxDriver {
     // Any fault the discarded attempt already set — a refused create, say — names the dead
     // document too. Dropped BEFORE the transition, so a genuine machine refusal below stands.
     this.fault = null;
+    this.forkDirty = true;
     if (this.machine.phase.kind === "simulating") {
       this.dispatch({ type: "plan-refused" });
       return true;
@@ -549,6 +553,15 @@ export class SandboxDriver {
         this.sessionKey = null;
         this.session = null;
         return;
+      }
+      if (parsed.value.kind === "session-dirty") {
+        // The refusal names its own remedy, and the client has to honour it or the Retry it
+        // advertises cannot converge (Codex round-7): re-planning stays refused until a RESET
+        // restores the pinned base (`planForSession`), because a plan's simulation base must BE
+        // the fork's current state. The fork moved without this driver dispatching anything — a
+        // second tab on the same persisted key — so the flag is corrected here, and the next
+        // attempt resets first (or, if the reset fails, lands on a fresh session).
+        this.forkDirty = true;
       }
       this.dispatch({ type: "plan-refused" });
       this.setFault({ kind: "refusal", stage: "plan", refusal: parsed.value, retry: "arm" });

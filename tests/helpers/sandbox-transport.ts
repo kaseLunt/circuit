@@ -154,6 +154,11 @@ export function scriptedSandbox(overrides: ScriptOverrides = {}): ScriptedSandbo
       calls.create += 1;
       const bent = overrides.onCreate?.();
       if (bent !== undefined) return bent;
+      // A created session is a NEW fork: no recorded plan, no entries. The fixture holds one
+      // session's record, so it has to be re-based here or the `session-dirty` gate above would
+      // outlive the fork it describes and refuse a genuinely fresh session (round-7).
+      planned = null;
+      executed = [];
       return {
         ok: true,
         session: {
@@ -170,6 +175,11 @@ export function scriptedSandbox(overrides: ScriptOverrides = {}): ScriptedSandbo
       calls.plan += 1;
       const bent = overrides.onPlan?.();
       if (bent !== undefined) return bent;
+      // The landed server refuses a re-plan while the fork has moved past its pinned base —
+      // `planForSession`: `session-dirty` until a reset restores it. A fixture that cannot
+      // produce that refusal cannot prove the client converges on it (Codex round-7), and the
+      // driver's own reset-before-plan hygiene is only meaningful against a server that insists.
+      if (executed.length > 0) return { ok: false, refusal: { kind: "session-dirty" } };
       const decoded = decodeShareGraph(document);
       if (!decoded.ok) return { ok: false, refusal: { kind: "document-refused", failure: decoded.failure } };
       const built = buildPlan(decoded.graph, snapshot);
