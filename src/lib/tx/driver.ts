@@ -273,6 +273,14 @@ export class SandboxDriver {
   /** True once the session fork has seen any transaction — a re-arm must reset it first. */
   private forkDirty = false;
   private lastArm: ArmInput | null = null;
+  /**
+   * The DOCUMENT generation, bumped by every `documentMutated` call whatever the phase. An arm
+   * spends its whole flight in `simulating` with no fault to retire, so this counter is the only
+   * thing an in-flight attempt can compare itself against to learn that the document it is
+   * arming no longer exists (Codex round-6). The server keeps the same kind of counter per
+   * session fork (`recordPlan`'s `expectedGeneration`) for the same reason.
+   */
+  private generation = 0;
 
   constructor(options: DriverOptions) {
     this.transport = options.transport;
@@ -371,6 +379,9 @@ export class SandboxDriver {
    */
   async arm(input: ArmInput): Promise<void> {
     if (!this.begin("plan")) return;
+    // Captured at entry, compared after every await: the attempt belongs to THIS document
+    // generation and to no other (Codex round-6).
+    const generation = this.generation;
     this.lastArm = input;
     try {
       // Recovery is a NEW machine (machine.ts PINNED note): terminal and failed states
@@ -381,13 +392,17 @@ export class SandboxDriver {
       }
       if (!this.dispatch({ type: "simulate" })) return;
       const key = await this.ensureSession();
+      if (this.discardStaleArm(generation)) return;
       if (key === null) {
         // ensureSession set the fault; the machine returns to idle honestly.
         this.dispatch({ type: "plan-refused" });
         return;
       }
-      await this.planOnSession(key, input);
+      await this.planOnSession(key, input, generation);
     } catch (cause) {
+      // The same gate on the failure path: a thrown call for a document that is gone must not
+      // leave a fault behind whose Retry re-runs the plan the canvas replaced.
+      if (this.discardStaleArm(generation)) return;
       this.dispatch({ type: "plan-refused" });
       this.setFault({
         kind: "transport-failed",
@@ -398,6 +413,41 @@ export class SandboxDriver {
     } finally {
       this.end();
     }
+  }
+
+  /**
+   * The generation gate for an in-flight arm (Codex round-6).
+   *
+   * An edit landing DURING the flight is invisible to the round-5 retirement rule: the machine is
+   * `simulating` and there is no fault yet, so nothing was recorded — and the attempt then
+   * adopted `ready` for the pre-edit plan, or minted an arm fault whose Retry re-ran it.
+   *
+   * So the attempt is discarded whole, and it is discarded BEFORE anything is adopted, stated or
+   * persisted. The machine leaves `simulating` through the same `plan-refused` transition every
+   * other failed arm uses, the retained input goes with it (nothing legitimate is left to
+   * re-arm), and no fault is minted — the landing is exactly the one the round-5 retirement
+   * produces, where the only offer on screen is a fresh arm of the current document.
+   *
+   * The SESSION is kept rather than destroyed, which is the honest teardown here: nothing was
+   * dispatched on its fork, so it is clean, and the next arm reuses it and re-plans — the server
+   * accepts that while no step has executed (`recordPlan` overwrites a plan on an entry-free
+   * session, and refuses across a fork generation change). It is not orphaned: the driver still
+   * holds the key, this is the ruling §2.4 already makes for a mutation at `ready` (the fork is
+   * untouched, so the key stays for reuse rather than paying to spawn another), and the registry's
+   * TTL reclaims it on either route.
+   */
+  private discardStaleArm(generation: number): boolean {
+    if (this.generation === generation) return false;
+    this.lastArm = null;
+    // Any fault the discarded attempt already set — a refused create, say — names the dead
+    // document too. Dropped BEFORE the transition, so a genuine machine refusal below stands.
+    this.fault = null;
+    if (this.machine.phase.kind === "simulating") {
+      this.dispatch({ type: "plan-refused" });
+      return true;
+    }
+    this.notify();
+    return true;
   }
 
   /** A session key ready to plan on, or null with the fault already set. */
@@ -456,8 +506,15 @@ export class SandboxDriver {
     return this.sessionKey;
   }
 
-  private async planOnSession(key: string, input: ArmInput): Promise<void> {
+  private async planOnSession(
+    key: string,
+    input: ArmInput,
+    generation: number,
+  ): Promise<void> {
     const response = await this.transport.plan(key, input.token);
+    // Before ANY reading of the response: a plan for a document that is gone is not adopted, not
+    // refused in words, and not persisted (Codex round-6).
+    if (this.discardStaleArm(generation)) return;
     if (!response.ok) {
       if (isPlanStageRefusal(response.refusal)) {
         // The client's own encode/plan gates passed, so a server-side document or plan
@@ -928,8 +985,14 @@ export class SandboxDriver {
    * The other two families survive an edit on purpose: `run` and `reload` name a run the user
    * already committed, whose record the server holds. An edit is not standing to cancel the only
    * route back to that record (D6/D11) — the document changing does not un-execute a step.
+   *
+   * The generation bump is unconditional and comes first, because the two rules below are about
+   * states the mutation can SEE, and an arm in flight is neither of them (round-6,
+   * `discardStaleArm`): the notification arrives once, so what it cannot act on now it must at
+   * least record.
    */
   documentMutated(): void {
+    this.generation += 1;
     if (this.machine.phase.kind === "ready") {
       this.dispatch({ type: "document-mutated" });
       this.plannedAtMs = null;

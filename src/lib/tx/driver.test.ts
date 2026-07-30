@@ -11,7 +11,9 @@ import {
   wireAttributed,
   wireHash,
   predictedWeiOf,
+  type ScriptOverrides,
 } from "../../../tests/helpers/sandbox-transport";
+import type { SandboxTransport } from "./transport";
 import { stepRequirementsOf } from "../execution/machine";
 import { planHashOf } from "../execution/plan-hash";
 import { SANDBOX_OUTPUT_TOLERANCE, toleranceWeiFor } from "../execution/tolerance";
@@ -1319,3 +1321,158 @@ describe("restore is bound to the document generation (thread 019fa749 finding 2
   });
 });
 
+
+/**
+ * Codex round-6 — AN ARM IS BOUND TO THE DOCUMENT GENERATION.
+ *
+ * The round-5 retirement reads state a mutation can SEE: `ready`, or an arm fault already on
+ * screen. An arm in flight is neither — the machine sits in `simulating` with no fault yet — so an
+ * edit landing between the request and its response went unrecorded, and the attempt then adopted
+ * `ready` for the pre-edit plan (executable), or minted a fault whose Retry re-ran it. The
+ * notification arrives once, and normal network latency is all the window it needs.
+ *
+ * Every beat below holds ONE wire call open and lands the edit while it is genuinely out, which is
+ * the only way to reach this seam: a transport that answers immediately cannot be interrupted.
+ */
+describe("an arm is bound to the document generation (round-6)", () => {
+  /**
+   * A transport that HOLDS one verb: the call is announced as asked and its response withheld
+   * until the test releases it. Everything else answers through the scripted server unchanged, so
+   * the plan agreement and identity checks stay real.
+   */
+  function heldSandbox(verb: "create" | "plan", overrides: ScriptOverrides = {}) {
+    const inner = scriptedSandbox(overrides);
+    let announce!: () => void;
+    const asked = new Promise<void>((resolve) => {
+      announce = () => resolve();
+    });
+    let release!: () => void;
+    const released = new Promise<void>((resolve) => {
+      release = () => resolve();
+    });
+    const hold = async <T>(run: () => Promise<T>): Promise<T> => {
+      announce();
+      await released;
+      return run();
+    };
+    const transport: SandboxTransport = {
+      ...inner.transport,
+      ...(verb === "create"
+        ? { create: () => hold(() => inner.transport.create()) }
+        : {
+            plan: (key: string, document: string) =>
+              hold(() => inner.transport.plan(key, document)),
+          }),
+    };
+    return { ...inner, transport, asked, release };
+  }
+
+  it("adopts ready when nothing edits the document while the plan call is out", async () => {
+    const sandbox = heldSandbox("plan");
+    const { driver, storage } = driverWith(sandbox);
+    const arming = driver.arm(armInput);
+    await sandbox.asked;
+    expect(driver.snapshot().machine.phase.kind).toBe("simulating");
+    sandbox.release();
+    await arming;
+    expect(driver.snapshot().machine.phase.kind).toBe("ready");
+    expect(driver.snapshot().fault).toBeNull();
+    expect(storage.held()).not.toBeNull();
+  });
+
+  it("adopts nothing when the document changes while the plan call is out and it SUCCEEDS", async () => {
+    const sandbox = heldSandbox("plan");
+    const { driver, storage } = driverWith(sandbox);
+    const arming = driver.arm(armInput);
+    await sandbox.asked;
+
+    driver.documentMutated();
+    sandbox.release();
+    await arming;
+
+    // A plan for a document that is gone may not become executable, and may not be remembered.
+    const snap = driver.snapshot();
+    expect(snap.machine.phase.kind).toBe("idle");
+    expect(snap.machine.plan).toBeNull();
+    expect(snap.machine.planHash).toBeNull();
+    expect(snap.fault).toBeNull();
+    expect(snap.plannedAtMs).toBeNull();
+    expect(storage.held()).toBeNull();
+
+    // The session it opened is clean and kept, so the fresh arm reuses it rather than paying to
+    // spawn another — and what it pins is the CURRENT document's plan.
+    await driver.arm(armInput);
+    expect(driver.snapshot().machine.phase.kind).toBe("ready");
+    expect(storage.held()).not.toBeNull();
+    expect(sandbox.calls.create).toBe(1);
+    expect(sandbox.calls.reset).toBe(0);
+    expect(sandbox.calls.plan).toBe(2);
+  });
+
+  it("mints no fault when the document changes while the plan call is out and it FAILS", async () => {
+    let failing = true;
+    const sandbox = heldSandbox("plan", {
+      onPlan: () => {
+        if (!failing) return undefined;
+        throw new Error("the plan call did not answer");
+      },
+    });
+    const { driver, storage } = driverWith(sandbox);
+    const arming = driver.arm(armInput);
+    await sandbox.asked;
+
+    driver.documentMutated();
+    sandbox.release();
+    await arming;
+
+    // No card, so no Retry — the offer that would have re-run the dead plan does not exist.
+    expect(driver.snapshot().fault).toBeNull();
+    expect(driver.snapshot().machine.phase.kind).toBe("idle");
+    expect(storage.held()).toBeNull();
+    await driver.retry();
+    expect(sandbox.calls.plan).toBe(1);
+    expect(sandbox.calls.create).toBe(1);
+
+    failing = false;
+    await driver.arm(armInput);
+    expect(driver.snapshot().machine.phase.kind).toBe("ready");
+  });
+
+  it("stops before the plan call when the document changes while the session call is out", async () => {
+    const sandbox = heldSandbox("create");
+    const { driver, storage } = driverWith(sandbox);
+    const arming = driver.arm(armInput);
+    await sandbox.asked;
+
+    driver.documentMutated();
+    sandbox.release();
+    await arming;
+
+    expect(driver.snapshot().machine.phase.kind).toBe("idle");
+    expect(driver.snapshot().fault).toBeNull();
+    expect(storage.held()).toBeNull();
+    // Nothing was planned for the dead document — the gate closed at the first await.
+    expect(sandbox.calls.plan).toBe(0);
+    expect(sandbox.calls.create).toBe(1);
+  });
+
+  it("drops a fault the discarded attempt had already set", async () => {
+    const sandbox = heldSandbox("create", {
+      onCreate: () => ({ ok: false, refusal: { kind: "at-capacity" } }),
+    });
+    const { driver } = driverWith(sandbox);
+    const arming = driver.arm(armInput);
+    await sandbox.asked;
+
+    driver.documentMutated();
+    sandbox.release();
+    await arming;
+
+    // The refusal was real, but it was refused FOR a document that no longer exists: keeping the
+    // card would keep an arm-family Retry pointed at the plan the canvas replaced.
+    expect(driver.snapshot().fault).toBeNull();
+    expect(driver.snapshot().machine.phase.kind).toBe("idle");
+    await driver.retry();
+    expect(sandbox.calls.create).toBe(1);
+  });
+});
