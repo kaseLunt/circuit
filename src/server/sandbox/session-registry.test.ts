@@ -265,6 +265,111 @@ describe("TTL expiry", () => {
     expect(registry.sessionCount()).toBe(0);
   });
 
+  /**
+   * Codex round-14 — NO BEGIN AFTER A TOMBSTONE.
+   *
+   * `lookup` and acquisition are separate awaits, so a caller can hold a `Session` obtained while
+   * the session was still live and try to begin on it after the boundary. Neither begin method
+   * re-read anything, so it succeeded — and the evidence it then appended landed AFTER another
+   * caller had adopted the tombstone and (round-12) retired its key, leaving an incomplete
+   * read-only record with no route left to correct it.
+   *
+   * The invariant these beats state: once a tombstone has been issued for a session, no begin can
+   * succeed on it again. It rests on the monotonic clock — `expiresAtMono <= monoNow()` never goes
+   * back to false — so the refusal is permanent rather than probable.
+   */
+  const stable = (value: unknown): string =>
+    JSON.stringify(value, (_key, candidate: unknown) =>
+      typeof candidate === "bigint" ? candidate.toString() : candidate,
+    );
+
+  it("a stale successful lookup cannot begin once the tombstone has been issued (round-14)", async () => {
+    const nowMs = { value: 0 };
+    const registry = createSessionRegistry(config({ ttlMs: 1000, nowMs }));
+    const created = await registry.create(async () => fakeFork());
+    if (!created.ok) throw new Error("creation refused");
+    const session = created.session;
+    appendTestEntry(registry, session);
+
+    // Caller A looks up while the session is live, and holds the handle across the boundary.
+    const a = await registry.lookup(session.key);
+    expect(a.ok).toBe(true);
+
+    // The clock crosses the TTL. Caller B looks up and is handed the tombstone — the record B will
+    // adopt, and retire its key on.
+    nowMs.value = 2000;
+    const b = await registry.lookup(session.key);
+    if (b.ok || b.refusal.kind !== "session-expired") {
+      throw new Error(`expected the tombstone, got ${b.ok ? "ok" : b.refusal.kind}`);
+    }
+    const adopted = stable(b.refusal.tombstone);
+    expect(b.refusal.executedSteps).toBe(1);
+
+    // A now tries to start work on its stale handle. Both acquisition routes refuse, with the
+    // authoritative answer rather than a busy/budget one.
+    const dispatch = registry.beginExecution(session);
+    expect(dispatch.ok).toBe(false);
+    if (dispatch.ok) throw new Error("unreachable");
+    expect(dispatch.refusal.kind).toBe("session-expired");
+    const exclusive = registry.beginExclusive(session);
+    expect(exclusive.ok).toBe(false);
+    if (exclusive.ok) throw new Error("unreachable");
+    expect(exclusive.refusal.kind).toBe("session-expired");
+    // And nothing was taken: a refused acquisition must not leave the mutex held.
+    expect(session.inFlight).toBe(false);
+
+    // B's record is provably complete — byte-stable across A's attempts.
+    const after = await registry.lookup(session.key);
+    if (after.ok || after.refusal.kind !== "session-expired") throw new Error("expected the tombstone");
+    expect(stable(after.refusal.tombstone)).toBe(adopted);
+  });
+
+  it("refuses on the expiry itself, before any sweep has removed the session (round-14)", async () => {
+    const nowMs = { value: 0 };
+    const registry = createSessionRegistry(config({ ttlMs: 1000, nowMs }));
+    const created = await registry.create(async () => fakeFork());
+    if (!created.ok) throw new Error("creation refused");
+    const session = created.session;
+    appendTestEntry(registry, session);
+    const live = await registry.lookup(session.key);
+    expect(live.ok).toBe(true);
+
+    // No second lookup, so no sweep: the session is still in the map, and only the clock has moved.
+    // This is the branch that proves the gate reads EXPIRY and not merely map membership.
+    nowMs.value = 2000;
+    expect(registry.sessionCount()).toBe(1);
+    const begun = registry.beginExecution(session);
+    expect(begun.ok).toBe(false);
+    if (begun.ok) throw new Error("unreachable");
+    if (begun.refusal.kind !== "session-expired") {
+      throw new Error(`expected the tombstone, got ${begun.refusal.kind}`);
+    }
+    // The refusal carries the record as it stands, which is final: nothing holds the session.
+    expect(begun.refusal.tombstone.executed.length).toBe(1);
+    expect(session.inFlight).toBe(false);
+  });
+
+  it("a stale handle to a destroyed session cannot begin either (round-14)", async () => {
+    const nowMs = { value: 0 };
+    const registry = createSessionRegistry(config({ ttlMs: 60_000, nowMs }));
+    const created = await registry.create(async () => fakeFork());
+    if (!created.ok) throw new Error("creation refused");
+    const session = created.session;
+
+    // The owner destroys it while a second caller still holds the handle it looked up.
+    await registry.destroy(session);
+    expect(registry.sessionCount()).toBe(0);
+
+    // Membership is checked by IDENTITY against the map, so a handle to something the registry no
+    // longer serves cannot acquire — and an owner destroy leaves no tombstone (D8), so the honest
+    // answer is that nobody knows this key.
+    const begun = registry.beginExclusive(session);
+    expect(begun.ok).toBe(false);
+    if (begun.ok) throw new Error("unreachable");
+    expect(begun.refusal.kind).toBe("unknown-session");
+    expect(session.inFlight).toBe(false);
+  });
+
   it("the record a tombstone carries is final: evidence added in flight lands in it (round-13)", async () => {
     const nowMs = { value: 0 };
     const registry = createSessionRegistry(config({ ttlMs: 1000, nowMs }));
