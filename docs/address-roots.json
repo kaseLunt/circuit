@@ -1,6 +1,6 @@
 {
   "meta": {
-    "purpose": "Pinned address roots for the protocol matrix. These are the ONLY addresses in the fixture pipeline that do not come from an on-chain read. Every other address is derived from these at the pinned block (see derived_on_chain). Sourced mechanically from an immutable upstream artifact and re-verifiable with: node scripts/protocol-reads.mjs --verify-roots",
+    "purpose": "Pinned address roots for the protocol matrix. These five are the ONLY addresses in the fixture pipeline that do not come from an on-chain read. Every other address is derived from these at the pinned block (see derived_on_chain). Sourced mechanically from an immutable upstream artifact and re-verifiable with: node scripts/protocol-reads.mjs --verify-roots",
     "upstream": {
       "repo": "https://github.com/bgd-labs/aave-address-book",
       "path": "src/AaveV3Ethereum.sol",
@@ -33,6 +33,11 @@
       "address": "0x7f39C581F595B53c5cb19bD0b3f8dA6c935E2Ca0",
       "upstream_symbol": "wstETH_UNDERLYING",
       "role": "Lido root (reference only; Lido execution is out of P1 scope per SPEC section 8). stETH is read from it. Independently confirmed on-chain: present in Pool.getReservesList() and symbol() == wstETH."
+    },
+    "USDC": {
+      "address": "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48",
+      "upstream_symbol": "USDC_UNDERLYING",
+      "role": "Carry-leg borrow asset (W09): the uncorrelated debt the weETH carry opens. Enters the pipeline through this hashed artifact exactly as the other four roots do — never typed into a script. Independently confirmed on-chain: present in Pool.getReservesList() and symbol() == USDC."
     }
   },
   "derived_on_chain": {
@@ -49,8 +54,8 @@
     "note": "Secondary, on-chain checks applied on every run of scripts/protocol-reads.mjs. Any mismatch aborts before a fixture is written.",
     "checks": [
       "Pool.ADDRESSES_PROVIDER() == roots.ADDRESSES_PROVIDER (closes the provider->pool->provider loop)",
-      "symbol() equals the labelled symbol for WETH, eETH, weETH, stETH, wstETH — catches a wrong-but-callable address that a bytecode-only check would miss",
-      "WETH, weETH and wstETH are members of Pool.getReservesList() at the pinned block",
+      "symbol() equals the labelled symbol for WETH, eETH, weETH, stETH, wstETH, USDC — catches a wrong-but-callable address that a bytecode-only check would miss",
+      "WETH, weETH, wstETH and USDC are members of Pool.getReservesList() at the pinned block",
       "LP.eETH() == weETH.eETH() (two independent paths to the same eETH)"
     ]
   }

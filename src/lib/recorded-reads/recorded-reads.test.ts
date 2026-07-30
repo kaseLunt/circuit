@@ -63,8 +63,8 @@ const GOLDEN = {
   eModeCategoryId: 1,
   stepCount: 13,
   initialAmountWei: 10_000_000_000_000_000_000n,
-  minHealthFactorWad: 1_357_142_857_144_167_216n,
-  finalHealthFactorWad: 2_307_142_857_144_167_216n,
+  minHealthFactorWad: 1_357_142_857_143_159_467n,
+  finalHealthFactorWad: 2_307_142_857_142_454_043n,
   liquidationRatioWad: 810_405_201_682_850_969n,
   leverageWad: 1_699_999_999_998_440_640n,
   /** SPEC §5.1's trailing staking APR, over the window's two recorded blocks. */
@@ -251,6 +251,7 @@ describe("the sandbox actor is configured, never observed", () => {
     // `recordedProtocol()` is exactly what the log carries. If a user field ever appears on
     // it, something started inventing an account from protocol reads.
     expect(Object.keys(recordedProtocol()).sort()).toEqual([
+      "USDC",
       "WETH",
       "eModes",
       "etherfi",

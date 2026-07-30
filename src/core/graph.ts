@@ -16,7 +16,7 @@
  */
 
 export type BlockType = "input" | "stake" | "wrap" | "unwrap" | "lend" | "borrow";
-export type Asset = "ETH" | "eETH" | "weETH" | "stETH" | "wstETH" | "WETH";
+export type Asset = "ETH" | "eETH" | "weETH" | "stETH" | "wstETH" | "WETH" | "USDC";
 export type StakeProtocol = "etherfi" | "lido";
 export type LendProtocol = "aave-v3";
 
@@ -46,8 +46,16 @@ const STAKE_PROTOCOLS = new Set<string>(["etherfi", "lido"]);
 const LEND_PROTOCOLS = new Set<string>(["aave-v3"]);
 /** Supported collateral assets for a lend block on the pinned Core market. */
 const LEND_ASSETS = new Set<string>(["weETH", "wstETH", "WETH"]);
-/** Borrowable assets in v1 (matrix: WETH is borrowable, weETH is collateral-only). */
-const BORROW_ASSETS = new Set<string>(["WETH"]);
+/**
+ * Borrowable assets (matrix §4: WETH and USDC carry `borrowingEnabled`; weETH is
+ * collateral-only).
+ *
+ * USDC joins the BORROW set and deliberately NOT `LEND_ASSETS`: supplying USDC is out of
+ * scope, and the phase gate must keep refusing it with a typed error rather than admitting a
+ * collateral leg no fork evidence covers. The two sets are separate for exactly this reason —
+ * "the market lists it" and "this product executes against it" are different claims.
+ */
+const BORROW_ASSETS = new Set<string>(["WETH", "USDC"]);
 /** Valid wrap/unwrap conversions (matrix §7). */
 const WRAP_PAIRS = new Set<string>(["eETH>weETH", "stETH>wstETH", "ETH>WETH"]);
 const UNWRAP_PAIRS = new Set<string>(["weETH>eETH", "wstETH>stETH", "WETH>ETH"]);

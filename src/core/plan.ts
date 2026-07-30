@@ -155,7 +155,19 @@ export interface ChainSnapshot {
   readonly block: bigint;
   readonly blockTimestamp: bigint;
   readonly pool: Address;
-  readonly reserves: { readonly weETH: ReserveSnapshot; readonly WETH: ReserveSnapshot };
+  /**
+   * A CLOSED record, not a map, and the closure is the gate: every construction site — the
+   * live capture, the recorded-reads replay, the wire codec, every fixture — is forced by the
+   * compiler to account for each reserve, and every keyed record downstream (`core/risk.ts`'s
+   * rate walk) is forced to carry an entry. A `Record<string, ReserveSnapshot>` would have let
+   * a reserve go silently missing on one path, which is the class of omission this repo kills
+   * with types rather than with review.
+   */
+  readonly reserves: {
+    readonly weETH: ReserveSnapshot;
+    readonly WETH: ReserveSnapshot;
+    readonly USDC: ReserveSnapshot;
+  };
   readonly eModeCategories: readonly EModeCategorySnapshot[];
   readonly etherfi: EtherFiSnapshot;
   readonly user: UserSnapshot;
@@ -231,8 +243,26 @@ export type PlanError =
       readonly detail: string;
     };
 
-/** The two reserves the pinned Core market exposes to v1. */
+/** The reserves the pinned Core market exposes to v1. */
 export type ReserveKey = keyof ChainSnapshot["reserves"];
+
+/**
+ * The same set as a value, for the loops that must visit EVERY reserve (index accrual here,
+ * the post-action rate walk in `core/risk.ts`). One declaration, imported rather than
+ * restated: a second hand-written list is how a reserve joins the type and quietly skips a
+ * loop. The annotation below is a both-directions compile pin — a member added to the record
+ * type and not here (or the reverse) resolves it to `never` and the build breaks.
+ */
+export const RESERVE_KEYS = ["weETH", "WETH", "USDC"] as const;
+
+type ListedReserveKey = (typeof RESERVE_KEYS)[number];
+
+export const RESERVE_KEYS_MATCH_SNAPSHOT: [ListedReserveKey, ReserveKey] extends [
+  ReserveKey,
+  ListedReserveKey,
+]
+  ? true
+  : never = true;
 
 /**
  * What one block moved, as the SAME pass that derives the borrow amount already computed it.
@@ -451,7 +481,8 @@ function unsupportedDetail(b: Block): string | null {
         ? null
         : `lending ${String(b.params["asset"])} is not executable in P1 (EtherFi flagship only)`;
     case "borrow":
-      // graph.ts already restricts borrow assets to the v1 set (WETH).
+      // graph.ts already restricts borrow assets to the v1 set (WETH, USDC), and every one of
+      // them has a reserve in the snapshot — so the phase gate has nothing left to refuse here.
       return null;
   }
 }
@@ -646,7 +677,7 @@ export function buildPlan(
   const lendBlocks = order.map((id) => blockById.get(id)!).filter((b) => b.type === "lend");
   const borrowBlocks = order.map((id) => blockById.get(id)!).filter((b) => b.type === "borrow");
   const reserveOf = (asset: string): ReserveKey => {
-    if (asset === "weETH" || asset === "WETH") return asset;
+    if (asset === "weETH" || asset === "WETH" || asset === "USDC") return asset;
     throw new Error(`unreachable: asset ${asset} survived the phase gate`);
   };
   const collateralIndices = [...new Set(lendBlocks.map((b) => snapshot.reserves[reserveOf(String(b.params["asset"]))].reserveIndex.value))];
@@ -887,7 +918,7 @@ export function buildPlan(
 
   const nextIdx = new Map<ReserveKey, { liq: bigint; varBorrow: bigint }>();
   const deltas = new Map<ReserveKey, { scaledSupply: bigint; scaledDebt: bigint; virtual: bigint }>();
-  for (const key of ["weETH", "WETH"] as const) {
+  for (const key of RESERVE_KEYS) {
     const r = snapshot.reserves[key];
     nextIdx.set(key, {
       liq: accruedLiquidityIndexRay(
@@ -965,15 +996,23 @@ export function buildPlan(
       const idx = nextIdx.get(key)!;
       const borrowWei = predictedOut.get(id)!;
       flagErrors(r, id);
-      if (!r.borrowingEnabled.value) {
-        matrixErrors.push({
-          kind: "constraint",
-          blockId: id,
-          constraint: "borrowing-disabled",
-          detail: `borrowing ${key} is disabled on this market`,
-        });
-      }
-      if (targetCategory !== null && !bitSet(targetCategory.borrowableBitmap.value, r.reserveIndex.value)) {
+      // Protocol-exact branch selection (ValidationLogic.sol:121-131): inside an e-mode
+      // category the borrowable BITMAP REPLACES the reserve-level `borrowingEnabled` flag —
+      // the flag check lives in the category-0 else-branch. Checking it unconditionally was
+      // strictly stricter than the chain, so the compiler could refuse a borrow the pool
+      // admits (moot at the pinned block, where every borrowable reserve is enabled, but a
+      // divergence is a divergence). The two checks are now the same two branches, in the
+      // same order, as the deployed revision's.
+      if (targetCategory === null) {
+        if (!r.borrowingEnabled.value) {
+          matrixErrors.push({
+            kind: "constraint",
+            blockId: id,
+            constraint: "borrowing-disabled",
+            detail: `borrowing ${key} is disabled on this market`,
+          });
+        }
+      } else if (!bitSet(targetCategory.borrowableBitmap.value, r.reserveIndex.value)) {
         matrixErrors.push({
           kind: "constraint",
           blockId: id,

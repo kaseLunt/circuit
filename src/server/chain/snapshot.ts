@@ -16,6 +16,7 @@ import { observationMinter, type ObservationMinter } from "../../core/provenance
 import type {
   ChainSnapshot,
   EModeCategorySnapshot,
+  ReserveKey,
   ReserveSnapshot,
   StakingRateWindow,
 } from "../../core/plan";
@@ -167,7 +168,7 @@ function verified(what: string, got: Address, expected: Address): Address {
 
 async function captureReserve(
   ctx: ReadCtx,
-  sym: "WETH" | "weETH",
+  sym: ReserveKey,
   underlying: Address,
   dataProvider: Address,
   oracle: Address,
@@ -353,6 +354,7 @@ export async function captureChainSnapshot(
   const WETH = anchor("WETH");
   const eETH = anchor("eETH");
   const weETH = anchor("weETH");
+  const USDC = anchor("USDC");
   const LP = anchor("ETHERFI_LP");
 
   const [pool, dataProvider, oracle] = await client.multicall({
@@ -366,7 +368,7 @@ export async function captureChainSnapshot(
   });
 
   // Anchor re-verification — symbols and round-trips, exactly as the matrix run.
-  const [apRoundTrip, wethSymbol, eethSymbol, weethSymbol, weethEeth, weethLp, lpEeth] =
+  const [apRoundTrip, wethSymbol, eethSymbol, weethSymbol, usdcSymbol, weethEeth, weethLp, lpEeth] =
     await client.multicall({
       allowFailure: false,
       blockNumber,
@@ -375,6 +377,7 @@ export async function captureChainSnapshot(
         { address: WETH, abi: ABI.erc20, functionName: "symbol" },
         { address: eETH, abi: ABI.erc20, functionName: "symbol" },
         { address: weETH, abi: ABI.erc20, functionName: "symbol" },
+        { address: USDC, abi: ABI.erc20, functionName: "symbol" },
         { address: weETH, abi: ABI.weeth, functionName: "eETH" },
         { address: weETH, abi: ABI.weeth, functionName: "liquidityPool" },
         { address: LP, abi: ABI.lp, functionName: "eETH" },
@@ -385,6 +388,7 @@ export async function captureChainSnapshot(
     ["WETH.symbol", wethSymbol, "WETH"],
     ["eETH.symbol", eethSymbol, "eETH"],
     ["weETH.symbol", weethSymbol, "weETH"],
+    ["USDC.symbol", usdcSymbol, "USDC"],
   ] as const) {
     if (got !== expected) throw new Error(`anchor verification failed: ${sym} is '${got}'`);
   }
@@ -401,9 +405,10 @@ export async function captureChainSnapshot(
     })
   ).map((a) => getAddress(a));
 
-  const [weETHReserve, wethReserve, eModeCategories] = await Promise.all([
+  const [weETHReserve, wethReserve, usdcReserve, eModeCategories] = await Promise.all([
     captureReserve(ctx, "weETH", weETH, getAddress(dataProvider), getAddress(oracle), getAddress(pool), reservesList),
     captureReserve(ctx, "WETH", WETH, getAddress(dataProvider), getAddress(oracle), getAddress(pool), reservesList),
+    captureReserve(ctx, "USDC", USDC, getAddress(dataProvider), getAddress(oracle), getAddress(pool), reservesList),
     Promise.all(
       RECORDED_EMODE_CATEGORY_IDS.map((id) => captureEModeCategory(ctx, getAddress(pool), id)),
     ),
@@ -436,7 +441,7 @@ export async function captureChainSnapshot(
     block: blockNumber,
     blockTimestamp: block.timestamp,
     pool: getAddress(pool),
-    reserves: { weETH: weETHReserve, WETH: wethReserve },
+    reserves: { weETH: weETHReserve, WETH: wethReserve, USDC: usdcReserve },
     eModeCategories,
     etherfi: {
       liquidityPool: LP,
