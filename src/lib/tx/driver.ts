@@ -1100,6 +1100,14 @@ export class SandboxDriver {
         };
       }
       this.forkDirty = response.session.txCount > 0;
+    } else {
+      // A TOMBSTONE was adopted (Codex round-12). It is the only refusal `resumePlan` resumes
+      // from — every other one is `unresumable-refusal` and returned above — so reaching here on a
+      // non-ok response means the session is swept and its key will never be served again. The
+      // machine it produced is real evidence and stays; the KEY does not, or the card's own
+      // "Start a fresh session" plans on the dead key, is refused `session-expired`, and lands
+      // back on the same card. A designed action must work the first time it is pressed.
+      this.retireSession();
     }
     this.notify();
     return true;

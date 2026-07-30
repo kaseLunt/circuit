@@ -2171,3 +2171,93 @@ describe("the pointer slot is shared, so no decision path empties it (round-11)"
     expect(tabBReloaded.snapshot().fault).toBeNull();
   });
 });
+
+
+/**
+ * Codex round-12 — AN ADOPTED TOMBSTONE IS EVIDENCE, NOT A SESSION.
+ *
+ * A swept session still resumes: `resumePlan` reads its tombstone and returns a real `abandoned`
+ * machine, which is why the reload after a TTL expiry lands on the T24 card with the executed record
+ * intact. What the adoption must NOT keep is the key. It did — `rehydrate` retired nothing unless
+ * the response was `ok` — so the card's own "Start a fresh session" planned on the dead key, was
+ * refused `session-expired`, and landed back on the same card. The session only appeared on the
+ * SECOND press, which is the kind of defect a user reads as the button being broken.
+ *
+ * Since round-11 deliberately preserves the pointer, expiry-then-reload reaches this reliably.
+ */
+describe("an adopted tombstone retires the key it names (round-12)", () => {
+  /** A driver whose writes to the shared slot can be counted — "overwritten" is an assertion. */
+  function countingStorage(inner: ReturnType<typeof memoryStorage>) {
+    const writes: string[] = [];
+    const storage: PointerStorage = {
+      read: () => inner.read(),
+      write: (value) => {
+        writes.push(value);
+        inner.write(value);
+      },
+      clear: () => inner.clear(),
+    };
+    return { storage, writes };
+  }
+
+  it("reaches ready on ONE fresh-session arm, against a newly created session", async () => {
+    const held = memoryStorage();
+    const sandbox = scriptedSandbox();
+    const first = new SandboxDriver({ transport: sandbox.transport, storage: held, now: () => 5_000 });
+    await first.arm(armInput);
+    await first.execute();
+    expect(first.snapshot().machine.phase.kind).toBe("complete");
+
+    // TTL: the registry sweeps the fork, and every verb on that key now answers from its tombstone.
+    sandbox.expire();
+
+    // The reload. The card renders from the server's own evidence, which is the point of D11.
+    const { storage, writes } = countingStorage(held);
+    const reloaded = new SandboxDriver({ transport: sandbox.transport, storage, now: () => 5_000 });
+    await reloaded.restore(armInput);
+    expect(reloaded.snapshot().machine.phase).toMatchObject({
+      kind: "abandoned",
+      executedSteps: plan.steps.length,
+    });
+    expect(reloaded.snapshot().fault).toBeNull();
+    expect(writes.length).toBe(0);
+
+    const createsBefore = sandbox.calls.create;
+
+    // ONE press of the action the card advertises.
+    await reloaded.arm(armInput);
+
+    expect(reloaded.snapshot().machine.phase.kind).toBe("ready");
+    expect(reloaded.snapshot().fault).toBeNull();
+    // A NEW session — not a reset of the swept one, which could not have answered anyway.
+    expect(sandbox.calls.create).toBe(createsBefore + 1);
+    expect(sandbox.calls.reset).toBe(0);
+    // And the slot now carries the new run's triple, written by the one operation that may write.
+    expect(writes.length).toBe(1);
+    const written = parsePointer(writes[0] ?? null);
+    expect(written?.fingerprint).toBe(planHashOf(plan.steps));
+    expect(written?.planHash).toBe(SCRIPT_PLAN_HASH);
+    expect(parsePointer(held.held())?.fingerprint).toBe(planHashOf(plan.steps));
+  });
+
+  it("keeps the adopted evidence while the key goes: the card still reads the run", async () => {
+    const storage = memoryStorage();
+    const sandbox = scriptedSandbox();
+    const first = new SandboxDriver({ transport: sandbox.transport, storage, now: () => 5_000 });
+    await first.arm(armInput);
+    await first.execute();
+    sandbox.expire();
+
+    const reloaded = new SandboxDriver({ transport: sandbox.transport, storage, now: () => 5_000 });
+    await reloaded.restore(armInput);
+
+    // The retirement is of the KEY, not of the record: T24's card names how far the run got, and
+    // that sentence comes from the tombstone this driver just adopted.
+    const snap = reloaded.snapshot();
+    expect(snap.machine.record?.settled.length).toBe(plan.steps.length);
+    expect(snap.machine.phase).toMatchObject({ kind: "abandoned" });
+    // Nothing further is asked of the dead key — no reset, no second lookup.
+    expect(sandbox.calls.session).toBe(1);
+    expect(sandbox.calls.reset).toBe(0);
+  });
+});

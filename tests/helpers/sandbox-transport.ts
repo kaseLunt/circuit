@@ -151,6 +151,14 @@ export interface ScriptedSandbox {
   planned(): PlanSuccess | null;
   /** The wire results the "server" has recorded so far. */
   executed(): readonly WireStepResult[];
+  /**
+   * TTL expiry, as the registry performs it: the session is swept and every verb on that key is
+   * refused from its tombstone (`lookup` runs before anything else in the router, so this precedes
+   * the per-call scripting below). Only `create` clears it — a swept key is never served again, and
+   * a fresh session is the designed recovery. A test that bends `onSession` alone cannot model this
+   * and would let a dead key keep answering `plan` (Codex round-12).
+   */
+  expire(): void;
 }
 
 export interface ScriptOverrides {
@@ -186,6 +194,13 @@ export function scriptedSandbox(overrides: ScriptOverrides = {}): ScriptedSandbo
   let planned: PlanSuccess | null = null;
   let executed: WireStepResult[] = [];
   let phase: ScriptedPhase = { kind: "active" };
+  let swept = false;
+
+  const tombstone = (): WireTransportRefusal => ({
+    kind: "session-expired",
+    executedSteps: executed.length,
+    tombstone: { executedSteps: executed.length, executed, recovery: null },
+  });
 
   const summary = (): WireTransportSessionResponse => ({
     ok: true,
@@ -215,6 +230,7 @@ export function scriptedSandbox(overrides: ScriptOverrides = {}): ScriptedSandbo
       planned = null;
       executed = [];
       phase = { kind: "active" };
+      swept = false;
       return {
         ok: true,
         session: {
@@ -229,6 +245,7 @@ export function scriptedSandbox(overrides: ScriptOverrides = {}): ScriptedSandbo
     },
     plan: async (_sessionKey, document) => {
       calls.plan += 1;
+      if (swept) return { ok: false, refusal: tombstone() };
       const bent = overrides.onPlan?.();
       if (bent !== undefined) return bent;
       // `planForSession`'s gates, in ITS order (round-7/round-8): the phase first — a halted or
@@ -257,6 +274,7 @@ export function scriptedSandbox(overrides: ScriptOverrides = {}): ScriptedSandbo
     },
     executeStep: async (_sessionKey, _planHash, stepIndex) => {
       calls.executeStep.push(stepIndex);
+      if (swept) return { ok: false, refusal: tombstone() };
       if (planned === null) return { ok: false, refusal: { kind: "no-plan" } };
       const record = (result: WireStepResult): void => {
         if (executed[stepIndex] !== undefined) return;
@@ -279,18 +297,21 @@ export function scriptedSandbox(overrides: ScriptOverrides = {}): ScriptedSandbo
     },
     session: async () => {
       calls.session += 1;
+      if (swept) return { ok: false, refusal: tombstone() };
       const bent = overrides.onSession?.();
       if (bent !== undefined) return bent;
       return summary();
     },
     reconcile: async () => {
       calls.reconcile += 1;
+      if (swept) return { ok: false, refusal: tombstone() };
       const bent = overrides.onReconcile?.();
       if (bent !== undefined) return bent;
       return { ok: false, refusal: { kind: "nothing-to-reconcile" } };
     },
     reset: async () => {
       calls.reset += 1;
+      if (swept) return { ok: false, refusal: tombstone() };
       const bent = overrides.onReset?.();
       if (bent !== undefined) return bent;
       // `registry.reset`: a restored base is active, plan-less and entry-free.
@@ -309,6 +330,9 @@ export function scriptedSandbox(overrides: ScriptOverrides = {}): ScriptedSandbo
     calls,
     planned: () => planned,
     executed: () => executed,
+    expire: () => {
+      swept = true;
+    },
   };
 }
 
