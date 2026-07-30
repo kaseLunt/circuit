@@ -25,6 +25,7 @@ import { custom, getAddress, type Address, type Transport } from "viem";
 import { fixtureSnapshot } from "../../../tests/helpers/chain-snapshot";
 import { flagshipGraph } from "../../../tests/helpers/graphs";
 import { flagshipBorrowVerdict, flagshipOverLimitBps } from "../../../tests/helpers/plans";
+import { scriptedSandbox } from "../../../tests/helpers/sandbox-transport";
 import { createComposerStore } from "../../app/store/composer-store";
 import { ComposerStoreProvider } from "../../app/store/composer-provider";
 import { createWalletConfig, type WalletConfig } from "../../lib/wallet/config";
@@ -747,11 +748,24 @@ describe("SPEC §3 step 7 — a capture that throws is a stated refusal, not a s
  * Two knobs, one passage of time: `monotonic` is the enforcement clock the provider injects
  * (D9), and the fake host timer is what the alarm is scheduled on. Advancing the enforcement
  * clock alone is what "an idle wait" IS — no state changed, so nothing re-rendered.
+ *
+ * NO REAL TIME REACHES EITHER CLOCK in the alarm beat, and that is a correction rather than a
+ * preference: the first shape ran the fake clock with `shouldAdvanceTime`, which advances it from
+ * REAL elapsed time, so the host timer and the injected monotonic clock were driven by two
+ * different sources and their ordering raced under CI load — green on a quiet laptop, red on a
+ * loaded runner (run 30509100440). A gate's regression may not be a coin flip. So the beat below
+ * installs the fake clock with no auto-advance, moves the enforcement clock FIRST, and then
+ * drives the host clock explicitly through a BOUNDED drain: a reschedule chain that never
+ * settles now fails with a sentence rather than hanging.
  */
 describe("SPEC §3 step 7 — an expired simulation cannot start a run (round-4 finding 1)", () => {
   const EXECUTE = "Review & execute in sandbox";
   const STALE_TITLE = "The simulation is out of date";
+  const SIMULATE = "Simulate against this wallet";
   const executeButton = () => screen.getByRole("button", { name: EXECUTE });
+  const executeGated = (): string | null => executeButton().getAttribute("aria-disabled");
+  /** Bounded on purpose: a pump that cannot fail is not evidence, it is a hang waiting to happen. */
+  const DRAIN_PASSES = 40;
 
   /**
    * A transport that counts what it is asked for and answers nothing. `driver.arm`'s first act
@@ -781,19 +795,66 @@ describe("SPEC §3 step 7 — an expired simulation cannot start a run (round-4 
     };
   }
 
-  /** Connect the mock session, capture its chain state, and wait for the gate to clear. */
-  async function connectAndClear(): Promise<void> {
+  /**
+   * Connect the mock session and wait until the wallet is readable enough for the clearing
+   * control to be offered. This half stays on REAL timers wherever it is used: it is wagmi's
+   * async handshake, not this beat's subject, and every other live beat in this file drives it
+   * exactly this way.
+   */
+  async function connectSession(): Promise<void> {
     fireEvent.click(screen.getByRole("button", { name: /Connect Mock/i }));
     await waitFor(
       () => {
-        expect(screen.queryByRole("button", { name: "Simulate against this wallet" })).not.toBeNull();
+        expect(screen.queryByRole("button", { name: SIMULATE })).not.toBeNull();
       },
       { timeout: 8_000 },
     );
-    fireEvent.click(screen.getByRole("button", { name: "Simulate against this wallet" }));
+  }
+
+  /** Connect, capture the wallet's chain state, and wait for the gate to clear. */
+  async function connectAndClear(): Promise<void> {
+    await connectSession();
+    fireEvent.click(screen.getByRole("button", { name: SIMULATE }));
     await waitFor(() => {
-      expect(executeButton().getAttribute("aria-disabled")).toBeNull();
+      expect(executeGated()).toBeNull();
     });
+  }
+
+  /**
+   * Pump MICROTASKS until a condition holds — no clock involved, because the demo capture is a
+   * resolved promise over the committed reads log, so the standing lands on the microtask queue
+   * alone. Used in place of `waitFor` once the fake clock is installed: `waitFor` polls on
+   * timers, and a poller sharing the clock under test is a deadlock.
+   */
+  async function settleUntil(ready: () => boolean, complaint: string): Promise<void> {
+    for (let pass = 0; pass < DRAIN_PASSES; pass += 1) {
+      if (ready()) return;
+      await act(async () => {
+        await Promise.resolve();
+      });
+    }
+    throw new Error(complaint);
+  }
+
+  /**
+   * Drive the ALARM's clock — and nothing else — until the gate refuses.
+   *
+   * Each pass advances the host clock by one whole freshness bound and lets React commit, so a
+   * fired alarm that reschedules (the effect's self-correcting arm) drains here rather than
+   * leaving the assertion to race it. The bound is what makes a chain that never settles a
+   * stated failure instead of a hung suite.
+   */
+  async function advanceUntilRefused(): Promise<void> {
+    for (let pass = 0; pass < DRAIN_PASSES; pass += 1) {
+      if (executeGated() === "true") return;
+      await act(async () => {
+        vi.advanceTimersByTime(LIVE_SIMULATION_MAX_AGE_MS + 1);
+        await Promise.resolve();
+      });
+    }
+    throw new Error(
+      `the expiry alarm never refused the gate across ${DRAIN_PASSES} advances of the freshness bound`,
+    );
   }
 
   it("refuses the commit itself when the simulation expired with nothing to re-render", async () => {
@@ -831,31 +892,175 @@ describe("SPEC §3 step 7 — an expired simulation cannot start a run (round-4 
   });
 
   it("flips the button to refused on the expiry alarm alone, with no interaction at all", async () => {
-    vi.useFakeTimers({ shouldAdvanceTime: true });
+    let monotonic = 1_000;
+    mountLive({
+      accounts: [CLEAN],
+      occupied: [],
+      allocationBps: 7000,
+      monotonicNow: () => monotonic,
+    });
+    await connectSession();
+
+    // From here the host clock is the test's alone — no auto-advance, so no real elapsed time
+    // reaches it, and the standing minted below arms its alarm on THIS clock.
+    vi.useFakeTimers();
     try {
+      fireEvent.click(screen.getByRole("button", { name: SIMULATE }));
+      await settleUntil(
+        () => executeGated() === null,
+        "the live simulation never cleared the gate, so there was no standing to expire",
+      );
+
+      // Time passes. The ENFORCEMENT clock moves first, because that is the clock the standing
+      // is aged against; the host clock follows, and the alarm sitting on it is the only thing
+      // that can fire. No click, no store write, no re-render is asked for.
+      monotonic += LIVE_SIMULATION_MAX_AGE_MS + 1;
+      await advanceUntilRefused();
+
+      expect(executeGated()).toBe("true");
+      expect(screen.getAllByText(STALE_TITLE).length).toBeGreaterThan(0);
+      // Never `disabled`: the refusal has to be readable at the control it gates (T25/T33).
+      expect(executeButton().hasAttribute("disabled")).toBe(false);
+      // Nothing was armed by the alarm — it refuses a run, it does not start one (SPEC §6).
+      expect(screen.queryByRole("button", { name: "Re-simulate" })).toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  /**
+   * Codex round-5 — THE THIRD DOOR. The guard above was written at the two controls that call
+   * `driver.arm` directly, and a fault card's Retry is neither of them: it calls `driver.retry()`,
+   * which re-enters `arm` from the retained input on its own. So an arming failure produced a
+   * card with an enabled Retry that could open a session — create, reset, plan — on a standing
+   * that expired while the card sat there, and a card sits there for as long as a user leaves it.
+   *
+   * The fault's own `retry` field is what tells the three families apart, so the gate is asked
+   * for exactly one of them. The other two are the machine's: the beats below assert both edges,
+   * because a guard that refuses everything named "Retry" would strand a committed mid-run
+   * session — unable to re-ask the server what it did — which is a worse failure than the one
+   * being fixed.
+   */
+  describe("the same guard at a fault card's Retry", () => {
+    const RESIMULATE = "Re-simulate";
+    const NO_ANSWER = "The sandbox service did not answer.";
+    const IN_FLIGHT = "Another call is in flight for this session.";
+    const retryButton = () => screen.getByRole("button", { name: "Retry" });
+
+    /** Arm against a transport whose `create` throws: the shortest honest `arm`-family fault. */
+    async function armIntoFault(sandbox: { readonly calls: { readonly create: number } }): Promise<void> {
+      fireEvent.click(executeButton());
+      await waitFor(() => {
+        expect(screen.getAllByText(NO_ANSWER).length).toBeGreaterThan(0);
+      });
+      expect(sandbox.calls.create).toBe(1);
+      // Enabled, which is the premise: a gated Retry would prove nothing about the guard.
+      expect(retryButton().getAttribute("aria-disabled")).toBeNull();
+    }
+
+    function throwingCreate() {
+      return scriptedSandbox({
+        onCreate: () => {
+          throw new Error("the sandbox service did not answer");
+        },
+      });
+    }
+
+    it("re-arms nothing when the standing expired while the fault card was on screen", async () => {
       let monotonic = 1_000;
+      const sandbox = throwingCreate();
       mountLive({
         accounts: [CLEAN],
         occupied: [],
         allocationBps: 7000,
         monotonicNow: () => monotonic,
+        transport: sandbox.transport,
+      });
+      await connectAndClear();
+      await armIntoFault(sandbox);
+
+      // The idle wait, at the card: the enforcement clock passes the bound and NOTHING renders.
+      // The Retry the user is about to press is painted with the verdict the run cleared with.
+      monotonic += LIVE_SIMULATION_MAX_AGE_MS + 1;
+      fireEvent.click(retryButton());
+
+      // Unguarded, `driver.retry()` re-entered `arm` from `lastArm` and this transport saw a
+      // second session opened on expired evidence. Counted, not inferred.
+      expect(sandbox.calls.create).toBe(1);
+      expect(sandbox.calls.reset).toBe(0);
+      expect(sandbox.calls.plan).toBe(0);
+      // The refusal is the GATE's, stated once at the control that gates a run — the fault card
+      // states its own fact and invents no second copy of this one.
+      await waitFor(() => {
+        expect(screen.getAllByText(STALE_TITLE).length).toBeGreaterThan(0);
+      });
+      expect(screen.getByRole("button", { name: RESIMULATE }).getAttribute("aria-disabled")).toBe(
+        "true",
+      );
+      expect(screen.queryByRole("button", { name: SIMULATE })).not.toBeNull();
+    });
+
+    it("re-arms on a Retry inside the freshness bound", async () => {
+      const monotonic = 1_000;
+      const sandbox = throwingCreate();
+      mountLive({
+        accounts: [CLEAN],
+        occupied: [],
+        allocationBps: 7000,
+        monotonicNow: () => monotonic,
+        transport: sandbox.transport,
+      });
+      await connectAndClear();
+      await armIntoFault(sandbox);
+
+      // Nothing expired, so the guard has nothing to say and the retry the card advertises is
+      // the retry the driver performs.
+      fireEvent.click(retryButton());
+      await waitFor(() => {
+        expect(sandbox.calls.create).toBe(2);
+      });
+      expect(screen.queryByText(STALE_TITLE)).toBeNull();
+    });
+
+    it("continues a committed run on Retry even past the freshness bound", async () => {
+      let monotonic = 1_000;
+      // Create and plan answer canonically; the first step refuses as busy, which is the
+      // machine's own retryable mid-run refusal — fault family `run`, not `arm`.
+      const sandbox = scriptedSandbox({
+        onExecuteStep: () => ({ ok: false, refusal: { kind: "session-busy" } }),
+      });
+      mountLive({
+        accounts: [CLEAN],
+        occupied: [],
+        allocationBps: 7000,
+        monotonicNow: () => monotonic,
+        transport: sandbox.transport,
       });
       await connectAndClear();
 
-      // Time passes on BOTH clocks, as it does in the world. No click, no store write, no
-      // re-render is asked for: the standing's own alarm is the only thing that can fire.
-      monotonic += LIVE_SIMULATION_MAX_AGE_MS + 1;
-      act(() => {
-        vi.advanceTimersByTime(LIVE_SIMULATION_MAX_AGE_MS + 1);
+      fireEvent.click(executeButton());
+      await waitFor(() => {
+        expect(screen.queryByRole("button", { name: "Execute" })).not.toBeNull();
       });
+      fireEvent.click(screen.getByRole("button", { name: "Execute" }));
+      await waitFor(() => {
+        expect(screen.getAllByText(IN_FLIGHT).length).toBeGreaterThan(0);
+      });
+      expect(sandbox.calls.executeStep).toEqual([0]);
 
-      expect(executeButton().getAttribute("aria-disabled")).toBe("true");
-      expect(screen.getAllByText(STALE_TITLE).length).toBeGreaterThan(0);
-      // Never `disabled`: the refusal has to be readable at the control it gates (T25/T33).
-      expect(executeButton().hasAttribute("disabled")).toBe(false);
-    } finally {
-      vi.useRealTimers();
-    }
+      // The same expiry that refuses an arm has no authority here: the user already committed
+      // this run, and re-entering the step loop is idempotent replay of a step the server holds.
+      monotonic += LIVE_SIMULATION_MAX_AGE_MS + 1;
+      fireEvent.click(retryButton());
+
+      await waitFor(() => {
+        expect(sandbox.calls.executeStep).toEqual([0, 0]);
+      });
+      // And it stayed in the run: no session was opened, nothing was re-planned.
+      expect(sandbox.calls.create).toBe(1);
+      expect(sandbox.calls.plan).toBe(1);
+      expect(sandbox.calls.reset).toBe(0);
+    });
   });
 });
 

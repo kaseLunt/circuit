@@ -914,15 +914,37 @@ export class SandboxDriver {
     }
   }
 
-  /** §2.4: a document mutation while `ready` disarms the run — back to idle, with notice. */
+  /**
+   * §2.4: a document mutation while `ready` disarms the run — back to idle, with notice.
+   *
+   * And while idle holding an ARM-family fault, the same mutation retires the RETRY (Codex
+   * round-5). `lastArm` is the input `retry()` re-arms from, and a fault card outlives the
+   * document it was raised against: an edit followed by Retry opened a session, reset a fork and
+   * planned — for the document the canvas no longer shows. Retiring the fault with its input
+   * leaves exactly one offer on screen, a fresh arm of the CURRENT document, which is what
+   * "Re-simulate" has meant since SPEC §6; nothing is stated because nothing survived to state,
+   * and the edit that caused it is the user's own.
+   *
+   * The other two families survive an edit on purpose: `run` and `reload` name a run the user
+   * already committed, whose record the server holds. An edit is not standing to cancel the only
+   * route back to that record (D6/D11) — the document changing does not un-execute a step.
+   */
   documentMutated(): void {
-    if (this.machine.phase.kind !== "ready") return;
-    this.dispatch({ type: "document-mutated" });
-    this.plannedAtMs = null;
-    // The session fork is untouched (nothing dispatched from ready), so the key is kept
-    // for reuse; only the resumable-run pointer retires with the plan it named.
-    this.retainedPlanHash = null;
-    this.storage.clear();
+    if (this.machine.phase.kind === "ready") {
+      this.dispatch({ type: "document-mutated" });
+      this.plannedAtMs = null;
+      // The session fork is untouched (nothing dispatched from ready), so the key is kept
+      // for reuse; only the resumable-run pointer retires with the plan it named.
+      this.retainedPlanHash = null;
+      this.storage.clear();
+      this.notify();
+      return;
+    }
+    if (this.fault === null || this.fault.retry !== "arm") return;
+    // The pointer stays: it names an earlier COMMITTED run, not this failed arm, and the
+    // fingerprint gate in `restore` is what decides whether the current document may adopt it.
+    this.lastArm = null;
+    this.fault = null;
     this.notify();
   }
 

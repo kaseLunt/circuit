@@ -491,6 +491,61 @@ describe("restore and lifecycle", () => {
     expect(driver.snapshot().machine.phase.kind).toBe("idle");
   });
 
+  it("a document mutation retires an arm-family fault with the input it would re-arm", async () => {
+    let failing = true;
+    const sandbox = scriptedSandbox({
+      onCreate: () => {
+        if (!failing) return undefined;
+        throw new Error("the sandbox service did not answer");
+      },
+    });
+    const { driver } = driverWith(sandbox);
+    await driver.arm(armInput);
+    expect(driver.snapshot().fault).toMatchObject({ kind: "transport-failed", retry: "arm" });
+    expect(sandbox.calls.create).toBe(1);
+
+    driver.documentMutated();
+    expect(driver.snapshot().fault).toBeNull();
+
+    // The advertised retry named a document that no longer exists, so it reaches no wire: the
+    // arm input went with the fault rather than waiting to be re-run against the wrong plan.
+    await driver.retry();
+    expect(sandbox.calls.create).toBe(1);
+    expect(sandbox.calls.reset).toBe(0);
+    expect(sandbox.calls.plan).toBe(0);
+    expect(driver.snapshot().machine.phase.kind).toBe("idle");
+
+    // What the host still offers works: a fresh arm, of whatever the canvas now holds.
+    failing = false;
+    await driver.arm(armInput);
+    expect(driver.snapshot().machine.phase.kind).toBe("ready");
+    expect(sandbox.calls.create).toBe(2);
+  });
+
+  it("a document mutation leaves a committed run's own recovery standing", async () => {
+    let busyOnce = true;
+    const sandbox = scriptedSandbox({
+      onExecuteStep: (index) => {
+        if (index === 1 && busyOnce) {
+          busyOnce = false;
+          return { ok: false, refusal: { kind: "session-busy" } };
+        }
+        return undefined;
+      },
+    });
+    const { driver } = driverWith(sandbox);
+    await driver.arm(armInput);
+    await driver.execute();
+    expect(driver.snapshot().fault).toMatchObject({ kind: "refusal", retry: "run" });
+
+    // The edit does not un-execute step 1. A mid-run fault is the route back to what the server
+    // holds, and cancelling it on a canvas edit would strand the run (D6/D11).
+    driver.documentMutated();
+    expect(driver.snapshot().fault).toMatchObject({ kind: "refusal", retry: "run" });
+    await driver.retry();
+    expect(driver.snapshot().machine.phase.kind).toBe("complete");
+  });
+
   it("re-arming after a completed run resets the dirty fork before planning (D8 hygiene)", async () => {
     const { driver, sandbox } = driverWith();
     await driver.arm(armInput);

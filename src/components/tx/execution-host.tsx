@@ -253,10 +253,30 @@ export function ExecutionHost({
 
   /**
    * The last thing asked before a run starts (Codex round-4 finding 1): does the live gate
-   * STILL refuse nothing, decided now rather than at the last paint? Both arming routes below
-   * ask it, because both open a session and neither may do so on an expired simulation.
+   * STILL refuse nothing, decided now rather than at the last paint? Every route that ARMS asks
+   * it — the two direct controls below and a fault's re-arm Retry — because each opens a session
+   * and none of them may do so on an expired simulation.
    */
   const liveCommitRefused = (): boolean => revalidateLive !== null && revalidateLive() !== null;
+
+  /**
+   * The same question, asked for a FAULT's Retry (Codex round-5). `DriverFault.retry` names the
+   * family the action belongs to, and one of the three IS an arm: `retry: "arm"` re-enters
+   * create/reset/plan inside the driver, from the retained arm input, without passing either
+   * button's guard. A fault card sits on screen for as long as the user leaves it there, so by
+   * the time Retry is pressed the standing may have expired with no render to notice — the same
+   * stale authority the two direct handlers already refuse, reaching the wire by another door.
+   *
+   * The other two families stay ungated on purpose, because they are the machine's rather than a
+   * new commitment: `run` re-enters the step loop of a run the user already committed, and
+   * `reload` rehydrates server truth about it (both idempotent replay and discovery, D6/D11).
+   * Holding those hostage to simulation freshness would strand a committed mid-run session with
+   * no way to learn what the server did — the opposite of the guard's purpose.
+   */
+  const retryFault = (): void => {
+    if (snap.fault !== null && snap.fault.retry === "arm" && liveCommitRefused()) return;
+    void driver.retry();
+  };
 
   // §2.4: the driver no-ops unless the machine is `ready`, so every rev bump may relay.
   // `lastRev` doubles as the restore guard's live reading of the document generation.
@@ -359,7 +379,7 @@ export function ExecutionHost({
             {snap.fault === null ? null : (
               <FaultCard
                 fault={snap.fault}
-                onRetryFault={() => void driver.retry()}
+                onRetryFault={retryFault}
                 busyReason={busyReason}
               />
             )}
@@ -468,7 +488,7 @@ export function ExecutionHost({
             pinRun();
             void driver.arm(armable.input);
           }}
-          onRetryFault={() => void driver.retry()}
+          onRetryFault={retryFault}
         />
       </PanelFade>
     </aside>
