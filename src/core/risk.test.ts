@@ -2,11 +2,13 @@ import { describe, expect, it } from "vitest";
 import { rateKindLabel, simulate, riskLedger } from "./risk";
 import {
   HF_WARN_WAD,
+  assetUnitOf,
+  collateralBaseValue,
   computeHealthFactor,
+  debtBaseValue,
   hfWadValue,
   liquidationRatioWad,
   riskState,
-  usdBase,
   type CollateralEntry,
   type HealthFactor,
 } from "./health-factor";
@@ -29,7 +31,13 @@ import {
   type Provenanced,
 } from "./provenance";
 import { PINNED_BLOCK, WINDOW_BLOCK } from "../../tests/helpers/protocol-reads";
-import { EXPECTED_BORROW_WEI, chainOf, flagshipGraph } from "../../tests/helpers/graphs";
+import {
+  EXPECTED_BORROW_WEI,
+  carryGraph,
+  chainOf,
+  flagshipGraph,
+  mixedLoopAndCarryGraph,
+} from "../../tests/helpers/graphs";
 import { fixtureSnapshot, type RawFixture } from "../../tests/helpers/chain-snapshot";
 import type { Block } from "./graph";
 
@@ -71,10 +79,16 @@ function fixtureLegs(allocationBps: number, snap: ChainSnapshot = snapshot) {
     .filter((f) => f.type === "borrow")
     .map((f) => f.outputWei!.value);
   const entryOf = (wei: bigint): CollateralEntry => ({
-    base: usdBase(wei, weETH.priceBase.value),
+    base: collateralBaseValue(wei, weETH.priceBase.value, assetUnitOf(weETH.decimals.value)),
     ltBps,
   });
-  const debtBase = borrows.reduce((a, wei) => a + usdBase(wei, WETH.priceBase.value), 0n);
+  // Debt CEILS (GenericLogic._getUserDebtInBaseCurrency). The parity helper reproduces the
+  // protocol's own direction, not a floor-everything convenience — reproducing the wrong
+  // rounding here would make this parity check agree with a defect rather than with the chain.
+  const debtBase = borrows.reduce(
+    (a, wei) => a + debtBaseValue(wei, WETH.priceBase.value, assetUnitOf(WETH.decimals.value)),
+    0n,
+  );
   return { plan, ltBps, supplies, borrows, entryOf, debtBase, weETH, WETH };
 }
 
@@ -133,8 +147,8 @@ describe("pinned worked example (design §2.10, block 25,592,678)", () => {
 
   it("pins the b = 7000 row", () => {
     const result = simulate(flagshipGraph("10", 7000), snapshot);
-    expect(hfOf(result.minHealthFactor)).toBe(1_357_142_857_144_167_216n);
-    expect(hfOf(result.finalHealthFactor)).toBe(2_307_142_857_144_167_216n);
+    expect(hfOf(result.minHealthFactor)).toBe(1_357_142_857_143_159_467n);
+    expect(hfOf(result.finalHealthFactor)).toBe(2_307_142_857_142_454_043n);
     expect(requireValue(result.liquidationRatioWad, "ratio")).toBe(810_405_201_682_850_969n);
     expect(requireValue(result.leverageWad, "leverage")).toBe(1_699_999_999_998_440_640n);
     expect(requireValue(result.initialAmountWei, "equity")).toBe(10n * WAD);
@@ -142,8 +156,8 @@ describe("pinned worked example (design §2.10, block 25,592,678)", () => {
 
   it("pins the b = 5000 row", () => {
     const result = simulate(flagshipGraph("10", 5000), snapshot);
-    expect(hfOf(result.minHealthFactor)).toBe(1_900_000_000_002_962_782n);
-    expect(hfOf(result.finalHealthFactor)).toBe(2_850_000_000_002_962_782n);
+    expect(hfOf(result.minHealthFactor)).toBe(1_900_000_000_000_987_594n);
+    expect(hfOf(result.finalHealthFactor)).toBe(2_850_000_000_000_000_000n);
     expect(requireValue(result.liquidationRatioWad, "ratio")).toBe(578_860_858_344_721_616n);
     expect(requireValue(result.leverageWad, "leverage")).toBe(1_499_999_999_998_440_640n);
   });
@@ -164,11 +178,20 @@ describe("pinned worked example (design §2.10, block 25,592,678)", () => {
     const min = ledger.min!;
     const final = ledger.final!;
     const result = simulate(flagshipGraph("10", 7000), snapshot);
-    const atMin = liquidationRatioWad(min.collateralWei!, min.debtWei!, min.supplies[0]!.ltBps);
+    const unit18 = assetUnitOf(18);
+    const atMin = liquidationRatioWad(
+      min.collateralWei!,
+      min.debtWei!,
+      min.supplies[0]!.ltBps,
+      unit18,
+      unit18,
+    );
     const atFinal = liquidationRatioWad(
       final.collateralWei!,
       final.debtWei!,
       final.supplies[0]!.ltBps,
+      unit18,
+      unit18,
     );
     expect(requireValue(result.liquidationRatioWad, "ratio")).toBe(atMin);
     // The final checkpoint is far more forgiving; showing it beside the min HF would be two
@@ -476,7 +499,7 @@ const MINT_QUALIFICATIONS = {
   minRole: "the minimum across the plan",
   finalRole: "after the last risk-changing step",
   aTokenPosition: "the collateral position this supply creates",
-  liquidationRatio: "the collateral/debt oracle ratio at HF = 1, at the minimum-HF step",
+  liquidationRatio: "the collateral/debt oracle price ratio at HF = 1, at the minimum-HF step",
   leverage: "collateral exposure ÷ equity after the closed iteration",
   supplyRate:
     "Aave third-order compounding over one year, at the utilization this plan's own supply leaves behind, over debt accrued to this block",
@@ -778,7 +801,7 @@ describe("missing reads inside a valid plan (§5.2)", () => {
     expect(result.blockValues["supply1"]!.rate).not.toBeNull();
     expect(result.blockValues["borrow"]!.rate).not.toBeNull();
     // …and the whole risk path is unaffected.
-    expect(hfOf(result.minHealthFactor)).toBe(1_357_142_857_144_167_216n);
+    expect(hfOf(result.minHealthFactor)).toBe(1_357_142_857_143_159_467n);
     expect(result.liquidationRatioWad).not.toBeNull();
     expect(result.leverageWad).not.toBeNull();
     expect(result.blockValues["supply1"]!.inputAmountWei).not.toBeNull();
@@ -830,24 +853,48 @@ describe("missing reads inside a valid plan (§5.2)", () => {
     expect(ledger.checkpoints.every((c) => c.healthFactor.status === "unknown")).toBe(true);
   });
 
-  it("refuses a base valuation outside the recorded 18-decimal matrix", () => {
-    // `usdBase` is the 18-decimal form. Mutating the DEBT reserve takes the borrow's oracle
-    // value away while leaving the collateral's intact. The cap is cleared alongside it
-    // because plan.ts's cap comparison scales the recorded 18-decimal totals by the mutated
-    // unit — an artifact of the mutation, not the behaviour under test.
-    const odd = fixtureSnapshot((raw) => {
-      raw.WETH.decimals = 6;
-      raw.WETH.borrowCap = 0n;
-    });
-    const result = simulate(flagshipGraph("10", 7000), odd);
+  /**
+   * The successor to a refusal.
+   *
+   * This module used to answer "base valuation for a non-18-decimal reserve is outside the
+   * recorded matrix" and null the health factor. That was honest while no six-decimal reserve
+   * was recorded; with USDC in the matrix it would have shipped the carry with NO health
+   * factor at all while every input to it existed. The valuation now divides by the reserve's
+   * OWN `assetUnit`, so what used to be a hole is a number — and the number is checked against
+   * hand-computed integers, not against the code that produces it.
+   */
+  it("values a six-decimal reserve at its own assetUnit instead of refusing it", () => {
+    const result = simulate(carryGraph("10", 6000), snapshot);
     expect(result.isValid).toBe(true);
+    expect(valueOf(result.minHealthFactor).status).toBe("healthy");
+
+    const usdc = snapshot.reserves.USDC;
+    expect(usdc.decimals.value).toBe(6);
+    const borrowWei = requireValue(
+      result.blockValues["borrow"]!.outputAmountWei,
+      "carry borrow output",
+    );
+    // The debt leg ceils at 1e6 — GenericLogic's direction and GenericLogic's divisor.
+    const expectedDebtBase = debtBaseValue(borrowWei, usdc.priceBase.value, assetUnitOf(6));
+    const ledger = riskLedger(carryGraph("10", 6000), snapshot);
+    expect(ledger.min!.totalDebtBase).toBe(expectedDebtBase);
+    // …and the 18-decimal divisor the old form applied is off by the full 1e12, in the
+    // direction that renders the carry's debt as dust and its position as unliquidatable.
+    // This is the number the refusal was standing in front of, and why refusing beat guessing
+    // until the matrix recorded a six-decimal reserve.
+    const wrongUnit = collateralBaseValue(borrowWei, usdc.priceBase.value, assetUnitOf(18));
+    expect(wrongUnit * 10n ** 12n).toBeLessThanOrEqual(expectedDebtBase);
+    expect(wrongUnit).toBeLessThan(expectedDebtBase / 10n ** 11n);
+  });
+
+  it("still refuses when the reserve has no usable price — a missing read is not a scale", () => {
+    const noPrice = fixtureSnapshot((raw) => {
+      raw.USDC.priceBase = 0n;
+    });
+    const result = simulate(carryGraph("10", 6000), noPrice);
+    // plan.ts refuses first: the borrow denominates by dividing by that price.
+    expect(result.isValid).toBe(false);
     expect(valueOf(result.minHealthFactor).status).toBe("unknown");
-    expect(result.blockValues["borrow"]!.outputValueBase).toBeNull();
-    // The weETH collateral is 18-decimal and still values normally — one reserve's scale
-    // does not blank the other's.
-    expect(result.blockValues["supply1"]!.inputValueBase).not.toBeNull();
-    // Equity is ETH, priced by that same WETH feed, so leverage goes with it.
-    expect(result.leverageWad).toBeNull();
   });
 
   it("drops a rate leg whose strategy parameters are out of domain, and only that leg", () => {
@@ -1112,5 +1159,184 @@ describe("determinism and provenance honesty", () => {
     ]) {
       expect(wrapper.kind).toBe("derived");
     }
+  });
+});
+
+// ————————————————————————— W09: the carry's risk surface —————————————————————————
+
+/**
+ * The carry exists to demonstrate the risk engine, so the risk engine's answers about it are
+ * pinned rather than described. Two things are being proven at once: that the numbers are
+ * right, and that they are the SAME machinery the flagship runs — a different reserve, a
+ * different regime, no second code path.
+ */
+describe("the USDC carry (W09) — an uncorrelated leg through the same engine", () => {
+  it("rests in the amber band at the shipped default, with the health factor the regime implies", () => {
+    const result = simulate(carryGraph(), snapshot);
+    expect(result.isValid).toBe(true);
+    const hf = hfOf(result.minHealthFactor);
+    if (hf === null) throw new Error("carry health factor is unknown");
+
+    // Amber is `riskState`, the one derivation — not a second scale that could disagree with
+    // the number beside it.
+    expect(riskState(valueOf(result.minHealthFactor))).toBe("warning");
+    expect(hf).toBeLessThan(HF_WARN_WAD);
+
+    // HF ~ LT/b for a single-pair position: 8000/6000 = 1.333…, and the figure lands there
+    // from the reads rather than from that algebra.
+    expect(hf).toBeGreaterThan((1_330n * WAD) / 1_000n);
+    expect(hf).toBeLessThan((1_337n * WAD) / 1_000n);
+    expect(formatHealthFactor(hf)).toBe("1.33");
+
+    // The carry opens one position and closes nothing, so min IS final — unlike the loop,
+    // whose minimum sits mid-execution.
+    expect(hfOf(result.finalHealthFactor)).toBe(hf);
+  });
+
+  it("quotes the non-eMode weETH regime, and the loop quotes the category — the two-template contrast", () => {
+    const carryLedger = riskLedger(carryGraph(), snapshot);
+    const loopLedger = riskLedger(flagshipGraph(), snapshot);
+    const carryLeg = carryLedger.min!.supplies[0]!;
+    const loopLeg = loopLedger.min!.supplies[0]!;
+
+    expect(carryLeg.ltvBps).toBe(snapshot.reserves.weETH.ltvBps.value);
+    expect(carryLeg.ltBps).toBe(snapshot.reserves.weETH.liquidationThresholdBps.value);
+    expect(loopLeg.ltvBps).toBe(snapshot.eModeCategories[0]!.ltvBps.value);
+    expect(loopLeg.ltBps).toBe(snapshot.eModeCategories[0]!.liquidationThresholdBps.value);
+    // The SAME collateral asset, two regimes, and the category one is strictly more generous.
+    expect(loopLeg.ltvBps).toBeGreaterThan(carryLeg.ltvBps);
+    expect(loopLeg.ltBps).toBeGreaterThan(carryLeg.ltBps);
+
+    // Each leg cites the observation its own rule selected — a null category cites the
+    // reserve read, so the tooltip cannot show a category figure for a position outside one.
+    const carryTrail = carryLeg.ltInputs.flatMap((i) => provenanceTrailText(i)).join("\n");
+    expect(carryTrail).toContain("weETH.getReserveConfigurationData.liquidationThreshold");
+    expect(carryTrail).not.toContain("eMode1");
+    // …while the loop's leg cites the category's own read, plus the bitmap that selected it.
+    const loopTrail = loopLeg.ltInputs.flatMap((i) => provenanceTrailText(i)).join("\n");
+    expect(loopTrail).toContain("eMode1.collateralConfig.liquidationThreshold");
+    expect(loopTrail).toContain("eMode1.collateralBitmap");
+  });
+
+  /**
+   * The liquidation figure for a mixed-decimals pair — the number the un-normalized ratio
+   * would have got wrong by twelve orders of magnitude.
+   *
+   * It is a PRICE RATIO claim (weETH per USDC at HF = 1), so it is checked against the
+   * position's current price ratio: the carry liquidates on a fall of roughly a quarter, and
+   * both endpoints come from the two oracle reads.
+   */
+  it("renders a liquidation ratio on the true oracle-price scale, not the token-amount scale", () => {
+    const result = simulate(carryGraph(), snapshot);
+    const ratio = requireValue(result.liquidationRatioWad, "carry liquidation ratio");
+    const weETH = snapshot.reserves.weETH;
+    const usdc = snapshot.reserves.USDC;
+    const currentRatio = (weETH.priceBase.value * WAD) / usdc.priceBase.value;
+
+    // Same order of magnitude as the live ratio — the 1e12 skew would put it here at ~1e-9.
+    expect(ratio).toBeLessThan(currentRatio);
+    expect(ratio * 2n).toBeGreaterThan(currentRatio);
+    // A ~25% fall to liquidation at b = 6000 against LT 8000.
+    const fallBps = ((currentRatio - ratio) * 10_000n) / currentRatio;
+    expect(fallBps).toBeGreaterThan(2_000n);
+    expect(fallBps).toBeLessThan(3_000n);
+
+    // The provenance names BOTH decimals reads: the moment the units stop cancelling they
+    // are genuine inputs, and a trail that omitted them would hide the divisor.
+    const trail = provenanceTrailText(result.liquidationRatioWad!).join("\n");
+    expect(trail).toContain("USDC.getReserveConfigurationData.decimals");
+    expect(trail).toContain("weETH.getReserveConfigurationData.decimals");
+  });
+
+  /**
+   * The ratio and the pair it describes are ONE derivation, so a renderer cannot put a
+   * weETH/WETH figure next to a weETH/USDC label. Held across every document shape this repo
+   * can build, including the ones where both go null together.
+   */
+  it("mints the liquidation pair with the ratio, never beside it", () => {
+    const carry = simulate(carryGraph(), snapshot);
+    expect(carry.liquidationPair).toEqual({ collateral: "weETH", debt: "USDC" });
+
+    const loop = simulate(flagshipGraph(), snapshot);
+    expect(loop.liquidationPair).toEqual({ collateral: "weETH", debt: "WETH" });
+
+    // Both null together, for every shape that has no single pair to describe.
+    for (const graph of [
+      mixedLoopAndCarryGraph(),
+      chainOf([INPUT, STAKE, WRAP, LEND]),
+      chainOf([INPUT, STAKE]),
+    ]) {
+      const result = simulate(graph, snapshot);
+      expect(result.liquidationRatioWad === null).toBe(result.liquidationPair === null);
+      expect(result.liquidationPair).toBeNull();
+    }
+  });
+
+  it("composes net APY from the same three legs, with the USDC borrow rate read off its own strategy", () => {
+    const result = simulate(carryGraph(), snapshot);
+    expect(result.yieldSources.map((s) => `${s.protocol}:${s.type}`)).toEqual([
+      "etherfi:stake",
+      "aave-v3:supply",
+      "aave-v3:borrow",
+    ]);
+    expect(result.netApyWad).not.toBeNull();
+    expect(result.grossApyWad).not.toBeNull();
+    // The debt leg is the USDC reserve's own post-action rate — the same machinery, a
+    // stablecoin reserve's parameters, no branch.
+    const borrowRate = result.blockValues["borrow"]!.rate;
+    if (borrowRate === null) throw new Error("carry borrow rate did not resolve");
+    expect(borrowRate.kind).toBe("apy");
+    const rateTrail = provenanceTrailText(borrowRate.wad).join("\n");
+    expect(rateTrail).toContain("USDC.strategy.getInterestRateDataBps");
+  });
+
+  /**
+   * NO DOLLAR IS ASSUMED. The carry's debt is valued through `Oracle.getAssetPrice(USDC)`
+   * like every other leg, and at the pinned block that feed disagrees with a peg — so the
+   * position's debt base is NOT the token count times 1e8. If a `1` ever gets hard-wired in
+   * for a stablecoin, this fails.
+   */
+  it("prices USDC from the capped oracle feed, never at a dollar", () => {
+    const usdc = snapshot.reserves.USDC;
+    expect(usdc.priceBase.value).not.toBe(100_000_000n);
+    expect(usdc.priceBase.value).toBeLessThan(100_000_000n);
+
+    const ledger = riskLedger(carryGraph(), snapshot);
+    const debtLeg = ledger.min!.debts[0]!;
+    const naiveDollarBase = debtLeg.amountWei * 100n;
+    expect(debtLeg.baseProv!.value).not.toBe(naiveDollarBase);
+    expect(debtLeg.baseProv!.value).toBeLessThan(naiveDollarBase);
+
+    // The valuation cites the feed read, and the note says what the feed IS.
+    const trail = provenanceTrailText(debtLeg.baseProv!).join("\n");
+    expect(trail).toContain("Oracle.getAssetPrice(USDC)");
+    expect(trail).toContain("Capped USDC / USD");
+    expect(trail).not.toContain("peg");
+  });
+
+  /**
+   * The mixed document's unavailable states, pinned as DESIGNED states.
+   *
+   * Two borrows forfeit the §5.2 composition (which describes one closed iteration) and the
+   * single-pair liquidation ratio (which describes one collateral against one debt). Both
+   * nulls are the correct honest output — but they must be the output, not an accident, so
+   * they are asserted beside the health factor that DOES survive.
+   */
+  it("takes the composition and the ratio away from a two-borrow document, and nothing else", () => {
+    const result = simulate(mixedLoopAndCarryGraph(), snapshot);
+    expect(result.isValid).toBe(true);
+    expect(result.netApyWad).toBeNull();
+    expect(result.grossApyWad).toBeNull();
+    expect(result.yieldSources).toEqual([]);
+    expect(result.liquidationRatioWad).toBeNull();
+    // The health factor is unaffected: it never depended on any of them.
+    expect(valueOf(result.minHealthFactor).status).toBe("healthy");
+    expect(result.leverageWad).not.toBeNull();
+
+    const ledger = riskLedger(mixedLoopAndCarryGraph(), snapshot);
+    expect(new Set(ledger.final!.debts.map((d) => d.reserve))).toEqual(new Set(["WETH", "USDC"]));
+    // Two debt reserves, so the pair is not single — which is exactly why the ratio is null.
+    expect(ledger.min!.collateralWei).toBeNull();
+    expect(ledger.min!.debtWei).toBeNull();
   });
 });

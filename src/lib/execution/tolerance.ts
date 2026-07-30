@@ -19,6 +19,16 @@
  *  - `SANDBOX_HF_REL_POW`: the same clean-run 1e-6 bound, applied to the per-step
  *    `getUserAccountData` cross-check (SPEC §5.4 post-execution clause).
  *
+ * A NOTE ON DENOMINATION, since `absWei` is not denominated in ether (W09). The floor is in
+ * the ATTRIBUTED ASSET's own smallest unit, so for a six-decimal reserve 2n is 2e-6 USDC
+ * rather than 2e-18 ETH — nominally looser, and harmless in direction because nothing in the
+ * carry needs the slack: the borrow amount is plan-time calldata and the USDC `Transfer` the
+ * pool emits echoes that exact figure, so the honest expectation there is EXACT equality. The
+ * fork drill asserts `delta === 0n` for the USDC leg and the named constants remain the
+ * PRODUCT bound, which is the right division — a test may demand more than the product
+ * promises, and a per-asset tolerance fork would need a fork receipt forcing it rather than a
+ * feeling that six decimals deserve their own number.
+ *
  * Sandbox bounds are tight because the fork is frozen: only intra-plan timestamp accrual
  * moves anything. Live bounds differ — rebases land between steps — and land HERE, named,
  * with their own justification, never inlined at a call site: `LIVE_OUTPUT_TOLERANCE`,

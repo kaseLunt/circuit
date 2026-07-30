@@ -61,6 +61,7 @@ const ASSET_MEMBERS: Readonly<Record<Asset, true>> = {
   stETH: true,
   wstETH: true,
   WETH: true,
+  USDC: true,
 };
 
 function isAsset(v: string | number | undefined): v is Asset {

@@ -26,6 +26,18 @@ const CUSTOM_ERROR_SIGNATURES: Record<string, string> = {
   "LtvValidationFailed()": "Loan-to-value validation failed",
   "BorrowingNotEnabled()": "Borrowing is not enabled for this reserve",
   "NotBorrowableInEMode()": "Asset is not borrowable in the selected e-mode category",
+  // Parameterized `(address reserve, uint256 categoryId)` — the argument types are read from
+  // `Errors.sol` at the pinned revision, not guessed, because the selector is keccak of the
+  // CANONICAL signature and a `uint8` there would derive a selector that never matches. The
+  // selector still identifies the error; the args ride the raw bytes the decoder preserves
+  // beside the message. Thrown by `validateSetUserEMode`'s debt loop — a wallet holding debt
+  // the target category cannot borrow may not enter it at all, which is what makes
+  // borrow-then-enter-eMode an unreachable sequencing rather than a merely worse one. The
+  // fork drill in `tests/fork/usdc-carry.test.ts` pins both selectors against the chain.
+  "InvalidDebtInEmode(address,uint256)":
+    "An existing debt is not borrowable in that e-mode category",
+  "InvalidCollateralInEmode(address,uint256)":
+    "An existing collateral is not usable in that e-mode category",
   "ReserveInactive()": "Reserve is inactive",
   "ReserveFrozen()": "Reserve is frozen",
   "ReservePaused()": "Reserve is paused",
@@ -33,9 +45,19 @@ const CUSTOM_ERROR_SIGNATURES: Record<string, string> = {
   "NotEnoughAvailableUserBalance()": "Not enough balance for this action",
 };
 
-/** Known-correct selectors (keccak256(sig)[:4]) — non-tautological guard. */
+/**
+ * Known-correct selectors (keccak256(sig)[:4]) — a non-tautological guard.
+ *
+ * The two W09 entries are not transcriptions: they are the bytes the DEPLOYED revision
+ * actually returned in `tests/fork/usdc-carry.test.ts` (the e-mode negative control and the
+ * reserve-regime LTV boundary). Pinning them here means a signature typo or a viem change
+ * that broke the derivation would fail at module load, in every suite, rather than in the one
+ * fork drill that has an RPC.
+ */
 const SELECTOR_SELFTEST: Record<string, string> = {
   "SupplyCapExceeded()": "0xf58f733a",
+  "NotBorrowableInEMode()": "0x57db5bba",
+  "CollateralCannotCoverNewBorrow()": "0x911ceb81",
 };
 
 /** Legacy Error(string) numeric codes (pre-v3.4). Matrix §2 documents the model. */

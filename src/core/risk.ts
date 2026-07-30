@@ -43,10 +43,12 @@
  */
 import { WAD } from "./format";
 import {
+  assetUnitOf,
+  collateralBaseValue,
   computeHealthFactor,
+  debtBaseValue,
   hfWadValue,
   liquidationRatioWad,
-  usdBase,
   type CollateralEntry,
   type HealthFactor,
 } from "./health-factor";
@@ -56,6 +58,7 @@ import {
   effectiveLiquidationThresholdBps,
   effectiveLtvBps,
   inCollateralBitmap,
+  RESERVE_KEYS,
   type ChainSnapshot,
   type EModeCategorySnapshot,
   type PlanError,
@@ -159,6 +162,20 @@ export interface SimulationResult {
   /** Collateral/debt oracle ratio at liquidation, WAD. A correlated pair has no
    * honest USD liquidation price (§5.4). */
   liquidationRatioWad: Provenanced<bigint> | null;
+  /**
+   * WHICH two reserves that ratio is a ratio OF — minted with it, never beside it.
+   *
+   * The ratio alone is unrenderable as a sentence: "liquidates if the ratio falls to 1,587"
+   * is meaningless without the pair, and the block used to fill that gap with the words
+   * "collateral/debt" because a borrow flow has no input asset to read (a borrow consumes a
+   * collateral DEPENDENCY, not a token). That was honest and useless — and with two templates
+   * it hid the whole contrast, since weETH/WETH and weETH/USDC both rendered as
+   * "collateral/debt".
+   *
+   * Null exactly when `liquidationRatioWad` is null, because the two are produced by one
+   * derivation over one checkpoint. They cannot disagree about which position they describe.
+   */
+  liquidationPair: LiquidationPair | null;
   /** Collateral exposure ÷ equity after the closed iteration, WAD. */
   leverageWad: Provenanced<bigint> | null;
   /**
@@ -168,6 +185,16 @@ export interface SimulationResult {
    */
   yieldSources: readonly YieldSource[];
   blockValues: Readonly<Record<string, ComputedBlockValue>>;
+}
+
+/**
+ * The two reserves a liquidation ratio is a ratio of, in numerator/denominator order.
+ * `ReserveKey`, not `Asset`: the ratio is a claim about two ORACLE FEEDS, and the feed is a
+ * property of the reserve — so this names what was actually divided.
+ */
+export interface LiquidationPair {
+  readonly collateral: ReserveKey;
+  readonly debt: ReserveKey;
 }
 
 export interface ComputedBlockValue {
@@ -235,8 +262,8 @@ export interface RiskCheckpoint {
   readonly totalDebtBase: bigint | null;
   /** `computeHealthFactor(collateral, totalDebtBase)` — nothing else. */
   readonly healthFactor: HealthFactor;
-  /** Collateral wei on the single correlated collateral reserve, or null if the
-   *  position is not a single correlated pair. */
+  /** Collateral wei on the single collateral reserve, or null if the position is not
+   *  exactly one collateral reserve against exactly one debt reserve. */
   readonly collateralWei: bigint | null;
   readonly debtWei: bigint | null;
   /** The legs standing at this point, in walk order — the one source the entries, the
@@ -269,12 +296,20 @@ interface PriceFeed {
 }
 
 /**
- * Asset → the oracle price that values it, all four from the pinned snapshot (§5.3 bans a
- * non-oracle USD in the risk path). ETH and eETH are money claims and are spelled out:
+ * Asset → the oracle price that values it, every one of them from the pinned snapshot (§5.3
+ * bans a non-oracle USD in the risk path). ETH and eETH are money claims and are spelled out:
  * ETH ≡ WETH by wrap and the matrix records that feed's own description as "ETH / USD";
  * eETH ≡ ETH 1:1 is the denomination Aave's own weETH source already assumes, its
  * description being "Capped weETH / eETH(ETH) / USD". The two assets with no reserve on
  * this market have no price here — a `null` badge, never a proxy.
+ *
+ * NO ASSET IS ASSUMED TO BE WORTH A DOLLAR, and USDC is the one that makes the rule visible:
+ * its Aave source is a CAPO-style capped adapter whose recorded description is
+ * "Capped USDC / USD" (read label `OracleSource(USDC).description`), and its recorded price
+ * at the pinned block is BELOW 1e8 — the feed itself disagrees with a peg, in the third
+ * decimal. Every USDC figure in this module therefore goes through `Oracle.getAssetPrice(USDC)`
+ * exactly like every other asset's; there is no stablecoin branch, and a `1` anywhere here
+ * would be a fabricated observation wearing a plausible number.
  */
 const PRICE_FEED: Readonly<Record<Asset, PriceFeed | null>> = {
   weETH: {
@@ -295,6 +330,11 @@ const PRICE_FEED: Readonly<Record<Asset, PriceFeed | null>> = {
     semantics:
       "priced by Oracle.getAssetPrice(WETH) — eETH ≡ ETH 1:1, the denomination Aave's own weETH source (\"Capped weETH / eETH(ETH) / USD\") already assumes",
   },
+  USDC: {
+    key: "USDC",
+    semantics:
+      "priced by Oracle.getAssetPrice(USDC) — a market feed with a governance cap on the upside, recorded as OracleSource(USDC).description = \"Capped USDC / USD\", not a fixed dollar",
+  },
   stETH: null,
   wstETH: null,
 };
@@ -308,7 +348,32 @@ interface Valuation {
   readonly note?: string;
 }
 
-function valueInBase(amountWei: bigint, asset: Asset, snapshot: ChainSnapshot): Valuation {
+/**
+ * WHICH side of the position a valuation is for — and therefore which way it rounds.
+ *
+ * Not a stylistic distinction: `GenericLogic` floors collateral and CEILS debt, so the
+ * protocol never over-accounts what secures a position nor under-accounts what threatens it.
+ * A single floor-everything valuation understates debt, which understates the debt base, which
+ * overstates the health factor — the optimistic direction, on the gating number.
+ */
+type ValuationSide = "collateral" | "debt";
+
+/**
+ * Base-currency value of a token amount, at the reserve's OWN `assetUnit`.
+ *
+ * The 18-decimal refusal this replaces was honest while the recorded matrix held no
+ * six-decimal reserve: applying an 1e18 divisor to a 1e6 token would have been off by a factor
+ * of 1e12, and refusing beat guessing. The matrix now records USDC (decimals READ, not
+ * assumed), so the general form — the protocol's own, `assetUnit = 10^decimals` — is inside
+ * the recorded set rather than outside it, and the refusal would now be the thing that lies:
+ * it would render the carry's health factor `unknown` while every input to it exists.
+ */
+function valueInBase(
+  amountWei: bigint,
+  asset: Asset,
+  snapshot: ChainSnapshot,
+  side: ValuationSide,
+): Valuation {
   const feed = PRICE_FEED[asset];
   if (feed === null) {
     return {
@@ -318,15 +383,6 @@ function valueInBase(amountWei: bigint, asset: Asset, snapshot: ChainSnapshot): 
     };
   }
   const reserve = snapshot.reserves[feed.key];
-  // `usdBase` is the 18-decimal form; anything else is outside the recorded matrix and
-  // refuses rather than silently applying the wrong scale.
-  if (reserve.decimals.value !== 18) {
-    return {
-      base: null,
-      price: reserve.priceBase,
-      expression: "base valuation for a non-18-decimal reserve is outside the recorded matrix",
-    };
-  }
   if (reserve.priceBase.value <= 0n) {
     return {
       base: null,
@@ -334,10 +390,18 @@ function valueInBase(amountWei: bigint, asset: Asset, snapshot: ChainSnapshot): 
       expression: `the feed that values ${asset} returned no usable price`,
     };
   }
+  const assetUnit = assetUnitOf(reserve.decimals.value);
+  const price = reserve.priceBase.value;
   return {
-    base: usdBase(amountWei, reserve.priceBase.value),
+    base:
+      side === "debt"
+        ? debtBaseValue(amountWei, price, assetUnit)
+        : collateralBaseValue(amountWei, price, assetUnit),
     price: reserve.priceBase,
-    expression: "floor(amountWei × priceBase / 1e18)",
+    expression:
+      side === "debt"
+        ? "mulDivCeil(amountWei, priceBase, 10^decimals) — GenericLogic ceils debt"
+        : "floor(amountWei × priceBase / 10^decimals) — GenericLogic floors collateral",
     note: `AaveOracle base currency (8-dec), ${feed.semantics}`,
   };
 }
@@ -346,10 +410,20 @@ function baseValueProv(
   amount: Provenanced<bigint>,
   asset: Asset,
   snapshot: ChainSnapshot,
+  side: ValuationSide,
 ): Provenanced<bigint> | null {
-  const valuation = valueInBase(amount.value, asset, snapshot);
+  const valuation = valueInBase(amount.value, asset, snapshot, side);
   if (valuation.base === null || valuation.price === null) return null;
-  return derived(valuation.base, valuation.expression, [amount, valuation.price], valuation.note);
+  const feed = PRICE_FEED[asset];
+  const decimals = feed === null ? [] : [snapshot.reserves[feed.key].decimals];
+  // The reserve's `decimals` observation is a genuine INPUT once the divisor is derived from
+  // it, so the provenance tree names it rather than hiding an 1e18 that used to be a literal.
+  return derived(
+    valuation.base,
+    valuation.expression,
+    [amount, valuation.price, ...decimals],
+    valuation.note,
+  );
 }
 
 // ————————————————————————— the ledger (§2.3) —————————————————————————
@@ -411,10 +485,16 @@ function totalDebtBaseOf(debts: readonly DebtLeg[]): bigint | null {
 }
 
 /**
- * The correlated-pair wei, defined only when the position is exactly one collateral reserve
+ * The single-pair wei, defined only when the position is exactly one collateral reserve
  * against exactly one debt reserve — the only shape §5.4's liquidation RATIO describes.
+ *
+ * "Single pair", not "correlated pair": the carry (weETH collateral, USDC debt) has this shape
+ * and is emphatically NOT correlated. The RATIO is well defined for both — it is a claim about
+ * two oracle prices — but the SENTENCE beside it is not: §5.4's depeg/slashing wording was
+ * written for weETH/WETH specifically, and the renderer chooses its copy from the pair's
+ * assets, never from the fact that a ratio exists.
  */
-function correlatedPairOf(
+function singlePairOf(
   supplies: readonly SupplyLeg[],
   debts: readonly DebtLeg[],
 ): { readonly collateralWei: bigint; readonly debtWei: bigint } | null {
@@ -436,7 +516,7 @@ function checkpointOf(
 ): RiskCheckpoint {
   const collateral = collateralEntriesOf(supplies);
   const totalDebtBase = totalDebtBaseOf(debts);
-  const pair = correlatedPairOf(supplies, debts);
+  const pair = singlePairOf(supplies, debts);
   return {
     blockId,
     cause,
@@ -502,7 +582,7 @@ function ledgerFrom(plan: PlanSuccess, snapshot: ChainSnapshot): RiskLedger {
         reserve: key,
         amountWei: amount.value,
         amountProv: amount,
-        baseProv: baseValueProv(amount, flow.inputAsset!, snapshot),
+        baseProv: baseValueProv(amount, flow.inputAsset!, snapshot, "collateral"),
         ltBps: effectiveLiquidationThresholdBps(reserve, targetCategory),
         ltInputs: ltInputsOf(reserve, targetCategory),
         ltvBps: effectiveLtvBps(reserve, targetCategory),
@@ -519,7 +599,7 @@ function ledgerFrom(plan: PlanSuccess, snapshot: ChainSnapshot): RiskLedger {
         reserve: key,
         amountWei: amount.value,
         amountProv: amount,
-        baseProv: baseValueProv(amount, flow.outputAsset!, snapshot),
+        baseProv: baseValueProv(amount, flow.outputAsset!, snapshot, "debt"),
         priceBase: reserve.priceBase,
       });
       checkpoints.push(checkpointOf(flow.blockId, "borrow", supplies, debts));
@@ -718,21 +798,25 @@ function borrowApyOf(
   return { kind: "apy", wad };
 }
 
-const RESERVE_KEYS = ["weETH", "WETH"] as const;
-
 interface ReserveRates {
   readonly supplyApy: ProvenancedRate | null;
   readonly borrowApy: ProvenancedRate | null;
 }
 
+/**
+ * The rate walk is generic over the reserve set — the USDC borrow leg's APY is the SAME
+ * post-action machinery (`borrowApyOf`) over the USDC reserve's own READ strategy params, not
+ * a stablecoin branch. `RESERVE_KEYS` is `core/plan.ts`'s single declaration, so a reserve
+ * cannot join the snapshot type and skip this loop.
+ */
 function reserveRatesOf(
   plan: PlanSuccess,
   snapshot: ChainSnapshot,
 ): Readonly<Record<ReserveKey, ReserveRates>> {
-  const added: Record<ReserveKey, bigint> = { weETH: 0n, WETH: 0n };
-  const taken: Record<ReserveKey, bigint> = { weETH: 0n, WETH: 0n };
-  const suppliedBy: Record<ReserveKey, AnyProvenanced[]> = { weETH: [], WETH: [] };
-  const borrowedBy: Record<ReserveKey, AnyProvenanced[]> = { weETH: [], WETH: [] };
+  const added: Record<ReserveKey, bigint> = { weETH: 0n, WETH: 0n, USDC: 0n };
+  const taken: Record<ReserveKey, bigint> = { weETH: 0n, WETH: 0n, USDC: 0n };
+  const suppliedBy: Record<ReserveKey, AnyProvenanced[]> = { weETH: [], WETH: [], USDC: [] };
+  const borrowedBy: Record<ReserveKey, AnyProvenanced[]> = { weETH: [], WETH: [], USDC: [] };
 
   for (const flow of plan.flows) {
     if (flow.type === "lend") {
@@ -749,6 +833,7 @@ function reserveRatesOf(
   const rates: Record<ReserveKey, ReserveRates> = {
     weETH: { supplyApy: null, borrowApy: null },
     WETH: { supplyApy: null, borrowApy: null },
+    USDC: { supplyApy: null, borrowApy: null },
   };
   for (const key of RESERVE_KEYS) {
     const reserve = snapshot.reserves[key];
@@ -821,16 +906,20 @@ function blockValuesOf(
     values[flow.blockId] = {
       inputAsset: flow.inputAsset,
       inputAmountWei: flow.inputWei,
+      // A block's rendered in/out value is a VALUATION of a token flow, not the protocol's
+      // debt accounting, so both sides floor. The ceiling belongs to the debt ledger above,
+      // where it is what `validateHFAndLtv` reads; applying it to a displayed flow amount
+      // would state a protocol conservatism about a number the protocol never sees.
       inputValueBase:
         flow.inputWei === null || flow.inputAsset === null
           ? null
-          : baseValueProv(flow.inputWei, flow.inputAsset, snapshot),
+          : baseValueProv(flow.inputWei, flow.inputAsset, snapshot, "collateral"),
       outputAsset,
       outputAmountWei,
       outputValueBase:
         outputAmountWei === null || outputAsset === null
           ? null
-          : baseValueProv(outputAmountWei, outputAsset, snapshot),
+          : baseValueProv(outputAmountWei, outputAsset, snapshot, "collateral"),
       // Gas needs estimateGas/feeHistory against a provider, which arrives with the sandbox
       // session in P3a. Until then every gas slot renders its authored unavailable state
       // rather than a quoted-looking zero.
@@ -859,25 +948,44 @@ function blockValuesOf(
  * Unqualified USD liquidation prices for a correlated pair stay banned (§5.4): no such field
  * exists here, so none can be rendered.
  */
-function liquidationRatioOf(min: RiskCheckpoint | null): Provenanced<bigint> | null {
+function liquidationRatioOf(
+  min: RiskCheckpoint | null,
+  snapshot: ChainSnapshot,
+): { readonly wad: Provenanced<bigint>; readonly pair: LiquidationPair } | null {
   if (min === null) return null;
   const { collateralWei, debtWei } = min;
-  // Non-null exactly when the position is a single correlated pair, which also makes both
-  // leg lists non-empty and gives every supply the same effective threshold.
+  // Non-null exactly when the position is a single collateral reserve against a single debt
+  // reserve, which also makes both leg lists non-empty and gives every supply the same
+  // effective threshold — and gives each side exactly one `decimals` observation to divide by.
   if (collateralWei === null || debtWei === null) return null;
   if (collateralWei <= 0n || debtWei <= 0n) return null;
   const first = min.supplies[0]!;
+  const debtLeg = min.debts[0]!;
   if (first.ltBps <= 0 || first.ltBps > 10_000) return null;
-  return derived(
-    liquidationRatioWad(collateralWei, debtWei, first.ltBps),
-    "debtWei × 1e4 × WAD / (collateralWei × ltBps), ceiling",
+  const collateralDecimals = snapshot.reserves[first.reserve].decimals;
+  const debtDecimals = snapshot.reserves[debtLeg.reserve].decimals;
+  const pair: LiquidationPair = { collateral: first.reserve, debt: debtLeg.reserve };
+  const wad = derived(
+    liquidationRatioWad(
+      collateralWei,
+      debtWei,
+      first.ltBps,
+      assetUnitOf(collateralDecimals.value),
+      assetUnitOf(debtDecimals.value),
+    ),
+    "debtWei × unitColl × 1e4 × WAD / (collateralWei × unitDebt × ltBps), ceiling",
     [
       ...min.supplies.map((s) => s.amountProv),
       ...min.debts.map((d) => d.amountProv),
       ...first.ltInputs,
+      // The two `decimals` reads are inputs the moment the units stop cancelling, which is
+      // exactly the mixed-decimals case this generalization exists for.
+      collateralDecimals,
+      debtDecimals,
     ],
-    "the collateral/debt oracle ratio at HF = 1, at the minimum-HF step",
+    "the collateral/debt oracle price ratio at HF = 1, at the minimum-HF step",
   );
+  return { wad, pair };
 }
 
 /**
@@ -891,7 +999,7 @@ function leverageOf(
 ): Provenanced<bigint> | null {
   if (initialAmountWei === null) return null;
   if (final === null || final.collateral === null || final.collateral.length === 0) return null;
-  const equity = valueInBase(initialAmountWei.value, "ETH", snapshot);
+  const equity = valueInBase(initialAmountWei.value, "ETH", snapshot, "collateral");
   if (equity.base === null || equity.base === 0n || equity.price === null) return null;
   let exposure = 0n;
   for (const entry of final.collateral) exposure += entry.base;
@@ -1096,6 +1204,7 @@ function refusal(errors: readonly PlanError[]): SimulationResult {
     minHealthFactor: unknown(),
     finalHealthFactor: unknown(),
     liquidationRatioWad: null,
+    liquidationPair: null,
     leverageWad: null,
     yieldSources: [],
     blockValues: {},
@@ -1133,6 +1242,9 @@ export function simulate(
 
   const inputFlow = plan.flows.find((f) => f.type === "input");
   const initialAmountWei = inputFlow === undefined ? null : inputFlow.outputWei;
+  // One derivation, two fields: the ratio and the pair it describes are minted together, so
+  // no renderer can pair a figure with the wrong two assets.
+  const liquidation = liquidationRatioOf(ledger.min, snapshot);
 
   return {
     isValid: true,
@@ -1142,7 +1254,8 @@ export function simulate(
     gasCostBase: null,
     minHealthFactor: mintHealthFactor(ledger.min, "the minimum across the plan"),
     finalHealthFactor: mintHealthFactor(ledger.final, "after the last risk-changing step"),
-    liquidationRatioWad: liquidationRatioOf(ledger.min),
+    liquidationRatioWad: liquidation === null ? null : liquidation.wad,
+    liquidationPair: liquidation === null ? null : liquidation.pair,
     leverageWad: leverageOf(ledger.final, initialAmountWei, snapshot),
     yieldSources,
     blockValues: blockValuesOf(plan, snapshot, rates, stakingApy),
