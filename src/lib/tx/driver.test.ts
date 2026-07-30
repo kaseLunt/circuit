@@ -1392,7 +1392,7 @@ describe("restore is bound to the document generation (thread 019fa749 finding 2
  * agreement and identity checks stay real. Shared by the round-6 and round-7 beats — an edit or a
  * second client can only land mid-flight against a call that is genuinely still out.
  */
-function heldSandbox(verb: "create" | "plan", overrides: ScriptOverrides = {}) {
+function heldSandbox(verb: "create" | "plan" | "executeStep", overrides: ScriptOverrides = {}) {
   const inner = scriptedSandbox(overrides);
   let announce!: () => void;
   const asked = new Promise<void>((resolve) => {
@@ -1402,19 +1402,27 @@ function heldSandbox(verb: "create" | "plan", overrides: ScriptOverrides = {}) {
   const released = new Promise<void>((resolve) => {
     release = () => resolve();
   });
-  const hold = async <T>(run: () => Promise<T>): Promise<T> => {
+  const hold = <T>(run: () => Promise<T>): Promise<T> => {
+    // The operation ENTERS the server immediately and only its ANSWER is withheld — which is what
+    // "in flight" means, and what the registry's deferred sweep is about: the mutex-holder is
+    // already past the lookup gate. A wrapper that deferred the call itself would be modelling a
+    // request that never left the client (round-13).
+    const started = run();
+    // The rejection still travels through the chain below; this only marks it handled meanwhile.
+    started.catch(() => undefined);
     announce();
-    await released;
-    return run();
+    return released.then(() => started);
   };
-  const transport: SandboxTransport = {
-    ...inner.transport,
-    ...(verb === "create"
+  const held: Partial<SandboxTransport> =
+    verb === "create"
       ? { create: () => hold(() => inner.transport.create()) }
-      : {
-          plan: (key: string, document: string) => hold(() => inner.transport.plan(key, document)),
-        }),
-  };
+      : verb === "plan"
+        ? { plan: (key: string, document: string) => hold(() => inner.transport.plan(key, document)) }
+        : {
+            executeStep: (key: string, planHash: string, stepIndex: number) =>
+              hold(() => inner.transport.executeStep(key, planHash, stepIndex)),
+          };
+  const transport: SandboxTransport = { ...inner.transport, ...held };
   return { ...inner, transport, asked, release };
 }
 
@@ -2259,5 +2267,95 @@ describe("an adopted tombstone retires the key it names (round-12)", () => {
     // Nothing further is asked of the dead key — no reset, no second lookup.
     expect(sandbox.calls.session).toBe(1);
     expect(sandbox.calls.reset).toBe(0);
+  });
+});
+
+
+/**
+ * Codex round-13 — A TOMBSTONE THE CLIENT ADOPTS MUST BE FINAL.
+ *
+ * The registry defers the sweep for a session holding the mutex, and its lookup used to answer that
+ * window with `session-expired` and a tombstone built from whatever had been recorded SO FAR. The
+ * running call could then add a settled receipt. Round-12 made adopting that payload consequential:
+ * the client adopts it as `abandoned` and retires the key, throwing away its only route to ask what
+ * the call finally did — a read-only card showing an incomplete record, and at the extreme
+ * "expired before any step executed" while a dispatch was still outstanding.
+ *
+ * The window now has its own refusal carrying no record at all. The client treats it as what it is:
+ * come back and look again.
+ */
+describe("the TTL boundary with a dispatch outstanding (round-13)", () => {
+  it("adopts nothing while the session is still finishing, then adopts the FINAL record", async () => {
+    const storage = memoryStorage();
+    // Step 0's dispatch is held open: it is in flight across the TTL boundary.
+    const sandbox = heldSandbox("executeStep");
+    const runner = new SandboxDriver({
+      transport: sandbox.transport,
+      storage,
+      now: () => 5_000,
+    });
+    await runner.arm(armInput);
+    const running = runner.execute();
+    await sandbox.asked;
+    const armedPointer = storage.held();
+
+    // The TTL passes while that dispatch is outstanding.
+    sandbox.expireInFlight();
+
+    // A reload — or a second tab — looks now. It is told to come back, and it keeps everything:
+    // the key it would need to look again is the whole point.
+    const reloaded = new SandboxDriver({
+      transport: sandbox.transport,
+      storage,
+      now: () => 5_000,
+    });
+    await reloaded.restore(armInput);
+    expect(reloaded.snapshot().machine.phase.kind).toBe("idle");
+    expect(reloaded.snapshot().machine.record).toBeNull();
+    expect(reloaded.snapshot().fault).toMatchObject({
+      kind: "refusal",
+      stage: "resume",
+      refusal: { kind: "expiring-in-flight" },
+      retry: "reload",
+    });
+    // Nothing was adopted, so nothing could have been armed over it either: the pointer still names
+    // the run that is finishing.
+    expect(storage.held()).toBe(armedPointer);
+
+    // The outstanding dispatch settles its receipt, and only then is the session swept.
+    sandbox.release();
+    await running;
+    sandbox.expire();
+
+    // Looking again adopts the FINAL record — including the evidence that landed after the boundary.
+    await reloaded.retry();
+    const snap = reloaded.snapshot();
+    expect(snap.machine.phase).toMatchObject({ kind: "abandoned", executedSteps: 1 });
+    expect(snap.machine.record?.settled.length).toBe(1);
+    expect(snap.fault).toBeNull();
+  });
+
+  it("the transient refusal retires nothing, so the retry has a key to look with", async () => {
+    const storage = memoryStorage();
+    const sandbox = heldSandbox("executeStep");
+    const runner = new SandboxDriver({ transport: sandbox.transport, storage, now: () => 5_000 });
+    await runner.arm(armInput);
+    const running = runner.execute();
+    await sandbox.asked;
+    sandbox.expireInFlight();
+
+    const reloaded = new SandboxDriver({ transport: sandbox.transport, storage, now: () => 5_000 });
+    await reloaded.restore(armInput);
+    const lookupsAfterFirst = sandbox.calls.session;
+    expect(lookupsAfterFirst).toBe(1);
+
+    // The retry looks AGAIN at the same session — which is only possible because the transient
+    // refusal retired neither the key nor the binding.
+    await reloaded.retry();
+    expect(sandbox.calls.session).toBe(2);
+    expect(reloaded.snapshot().fault).toMatchObject({ refusal: { kind: "expiring-in-flight" } });
+
+    sandbox.release();
+    await running;
   });
 });

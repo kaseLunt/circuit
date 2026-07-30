@@ -143,6 +143,12 @@ export type SandboxRefusal =
       readonly tombstone: SessionTombstone;
     }
   | { readonly kind: "session-busy" }
+  /**
+   * The TTL passed while an operation still held the session (round-13). Transient by
+   * construction: the caller retries and gets the final tombstone once the operation releases.
+   * It carries no record — the point of the distinction is that no final record exists yet.
+   */
+  | { readonly kind: "expiring-in-flight" }
   | { readonly kind: "rate-limited"; readonly retryAfterMs: number }
   | { readonly kind: "tx-cap" }
   | { readonly kind: "at-capacity" }

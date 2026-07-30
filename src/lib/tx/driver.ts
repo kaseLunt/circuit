@@ -93,7 +93,8 @@ export type DriverFault =
       readonly kind: "refusal";
       readonly stage: DriverStage;
       readonly refusal: SandboxRefusalFact;
-      readonly retry: "arm" | "run";
+      /** `reload` joins the two at round-13: a transient expiry is answered by looking again. */
+      readonly retry: "arm" | "run" | "reload";
     }
   | {
       readonly kind: "transport-failed";
@@ -267,8 +268,9 @@ const detailOf = (cause: unknown): string =>
  *   removed. A reset cannot clear any of them; the key is retired and the next attempt creates.
  *
  * `transient` — nothing about the session is proven. `session-busy` is the one-at-a-time mutex held
- *   by another caller (`beginExclusive` refuses this and nothing else) and `rate-limited` is the
- *   session's own floor: the key stays, the fork flag stays, and the identical call is legal the
+ *   by another caller (`beginExclusive` refuses this and nothing else), `rate-limited` is the
+ *   session's own floor, and `expiring-in-flight` is the TTL passing while an operation still holds
+ *   the session (round-13): the key stays, the fork flag stays, and the identical call is legal the
  *   moment the mutex frees. Retiring here is how a live session gets abandoned at the cap.
  *
  * `not-session-state` — an execute/reconcile-stage bookkeeping refusal that says nothing about a
@@ -290,6 +292,7 @@ function sessionVerdictOf(refusal: SandboxRefusalFact): SessionVerdict {
     case "reset-failed":
       return "key-dead";
     case "session-busy":
+    case "expiring-in-flight":
     case "rate-limited":
       return "transient";
     case "at-capacity":
@@ -939,7 +942,14 @@ export class SandboxDriver {
       this.dispatch({ type: "session-lost", executedSteps: refusal.executedSteps });
       return "stop";
     }
-    if (refusal.kind === "session-busy" || refusal.kind === "rate-limited") {
+    if (
+      refusal.kind === "session-busy" ||
+      refusal.kind === "rate-limited" ||
+      refusal.kind === "expiring-in-flight"
+    ) {
+      // `expiring-in-flight` joins the transient pair (round-13): the session is finishing a call,
+      // and re-entering the loop is what discovers how it ended — never a rehydration that adopts
+      // a record still being written.
       this.setFault({ kind: "refusal", stage: "reconcile", refusal, retry: "run" });
       return "stop";
     }
@@ -1055,6 +1065,23 @@ export class SandboxDriver {
         this.machine = createExecutionMachine({ mode: "sandbox" });
         this.plannedAtMs = null;
         this.notify();
+        return false;
+      }
+      if (
+        outcome.refusal.kind === "unresumable-refusal" &&
+        outcome.refusal.refusal === "expiring-in-flight"
+      ) {
+        // The TTL passed while the session still held an operation (Codex round-13). There is no
+        // final record yet — the running call may still settle a receipt — so nothing is adopted
+        // and NOTHING is retired: the key is the only route back to the record that call is about
+        // to complete. The state is retryable in the driver's own reload grammar, and the next
+        // look answers with the tombstone once the operation releases.
+        this.setFault({
+          kind: "refusal",
+          stage: "resume",
+          refusal: { kind: "expiring-in-flight" },
+          retry: "reload",
+        });
         return false;
       }
       if (silentStale && outcome.refusal.kind !== "money-claim-mismatch") {

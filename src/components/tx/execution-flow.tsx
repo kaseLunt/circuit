@@ -76,6 +76,12 @@ function faultCopy(fault: DriverFault): { title: string; explanation: string } {
           explanation:
             "One call at a time holds the session; the previous one has not returned.",
         };
+      case "expiring-in-flight":
+        return {
+          title: "This session is finishing its last call.",
+          explanation:
+            "Its time limit passed while a call was still running, so the record is not final yet. Looking again once that call returns reads the completed record.",
+        };
       case "rate-limited":
         return {
           title: "Rate limited.",

@@ -159,6 +159,14 @@ export interface ScriptedSandbox {
    * and would let a dead key keep answering `plan` (Codex round-12).
    */
   expire(): void;
+  /**
+   * The TTL boundary WITH an operation still holding the session (round-13): new callers are
+   * refused `expiring-in-flight` and no tombstone exists yet, while the call that was already
+   * dispatched runs to completion and settles its evidence. The guard sits at call entry, so an
+   * operation dispatched before this point is unaffected — which is exactly the registry's own
+   * shape, where `lookup` gates entry and the mutex-holder is already past it.
+   */
+  expireInFlight(): void;
 }
 
 export interface ScriptOverrides {
@@ -195,6 +203,7 @@ export function scriptedSandbox(overrides: ScriptOverrides = {}): ScriptedSandbo
   let executed: WireStepResult[] = [];
   let phase: ScriptedPhase = { kind: "active" };
   let swept = false;
+  let expiringInFlight = false;
 
   const tombstone = (): WireTransportRefusal => ({
     kind: "session-expired",
@@ -231,6 +240,7 @@ export function scriptedSandbox(overrides: ScriptOverrides = {}): ScriptedSandbo
       executed = [];
       phase = { kind: "active" };
       swept = false;
+      expiringInFlight = false;
       return {
         ok: true,
         session: {
@@ -246,6 +256,7 @@ export function scriptedSandbox(overrides: ScriptOverrides = {}): ScriptedSandbo
     plan: async (_sessionKey, document) => {
       calls.plan += 1;
       if (swept) return { ok: false, refusal: tombstone() };
+      if (expiringInFlight) return { ok: false, refusal: { kind: "expiring-in-flight" } };
       const bent = overrides.onPlan?.();
       if (bent !== undefined) return bent;
       // `planForSession`'s gates, in ITS order (round-7/round-8): the phase first — a halted or
@@ -275,6 +286,7 @@ export function scriptedSandbox(overrides: ScriptOverrides = {}): ScriptedSandbo
     executeStep: async (_sessionKey, _planHash, stepIndex) => {
       calls.executeStep.push(stepIndex);
       if (swept) return { ok: false, refusal: tombstone() };
+      if (expiringInFlight) return { ok: false, refusal: { kind: "expiring-in-flight" } };
       if (planned === null) return { ok: false, refusal: { kind: "no-plan" } };
       const record = (result: WireStepResult): void => {
         if (executed[stepIndex] !== undefined) return;
@@ -298,6 +310,7 @@ export function scriptedSandbox(overrides: ScriptOverrides = {}): ScriptedSandbo
     session: async () => {
       calls.session += 1;
       if (swept) return { ok: false, refusal: tombstone() };
+      if (expiringInFlight) return { ok: false, refusal: { kind: "expiring-in-flight" } };
       const bent = overrides.onSession?.();
       if (bent !== undefined) return bent;
       return summary();
@@ -305,6 +318,7 @@ export function scriptedSandbox(overrides: ScriptOverrides = {}): ScriptedSandbo
     reconcile: async () => {
       calls.reconcile += 1;
       if (swept) return { ok: false, refusal: tombstone() };
+      if (expiringInFlight) return { ok: false, refusal: { kind: "expiring-in-flight" } };
       const bent = overrides.onReconcile?.();
       if (bent !== undefined) return bent;
       return { ok: false, refusal: { kind: "nothing-to-reconcile" } };
@@ -312,6 +326,7 @@ export function scriptedSandbox(overrides: ScriptOverrides = {}): ScriptedSandbo
     reset: async () => {
       calls.reset += 1;
       if (swept) return { ok: false, refusal: tombstone() };
+      if (expiringInFlight) return { ok: false, refusal: { kind: "expiring-in-flight" } };
       const bent = overrides.onReset?.();
       if (bent !== undefined) return bent;
       // `registry.reset`: a restored base is active, plan-less and entry-free.
@@ -332,6 +347,9 @@ export function scriptedSandbox(overrides: ScriptOverrides = {}): ScriptedSandbo
     executed: () => executed,
     expire: () => {
       swept = true;
+    },
+    expireInFlight: () => {
+      expiringInFlight = true;
     },
   };
 }

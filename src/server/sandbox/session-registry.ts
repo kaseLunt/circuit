@@ -381,6 +381,13 @@ export interface SessionExpiredRefusal {
 export type LookupOutcome =
   | { readonly ok: true; readonly session: Session }
   | { readonly ok: false; readonly refusal: { readonly kind: "unknown-session" } }
+  /**
+   * The TTL passed while an operation still held the session (round-13). Distinct from
+   * `SessionExpiredRefusal` because it carries NO tombstone: the running call can still append
+   * evidence, so there is no final record to hand over, and a client that adopted one would be
+   * adopting a provisional read as though it were the end of the story.
+   */
+  | { readonly ok: false; readonly refusal: { readonly kind: "expiring-in-flight" } }
   | { readonly ok: false; readonly refusal: SessionExpiredRefusal };
 
 export type BeginOutcome =
@@ -621,8 +628,20 @@ export function createSessionRegistry(
       await sweepExpired();
       const session = sessions.get(key);
       if (session !== undefined) {
-        // Expired but still busy (sweep deferred, finding 4): refuse with the live
-        // evidence rather than serving a session past its TTL.
+        // Expired but still busy (sweep deferred, finding 4): the fork survives its in-flight
+        // operation, and so does the RECORD — the running call can still append a settled receipt
+        // or recovery evidence. A `session-expired` payload is a TOMBSTONE, and a tombstone the
+        // client adopts is final: it retires the key on it, giving up its route to ask again
+        // (Codex round-13). So this window gets its own refusal, carrying no record at all,
+        // because there is no final record yet to carry.
+
+        // Expired and quiescent: the sweep above did not collect it (it crossed the boundary
+        // during those awaits), but nothing holds the mutex, and every subsequent lookup refuses,
+        // so no operation can start and no evidence can be added. The record is final in fact,
+        // and the next sweep entombs it.
+        if (isExpired(session) && session.inFlight) {
+          return { ok: false, refusal: { kind: "expiring-in-flight" } };
+        }
         if (isExpired(session)) {
           const tombstone = tombstoneOf(session);
           return {

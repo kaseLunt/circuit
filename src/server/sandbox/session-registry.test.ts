@@ -245,11 +245,14 @@ describe("TTL expiry", () => {
     expect(registry.beginExecution(session).ok).toBe(true);
 
     nowMs.value = 2000;
-    // A concurrent caller sees the expiry, but the fork survives the in-flight op.
+    // A concurrent caller sees the expiry, but the fork survives the in-flight op — and what it is
+    // told is NOT a tombstone (Codex round-13): the running call can still append to this record,
+    // so there is nothing final to hand over yet.
     const during = await registry.lookup(session.key);
     expect(during.ok).toBe(false);
     if (during.ok) throw new Error("unreachable");
-    expect(during.refusal.kind).toBe("session-expired");
+    expect(during.refusal.kind).toBe("expiring-in-flight");
+    expect(during.refusal).not.toHaveProperty("tombstone");
     expect(fork.destroyed).toBe(0);
     expect(registry.sessionCount()).toBe(1);
 
@@ -260,6 +263,37 @@ describe("TTL expiry", () => {
     expect(after.refusal.kind).toBe("session-expired");
     expect(fork.destroyed).toBe(1);
     expect(registry.sessionCount()).toBe(0);
+  });
+
+  it("the record a tombstone carries is final: evidence added in flight lands in it (round-13)", async () => {
+    const nowMs = { value: 0 };
+    const registry = createSessionRegistry(config({ ttlMs: 1000, nowMs }));
+    const created = await registry.create(async () => fakeFork());
+    if (!created.ok) throw new Error("creation refused");
+    const session = created.session;
+    expect(registry.beginExecution(session).ok).toBe(true);
+
+    // The TTL passes with the dispatch still outstanding. A caller looking now is told to come
+    // back — and this is exactly why: the record it would have been handed is about to change.
+    nowMs.value = 2000;
+    const during = await registry.lookup(session.key);
+    if (during.ok || during.refusal.kind !== "expiring-in-flight") {
+      throw new Error(`expected the transient refusal, got ${during.ok ? "ok" : during.refusal.kind}`);
+    }
+
+    // The in-flight operation settles its receipt AFTER the boundary, then releases.
+    appendTestEntry(registry, session);
+    registry.endExecution(session);
+
+    const after = await registry.lookup(session.key);
+    if (after.ok || after.refusal.kind !== "session-expired") {
+      throw new Error(`expected the tombstone, got ${after.ok ? "ok" : after.refusal.kind}`);
+    }
+    // The late evidence is in the tombstone. Under the old conflation the first lookup would have
+    // handed over a record with zero executed steps, and a client that adopted it would have shown
+    // "expired before any step executed" over a step that had in fact landed.
+    expect(after.refusal.executedSteps).toBe(1);
+    expect(after.refusal.tombstone.executed.length).toBe(1);
   });
 
   it("tombstones carry pending recovery evidence: attribution-pending cell", async () => {

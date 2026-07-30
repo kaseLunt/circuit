@@ -221,6 +221,8 @@ export type SandboxRefusalFact =
   | { readonly kind: "unknown-session" }
   | { readonly kind: "session-expired"; readonly executedSteps: number }
   | { readonly kind: "session-busy" }
+  /** The TTL passed with an operation still holding the session — transient (round-13). */
+  | { readonly kind: "expiring-in-flight" }
   | { readonly kind: "rate-limited"; readonly retryAfterMs: number }
   | { readonly kind: "tx-cap" }
   | { readonly kind: "at-capacity" }
