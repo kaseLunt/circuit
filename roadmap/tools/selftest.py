@@ -1266,6 +1266,53 @@ def test_completion_scopes_re_arm(root: Path) -> None:
         and "W1" in output(archived),
         output(archived),
     )
+    reset(repo, evasion_base)
+
+    # TWO-COMMIT EVASIONS (Codex round 5): the departure itself — archive, rephase, or
+    # delete a drifted achieved item WITHOUT any phase exit in the commit — must block,
+    # or a later completion sees nothing left to re-arm for.
+    write(
+        repo / "roadmap" / "work" / "W1.md",
+        read(repo / "roadmap" / "work" / "W1.md").replace(
+            "status: achieved", "status: archived"
+        ),
+    )
+    must(git(repo, "add", "roadmap"), "stage bare archive departure")
+    bare_archive = tool(repo, "scope_gate.py", env={"CONTROL_PLANE_OWNER_REVIEWED": "1"})
+    check(
+        "departure:bare-archive-blocked",
+        bare_archive.returncode == 1
+        and "terminal transition" in output(bare_archive)
+        and "W1" in output(bare_archive),
+        output(bare_archive),
+    )
+    reset(repo, evasion_base)
+
+    write(
+        repo / "roadmap" / "work" / "W1.md",
+        read(repo / "roadmap" / "work" / "W1.md").replace("phase: P1", "phase: P0"),
+    )
+    must(git(repo, "add", "roadmap"), "stage bare rephase departure")
+    bare_rephase = tool(repo, "scope_gate.py", env={"CONTROL_PLANE_OWNER_REVIEWED": "1"})
+    check(
+        "departure:bare-rephase-blocked",
+        bare_rephase.returncode == 1
+        and "terminal transition" in output(bare_rephase)
+        and "W1" in output(bare_rephase),
+        output(bare_rephase),
+    )
+    reset(repo, evasion_base)
+
+    (repo / "roadmap" / "work" / "W1.md").unlink()
+    must(git(repo, "add", "-u", "roadmap"), "stage bare deletion departure")
+    bare_delete = tool(repo, "scope_gate.py", env={"CONTROL_PLANE_OWNER_REVIEWED": "1"})
+    check(
+        "departure:bare-deletion-blocked",
+        bare_delete.returncode == 1
+        and "cannot disappear" in output(bare_delete)
+        and "W1" in output(bare_delete),
+        output(bare_delete),
+    )
 
 
 def test_enforcement_posture(root: Path) -> None:

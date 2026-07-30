@@ -256,10 +256,30 @@ def transition_currency_errors(
 
     before_work = work_records(before)
     after_work = work_records(after)
+    errors: list[str] = []
     for work_id, (path, data, status, _phase) in after_work.items():
         old = before_work.get(work_id)
         if status == "achieved" and (old is None or old[2] != "achieved"):
             strict[work_id] = (path, data)
+
+    # ANY departure from achieved standing owes currency AT the departing commit —
+    # in every commit, not only the one that exits the phase (Codex round 5: checking
+    # exit commits alone let a drifted item be archived, rephased, or deleted one
+    # owner-acknowledged commit EARLIER, and the later exit's before snapshot then
+    # showed nothing to re-arm for). An achieved item may be reclassified only with
+    # current evidence, or with its drift explained first through a receipt revision.
+    for work_id, (_path, _data, status, phase) in before_work.items():
+        if status != "achieved":
+            continue
+        survivor = after_work.get(work_id)
+        if survivor is None:
+            errors.append(
+                f"terminal transition re-arms D-006 for {work_id}: achieved work cannot "
+                "disappear in a transition; its evidence debt is unresolved"
+            )
+            continue
+        if survivor[2] != "achieved" or survivor[3] != phase:
+            strict[work_id] = (survivor[0], survivor[1])
 
     old_phase = status_field(before, "active_phase")
     new_phase = status_field(after, "active_phase")
@@ -268,7 +288,6 @@ def transition_currency_errors(
         status_field(before, "project_state") != "complete"
         and status_field(after, "project_state") == "complete"
     )
-    errors: list[str] = []
     if phase_exited or completed:
         # Only the phase being CLOSED re-arms — the before snapshot's active_phase (on
         # completion the pointer stays as the last phase, so old_phase names it). Phases
@@ -284,13 +303,9 @@ def transition_currency_errors(
             if status != "achieved" or phase != old_phase:
                 continue
             survivor = after_work.get(work_id)
-            if survivor is None:
-                errors.append(
-                    f"terminal transition re-arms D-006 for {work_id}: the achieved work "
-                    "object of the exiting phase is absent from the transition's result"
-                )
-                continue
-            strict[work_id] = (survivor[0], survivor[1])
+            # Absence is already an error from the departure rule above.
+            if survivor is not None:
+                strict[work_id] = (survivor[0], survivor[1])
 
     for work_id, (path, data) in sorted(strict.items()):
         try:
