@@ -310,6 +310,39 @@ const eslintConfig = [
     },
   },
   {
+    // Codex round-2 finding 3: `src/components/wallet/**` is the RENDERING half of the same
+    // boundary, and it was exempt. The wagmi `ignores` above un-bans the injected-provider
+    // VALUE surface for these files — correctly, they render it — but the core-money value ban
+    // stopped at `src/lib/wallet/**`, so a wallet component could hold a wagmi account hook
+    // and a `buildPlan`/`riskLedger` value in the same module: transport facts one expression
+    // away from money-math, which is the exact adjacency D-011 F5(b) exists to prevent.
+    //
+    // Same rule, same reasoning, one directory over: TYPES cross (the refusal card's
+    // `LiveExecuteRefusal` parameter names them), VALUES do not — the composer computes money
+    // and passes results in as props. Only the typescript-eslint rule is set here, so the
+    // `src/components/**` block's syntax bans above still apply to these files (flat config
+    // replaces options per RULE, not per file).
+    files: [
+      "src/components/wallet/**/*.{ts,tsx}",
+      "tests/lint/fixtures/components-wallet/**/*.{ts,tsx}",
+    ],
+    rules: {
+      "@typescript-eslint/no-restricted-imports": [
+        "error",
+        {
+          patterns: [
+            {
+              group: ["**/core/plan", "**/core/risk", "**/core/borrow-limit", "**/core/rates"],
+              allowTypeImports: true,
+              message:
+                "src/components/wallet may import core money-math types only — compute money values outside the wallet surface and pass them in as props (Codex round-2 finding 3, extending D-011 F5b).",
+            },
+          ],
+        },
+      ],
+    },
+  },
+  {
     // The other half of the same boundary: the attribution module is pure by contract, so
     // its purity is lint-enforced rather than asserted in a docstring. Every chain read it
     // performs arrives through the injected `AttributionReads`.

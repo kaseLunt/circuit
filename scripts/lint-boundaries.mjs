@@ -85,6 +85,15 @@ const EXPECTED = {
     ["wallet-imports-core-borrow-limit", "@typescript-eslint/no-restricted-imports"],
     ["wallet-imports-core-rates", "@typescript-eslint/no-restricted-imports"],
   ],
+  // Codex round-2 finding 3: the same ban on the wallet's RENDERING surface, which wagmi is
+  // legal in and which the F5(b) rule had left out. Same four routes, same legal type-only
+  // line whose SILENCE the exact-multiset check also asserts.
+  "tests/lint/fixtures/components-wallet/imports-core-money.ts": [
+    ["components-wallet-imports-core-plan", "@typescript-eslint/no-restricted-imports"],
+    ["components-wallet-imports-core-risk", "@typescript-eslint/no-restricted-imports"],
+    ["components-wallet-imports-core-borrow-limit", "@typescript-eslint/no-restricted-imports"],
+    ["components-wallet-imports-core-rates", "@typescript-eslint/no-restricted-imports"],
+  ],
   "tests/lint/fixtures/execution/impure.ts": [
     ["react", "no-restricted-imports"],
     ["react-dom", "no-restricted-imports"],
