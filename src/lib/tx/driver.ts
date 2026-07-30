@@ -298,6 +298,16 @@ function sessionVerdictOf(refusal: SandboxRefusalFact): SessionVerdict {
   }
 }
 
+/**
+ * The pointer's binding, in ONE definition (Codex round-9): a stored pointer's evidence may bind to
+ * exactly one plan — the one whose money-bearing fingerprint it carries. Step identity cannot stand
+ * in for this: two plans with the same topology and different amounts agree step for step, and a
+ * session whose only record is a first-step failure has no settled money row left to disagree over.
+ */
+function pointerVouchesFor(pointer: SessionPointer | null, plan: PlanSuccess): boolean {
+  return pointer !== null && planHashOf(plan.steps) === pointer.fingerprint;
+}
+
 /** The two plan-stage refusal kinds the resume mirror deliberately omits. */
 const isPlanStageRefusal = (
   refusal: WireTransportRefusal,
@@ -931,13 +941,22 @@ export class SandboxDriver {
    * retained pointer — never re-derived. `silentStale` is the mount-restore mode: a
    * pointer the current document can no longer vouch for is DISCARDED without a fault
    * (judgment call 6); the fault-retry mode surfaces the same refusal as a wire fault.
+   *
+   * The pairing is GATED here, at the one place a plan and a hash meet (Codex round-9). A live
+   * machine's pair is self-consistent — both were adopted together at `plan-ready` — but the
+   * fallback pair is not: `lastArm` is the NEWEST arm and `retainedPlanHash` belongs to the run the
+   * pointer names, and after a failed run is re-simulated those are different plans. So whenever
+   * the plan comes from the fallback, the stored pointer has to vouch for it, exactly as `restore`
+   * demands at mount. It cannot be checked in the callers: `retry`'s reload family is one of three
+   * routes in, and the invariant belongs to the pairing rather than to any one of them.
    */
   private async rehydrate(
     silentStale = false,
     stillCurrent: () => boolean = () => true,
   ): Promise<boolean> {
     const key = this.sessionKey;
-    const plan = this.machine.plan ?? this.lastArm?.plan ?? null;
+    const adopted = this.machine.plan;
+    const plan = adopted ?? this.lastArm?.plan ?? null;
     const planHash = this.machine.planHash ?? this.retainedPlanHash;
     if (key === null || plan === null || planHash === null) {
       this.setFault({
@@ -945,6 +964,17 @@ export class SandboxDriver {
         detail: "nothing to rehydrate: no session, plan, or plan hash",
         retry: "reload",
       });
+      return false;
+    }
+    if (adopted === null && !pointerVouchesFor(parsePointer(this.storage.read()), plan)) {
+      // The retained hash names a run this plan cannot claim. Nothing is looked up, because there
+      // is no answer that could legally be adopted: the evidence would be another plan's, rendered
+      // against this one. The pointer retires under the stale-pointer ruling and the landing is the
+      // one every discarded attempt reaches — a fresh arm of the current document, and no offer
+      // that re-runs a plan the canvas has replaced.
+      this.retainedPlanHash = null;
+      this.storage.clear();
+      this.notify();
       return false;
     }
     let transportResponse;
@@ -1051,12 +1081,12 @@ export class SandboxDriver {
       const pointer = parsePointer(this.storage.read());
       if (pointer === null) return;
       // Codex hard-gate finding 1: the pointer binds to the MONEY-BEARING fingerprint
-      // of the plan that was armed. The current document's plan must recompute to the
-      // same hash BEFORE anything is looked up or adopted — step identity alone cannot
-      // distinguish same-topology plans with different amounts. A mismatch retires the
-      // pointer silently (the stale-pointer ruling): the run it names belongs to a
-      // document no longer on the canvas.
-      if (planHashOf(input.plan.steps) !== pointer.fingerprint) {
+      // of the plan that was armed, and the current document's plan must recompute to the
+      // same hash BEFORE anything is looked up or adopted. The comparison itself is
+      // `pointerVouchesFor`, shared with `rehydrate` (round-9) so the binding has one
+      // definition. A mismatch retires the pointer silently (the stale-pointer ruling):
+      // the run it names belongs to a document no longer on the canvas.
+      if (!pointerVouchesFor(pointer, input.plan)) {
         this.storage.clear();
         return;
       }

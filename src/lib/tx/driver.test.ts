@@ -28,6 +28,7 @@ import {
   localPointerStorage,
   parsePointer,
   planAgreementFailure,
+  type PointerStorage,
 } from "./driver";
 
 const graph = flagshipGraph();
@@ -1773,5 +1774,167 @@ describe("a refusal is classified by what it proves (round-8)", () => {
     expect(driver.snapshot().fault).toBeNull();
     expect(sandbox.calls.reset).toBe(2);
     expect(sandbox.calls.create).toBe(1);
+  });
+});
+
+/**
+ * Codex round-9 — A POINTER'S EVIDENCE BINDS TO ONE PLAN.
+ *
+ * `rehydrate` pairs a plan with a plan hash, and when the machine is empty it takes them from two
+ * different places: the plan from `lastArm` (the NEWEST arm) and the hash from `retainedPlanHash`
+ * (the run the pointer names). After a failed run is re-simulated those are different plans, and the
+ * round-8 reset fallback opened the door — an out-of-contract reset refusal advertises the reload
+ * family while retaining the old hash.
+ *
+ * `restore` had always checked the money-bearing fingerprint before adopting anything; the reload
+ * retry never did. Same-topology plans agree step for step, and a session whose only record is a
+ * first-step failure has no settled money row left to disagree over — so plan A's run could be
+ * adopted, and rendered, under plan B. The check now lives at the pairing itself.
+ */
+describe("a retained hash binds only to the plan the pointer named (round-9)", () => {
+  /** Plan B: the same strategy at a different borrow allocation — same steps, different money. */
+  const graphB = flagshipGraph("10", 5_000);
+  const planB: PlanSuccess = (() => {
+    const built = buildPlan(graphB, snapshot);
+    if (!built.ok) throw new Error("plan B failed to build");
+    return built;
+  })();
+  const tokenB: string = (() => {
+    const encoded = encodeShareGraph(graphB);
+    if (!encoded.ok) throw new Error("document B failed to encode");
+    return encoded.token;
+  })();
+  const armInputB = { plan: planB, token: tokenB };
+
+  /** A first-step revert, and a reset stage that answers out of contract exactly once. */
+  function failedRunThenBrokenReset() {
+    const base = wireAttributed(plan, 0);
+    if (base.status !== "attributed") throw new Error("fixture");
+    let outOfContract = true;
+    return scriptedSandbox({
+      onExecuteStep: (index) =>
+        index === 0
+          ? {
+              ok: true,
+              result: {
+                status: "failed",
+                failure: {
+                  stepIndex: 0,
+                  stepId: base.stepId,
+                  txHash: wireHash(0xdead),
+                  decoded: { message: "health factor too low", raw: "0x36", source: "custom-error" },
+                  raw: "0xdeadbeef",
+                },
+              },
+            }
+          : undefined,
+      // `tx-cap` cannot honestly come back from a reset, so the round-8 classifier lands it on
+      // wire-mismatch / reload — the one fault family that rehydrates.
+      onReset: () => {
+        if (!outOfContract) return undefined;
+        outOfContract = false;
+        return { ok: false, refusal: { kind: "tx-cap" } };
+      },
+    });
+  }
+
+  it("proves its own premise: B is A's topology with different money", () => {
+    const identity = (candidate: PlanSuccess) =>
+      candidate.steps.map((step) => `${step.id}@${step.index}`);
+    expect(identity(planB)).toEqual(identity(plan));
+    expect(planHashOf(planB.steps)).not.toBe(planHashOf(plan.steps));
+  });
+
+  it("adopts no evidence from the run the pointer named when the plan has moved on", async () => {
+    const sandbox = failedRunThenBrokenReset();
+    const { driver, storage } = driverWith(sandbox);
+    await driver.arm(armInput);
+    await driver.execute();
+    expect(driver.snapshot().machine.phase).toMatchObject({ kind: "failed-at", stepIndex: 0 });
+    expect(storage.held()).not.toBeNull();
+
+    // The user re-simulates the EDITED document, and the reset stage answers out of contract: the
+    // fault offers "Reload session state" while the retained hash still belongs to plan A.
+    await driver.arm(armInputB);
+    expect(driver.snapshot().fault).toMatchObject({
+      kind: "wire-mismatch",
+      stage: "reset",
+      retry: "reload",
+    });
+
+    await driver.retry();
+
+    // The claim, first: plan A's run is not adopted, so nothing of A's can be rendered against B.
+    expect(driver.snapshot().machine.phase.kind).toBe("idle");
+    expect(driver.snapshot().machine.record).toBeNull();
+    expect(driver.snapshot().machine.planHash).toBeNull();
+    expect(driver.snapshot().machine.plan).toBeNull();
+    expect(driver.snapshot().fault).toBeNull();
+    // And its corollary: nothing was even looked up, because no answer to that lookup could have
+    // been legally adopted — asking only produces another plan's evidence to render against this one.
+    expect(sandbox.calls.session).toBe(0);
+    // The pointer retires with the binding it can no longer honour.
+    expect(storage.held()).toBeNull();
+
+    // What remains on offer is a fresh arm of the document on the canvas, and it is B that arms.
+    await driver.arm(armInputB);
+    expect(driver.snapshot().machine.phase.kind).toBe("ready");
+    const served = sandbox.planned();
+    if (served === null) throw new Error("the scripted server planned nothing");
+    expect(planHashOf(served.steps)).toBe(planHashOf(planB.steps));
+  });
+
+  /**
+   * The scope of the gate, pinned (it is a decision, so it is asserted rather than assumed).
+   *
+   * The binding is demanded only when the plan comes from the FALLBACK. A live machine's plan and
+   * hash were adopted together at `plan-ready` and cannot disagree, and demanding a pointer for them
+   * would break mid-run recovery wherever there IS no pointer: `localPointerStorage` degrades to no
+   * persistence in a private window, so a lost response during a committed run would strand a
+   * session the server can still account for — D6 discovery traded away for a check that had nothing
+   * to check.
+   */
+  it("recovers a committed run by rehydration with no pointer in storage at all", async () => {
+    let lostOnce = true;
+    const sandbox = scriptedSandbox({
+      onExecuteStep: (index, canonical, record) => {
+        if (index === 2 && lostOnce) {
+          lostOnce = false;
+          // The server executed and the RESPONSE was lost: the D6 dark case, recovered by
+          // discovery through `sandbox.session`.
+          if (canonical.ok) record(canonical.result);
+          throw new Error("the response never arrived");
+        }
+        return undefined;
+      },
+    });
+    const denied: PointerStorage = { read: () => null, write: () => undefined, clear: () => undefined };
+    const driver = new SandboxDriver({ transport: sandbox.transport, storage: denied, now: () => 5_000 });
+    await driver.arm(armInput);
+    await driver.execute();
+    expect(driver.snapshot().machine.phase.kind).toBe("complete");
+    expect(sandbox.calls.session).toBeGreaterThan(0);
+  });
+
+  it("still rehydrates the reload family when the pointer vouches for the plan", async () => {
+    const sandbox = failedRunThenBrokenReset();
+    const { driver, storage } = driverWith(sandbox);
+    await driver.arm(armInput);
+    await driver.execute();
+
+    // The same document, re-simulated: nothing has moved, so the pointer still vouches and the
+    // reload path is the discovery it has always been.
+    await driver.arm(armInput);
+    expect(driver.snapshot().fault).toMatchObject({
+      kind: "wire-mismatch",
+      stage: "reset",
+      retry: "reload",
+    });
+
+    await driver.retry();
+    expect(sandbox.calls.session).toBe(1);
+    expect(storage.held()).not.toBeNull();
+    expect(driver.snapshot().machine.phase.kind).not.toBe("idle");
+    expect(driver.snapshot().fault).toBeNull();
   });
 });
