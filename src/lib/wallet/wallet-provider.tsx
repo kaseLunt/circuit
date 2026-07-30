@@ -81,9 +81,16 @@ export interface WalletProviderProps {
   /** Injected in tests; production composes one from `createWalletConfig`. */
   readonly config?: WalletConfig;
   readonly seam?: WalletSeamSource;
+  /**
+   * The enforcement clock, injectable for the same reason the seam is: a freshness bound that
+   * can only be observed by waiting two real minutes is a bound no test can hold to account.
+   * Production passes nothing and gets `performance.now()` below — the monotonic reading D9
+   * requires. A test's clock is still monotonic; it is merely one the test advances.
+   */
+  readonly monotonicNow?: () => number;
 }
 
-export function WalletProvider({ children, config, seam }: WalletProviderProps) {
+export function WalletProvider({ children, config, seam, monotonicNow }: WalletProviderProps) {
   // One config and one query client per mount. wagmi keys its whole store off the config
   // object, so recreating it on render would drop the connection every time.
   const [walletConfig] = useState(() => config ?? createWalletConfig());
@@ -98,7 +105,12 @@ export function WalletProvider({ children, config, seam }: WalletProviderProps) 
      */
     <WagmiProvider config={walletConfig} reconnectOnMount={false}>
       <QueryClientProvider client={queryClient}>
-        <BoundaryBridge seam={seam ?? defaultSeam}>{children}</BoundaryBridge>
+        <BoundaryBridge
+          seam={seam ?? defaultSeam}
+          monotonicNow={monotonicNow ?? monotonicPerformanceNow}
+        >
+          {children}
+        </BoundaryBridge>
       </QueryClientProvider>
     </WagmiProvider>
   );
@@ -134,9 +146,11 @@ function connectionOf(
 
 function BoundaryBridge({
   seam,
+  monotonicNow,
   children,
 }: {
   readonly seam: WalletSeamSource;
+  readonly monotonicNow: () => number;
   readonly children: ReactNode;
 }) {
   const account = useAccount();
@@ -222,7 +236,7 @@ function BoundaryBridge({
     connectors: choices,
     connect,
     disconnect,
-    monotonicNow: monotonicNow,
+    monotonicNow,
   };
 
   return <BoundaryContext.Provider value={boundary}>{children}</BoundaryContext.Provider>;
@@ -234,7 +248,7 @@ function BoundaryBridge({
  * correction would extend the freshness budget. Server renders never gate, so returning 0
  * there is not a fallback, it is the absence of a gate.
  */
-function monotonicNow(): number {
+function monotonicPerformanceNow(): number {
   if (typeof performance === "undefined") return 0;
   return performance.now();
 }

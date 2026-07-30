@@ -66,7 +66,11 @@ import { readShareToken } from "../../lib/share/encode";
 import { describeArrivalFailure, type ShareRefusal } from "../../lib/share/share-url";
 import { logError } from "../../lib/log";
 import { ExecutionHost, createDefaultSandboxDriver } from "../tx/execution-host";
-import { liveExecuteRefusalOf, type LiveExecuteRefusal } from "../../lib/wallet/gate";
+import {
+  liveExecuteRefusalOf,
+  msUntilStale,
+  type LiveExecuteRefusal,
+} from "../../lib/wallet/gate";
 import { WalletProvider, useWalletBoundary } from "../../lib/wallet/wallet-provider";
 import {
   MOCK_ACCOUNTS,
@@ -97,6 +101,23 @@ export function loadSandboxSnapshot(): SnapshotState {
 }
 
 /**
+ * What the composer's live gate publishes: the verdict the button is PAINTED with, and the
+ * re-decision the moment of commitment requires.
+ */
+export interface LiveGate {
+  readonly mode: ComposerMode;
+  readonly refusal: LiveExecuteRefusal | null;
+  /**
+   * Re-decide the whole gate NOW, against a fresh monotonic reading, and return what it
+   * refuses. Called immediately before a run is armed: a rendered verdict is a reading of a
+   * clock that has since moved, and this is the reading that counts. A refusal is also
+   * SURFACED by this call — it bumps the gate's own state, so the render it triggers states
+   * the refusal through the same path every other refusal takes.
+   */
+  revalidate(): LiveExecuteRefusal | null;
+}
+
+/**
  * SPEC §3 step 7's gate, assembled where the wallet and the document meet.
  *
  * The plan is built over the SANDBOX read set — that is what the canvas is showing — and it
@@ -106,17 +127,18 @@ export function loadSandboxSnapshot(): SnapshotState {
  * The SIMULATION standing comes from the live-simulation path (Codex D-011 F2): a
  * block-pinned capture for the connected address through our configured RPC, the same pure
  * `buildPlan`/`riskLedger` run over it, and a standing that binds address + plan hash +
- * block identity + monotonic time. Until one exists the gate refuses with
- * `no-fresh-simulation` — SPEC §3 step 7 verbatim — and after any drift (document edited,
- * capture superseded) it refuses with the drift stated (F3).
+ * block identity + monotonic time + THE READINGS THE CAPTURE CARRIED (round-4 finding 2 —
+ * `gate.ts` evaluates those over the connect-time pair whenever a standing exists). Until one
+ * exists the gate refuses with `no-fresh-simulation` — SPEC §3 step 7 verbatim — and after any
+ * drift (document edited, capture superseded) it refuses with the drift stated (F3).
+ *
+ * TWO TIMES THIS GATE IS EVALUATED, and neither is optional (round-4 finding 1). Every render
+ * decides it, and a standing arms a timer so a render happens the instant its freshness bound
+ * expires; and `revalidate` decides it again inside the commit handler, because between the
+ * last paint and the press the only thing that can have changed — the clock — is the one input
+ * a rendered verdict cannot have seen move.
  */
-export function useLiveGate(
-  snapshot: SnapshotState,
-  liveSim: LiveSimulationView,
-): {
-  readonly mode: ComposerMode;
-  readonly refusal: LiveExecuteRefusal | null;
-} {
+export function useLiveGate(snapshot: SnapshotState, liveSim: LiveSimulationView): LiveGate {
   const wallet = useWalletBoundary();
   const doc = useComposerStore((state) => state.doc);
   const mode: ComposerMode = wallet.session === null ? "sandbox" : "live";
@@ -124,21 +146,73 @@ export function useLiveGate(
     () => (snapshot.status === "ready" ? buildPlan(doc, snapshot.snapshot) : null),
     [doc, snapshot],
   );
-  if (mode === "sandbox") return { mode, refusal: null };
-  if (plan === null || !plan.ok) {
-    return { mode, refusal: { kind: "no-fresh-simulation" } };
+  const session = wallet.session;
+  const readings = wallet.readings;
+  const monotonicNow = wallet.monotonicNow;
+  const standing = liveSim.standing;
+  const currentPlanHash = liveSim.currentPlanHash;
+  const currentSnapshot = liveSim.currentSnapshot;
+
+  /**
+   * The expiry alarm (Codex round-4 finding 1, layer a).
+   *
+   * The staleness bound is a CLOCK reading, and a clock advances with no render to observe it:
+   * sampled only while rendering, the gate left an enabled Execute button sitting over a
+   * simulation that had already expired. So a standing schedules its own re-evaluation at the
+   * instant it goes stale — `msUntilStale` on the injected monotonic clock, never wall time —
+   * and this state bump is what makes the render below re-decide with nothing to click.
+   *
+   * `tick` is in the dependency list on purpose: each firing re-runs this effect, so a timer
+   * that lands EARLY (a throttled or coarse host timer against a monotonic reading that has
+   * not yet crossed) schedules the remainder instead of leaving the hole open. The delay
+   * strictly decreases, so the rescheduling terminates.
+   */
+  const [tick, setTick] = useState(0);
+  useEffect(() => {
+    if (standing === null) return;
+    const delay = msUntilStale(standing, monotonicNow());
+    if (delay <= 0) return;
+    const alarm = setTimeout(() => setTick((previous) => previous + 1), delay);
+    return () => {
+      clearTimeout(alarm);
+    };
+  }, [standing, monotonicNow, tick]);
+
+  const gateInputs = useMemo(
+    () =>
+      plan === null || !plan.ok
+        ? null
+        : { session, readings, plan, simulation: standing, currentPlanHash, currentSnapshot },
+    [plan, session, readings, standing, currentPlanHash, currentSnapshot],
+  );
+
+  /**
+   * The gate at the INSTANT OF COMMITMENT (Codex round-4 finding 1, layer b).
+   *
+   * Everything a render closed over is still current — readings, standing and hashes only ever
+   * change through a state update, which renders — except the clock, so this re-decides the
+   * FULL gate against a fresh monotonic reading rather than trusting the verdict the button was
+   * painted with. A refusal also bumps the tick, so the render that follows states it: the
+   * refusal a caller is handed and the refusal a user reads are one evaluation, not two.
+   */
+  const revalidate = useCallback((): LiveExecuteRefusal | null => {
+    if (session === null) return null;
+    const refusal =
+      gateInputs === null
+        ? { kind: "no-fresh-simulation" as const }
+        : liveExecuteRefusalOf({ ...gateInputs, nowMonotonicMs: monotonicNow() });
+    if (refusal !== null) setTick((previous) => previous + 1);
+    return refusal;
+  }, [session, gateInputs, monotonicNow]);
+
+  if (mode === "sandbox") return { mode, refusal: null, revalidate };
+  if (gateInputs === null) {
+    return { mode, refusal: { kind: "no-fresh-simulation" }, revalidate };
   }
   return {
     mode,
-    refusal: liveExecuteRefusalOf({
-      session: wallet.session,
-      readings: wallet.readings,
-      plan,
-      simulation: liveSim.standing,
-      currentPlanHash: liveSim.currentPlanHash,
-      currentSnapshot: liveSim.currentSnapshot,
-      nowMonotonicMs: wallet.monotonicNow(),
-    }),
+    refusal: liveExecuteRefusalOf({ ...gateInputs, nowMonotonicMs: monotonicNow() }),
+    revalidate,
   };
 }
 
@@ -217,6 +291,7 @@ function ComposerBody({ snapshot }: { readonly snapshot: SnapshotState }) {
           borrowLimit={borrowLimit}
           mode={live.mode}
           liveRefusal={live.refusal}
+          revalidateLive={live.revalidate}
           liveSimulationPhase={liveSim.phase}
           onLiveSimulate={session === null ? null : liveSim.simulate}
           driver={driver}

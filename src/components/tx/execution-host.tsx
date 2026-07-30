@@ -70,6 +70,17 @@ export interface ExecutionHostProps {
   readonly mode?: ComposerMode;
   readonly liveRefusal?: LiveExecuteRefusal | null;
   /**
+   * The live gate, re-decided at the instant of commitment (Codex round-4 finding 1).
+   *
+   * `liveRefusal` above is what the button was PAINTED with, and a paint is a reading of a
+   * clock: the freshness bound can expire with no render to notice, so the verdict on screen is
+   * not the authority at the moment a run starts. This callback asks the gate again — the
+   * composer owns the inputs and reads the monotonic clock fresh — and a non-null answer stops
+   * the run before `driver.arm` opens a session. Surfacing is the gate's own (it re-renders
+   * through `liveRefusal`), so this component decides nothing and states nothing new.
+   */
+  readonly revalidateLive?: (() => LiveExecuteRefusal | null) | null;
+  /**
    * The live-simulation path's phase and trigger (Codex D-011 F2). The trigger is offered
    * only against refusals a fresh simulation can CLEAR (`simulationCanClear` — the pure
    * gate decides, this component renders); a null trigger means no wallet is connected.
@@ -155,6 +166,7 @@ export function ExecutionHost({
   borrowLimit = null,
   mode = "sandbox",
   liveRefusal = null,
+  revalidateLive = null,
   liveSimulationPhase = { kind: "idle" },
   onLiveSimulate = null,
   driver: externalDriver,
@@ -238,6 +250,13 @@ export function ExecutionHost({
       setPinned({ plan: armable.input.plan, simulation, checkpoints: armable.checkpoints });
     }
   };
+
+  /**
+   * The last thing asked before a run starts (Codex round-4 finding 1): does the live gate
+   * STILL refuse nothing, decided now rather than at the last paint? Both arming routes below
+   * ask it, because both open a session and neither may do so on an expired simulation.
+   */
+  const liveCommitRefused = (): boolean => revalidateLive !== null && revalidateLive() !== null;
 
   // §2.4: the driver no-ops unless the machine is `ready`, so every rev bump may relay.
   // `lastRev` doubles as the restore guard's live reading of the document generation.
@@ -401,11 +420,10 @@ export function ExecutionHost({
             )}
             <TransactionButton
               onClick={() => {
-                if (armable.input !== null) {
-                  setHasArmed(true);
-                  pinRun();
-                  void driver.arm(armable.input);
-                }
+                if (armable.input === null || liveCommitRefused()) return;
+                setHasArmed(true);
+                pinRun();
+                void driver.arm(armable.input);
               }}
               gateReason={liveGateReason ?? armable.reason ?? busyReason}
             >
@@ -446,10 +464,9 @@ export function ExecutionHost({
           nowMs={snap.nowMs}
           onExecute={() => void driver.execute()}
           onRearm={() => {
-            if (armable.input !== null) {
-              pinRun();
-              void driver.arm(armable.input);
-            }
+            if (armable.input === null || liveCommitRefused()) return;
+            pinRun();
+            void driver.arm(armable.input);
           }}
           onRetryFault={() => void driver.retry()}
         />

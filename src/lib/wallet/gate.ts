@@ -125,6 +125,26 @@ export function liveConnectRefusalOf(
   if (session.chainId !== LIVE_CHAIN_ID) {
     return { kind: "wrong-chain", chainId: session.chainId, expected: LIVE_CHAIN_ID };
   }
+  return readingsRefusalOf(readings, plan);
+}
+
+/**
+ * What a pair of readings refuses for THIS plan — the chain-independent half of the check
+ * above, as its own decision.
+ *
+ * It is separate because THREE surfaces must reach that verdict from the same code (Codex
+ * round-4 finding 2): connect, the minting of a simulation standing (over the capture's OWN
+ * readings — `components/composer/live-simulation.ts`), and the Execute gate. A second copy of
+ * "may this actor run this plan" is precisely how the connect-time answer and the capture-time
+ * answer come to disagree, which is the hole that finding names.
+ *
+ * The code check is plan-conditional (`planRequiresCodeFreeActor`); the footprint check is not,
+ * because live v1 refuses a wallet with an existing position whatever the plan contains.
+ */
+export function readingsRefusalOf(
+  readings: WalletSeamReadings,
+  plan: PlanSuccess,
+): LiveConnectRefusal | null {
   if (planRequiresCodeFreeActor(plan)) {
     if (readings.code.status === "code-bearing") return { kind: "code-bearing-wallet" };
     if (readings.code.status === "unknown") {
@@ -158,10 +178,50 @@ export interface LiveSimulationStanding {
   readonly planHash: Hex;
   /** The capture the simulation priced against, by block number AND hash. */
   readonly snapshot: LiveSnapshotIdentity;
+  /**
+   * The wallet readings THE CAPTURE ITSELF carried — `eth_getCode` and the SPEC §2 footprint
+   * predicate, both read at the capture's pinned block by the same procedure that minted the
+   * snapshot (`lib/live/snapshot-wire.ts`). They ride with the standing because they are part
+   * of the same atomic observation as the balances the simulation priced.
+   *
+   * The Execute gate prefers these over the connect-time seam readings whenever a standing
+   * exists (Codex round-4 finding 2). The connect readings are older BY CONSTRUCTION: an EOA
+   * that gains an EIP-7702 delegation between connecting and simulating reads clear at connect
+   * and code-bearing in the capture, and gating on the earlier answer would admit a
+   * WETH-withdraw plan whose 2300-gas stipend send needs a code-free actor. The block-pinned
+   * facts the simulation actually stood on are the ones that gate.
+   */
+  readonly readings: WalletSeamReadings;
+}
+
+/**
+ * How long a standing has LEFT before `liveExecuteRefusalOf` retires it as stale, on the
+ * monotonic clock (D9). Zero or negative means it is already stale.
+ *
+ * The `+ 1` is not slack: the staleness check refuses at `ageMs > LIVE_SIMULATION_MAX_AGE_MS`,
+ * so a standing is still fresh AT exactly the bound and the flip lands one millisecond later.
+ * A caller that schedules a re-evaluation at this delay therefore re-evaluates at the first
+ * instant the gate refuses rather than at the last instant it passes.
+ *
+ * It exists because a gate sampled only while rendering is not a gate (Codex round-4 finding
+ * 1): the composer schedules a re-render at this delay, so the refusal appears the moment it
+ * becomes true with no interaction to trigger it.
+ */
+export function msUntilStale(
+  standing: LiveSimulationStanding,
+  nowMonotonicMs: number,
+): number {
+  return LIVE_SIMULATION_MAX_AGE_MS + 1 - (nowMonotonicMs - standing.simulatedAtMonotonicMs);
 }
 
 export interface LiveExecuteGateInputs {
   readonly session: WalletSession | null;
+  /**
+   * The CONNECT-TIME seam readings. They gate connect and the pre-standing state; once a
+   * standing exists, `simulation.readings` — the capture's own block-pinned pair — is what
+   * gates instead (Codex round-4 finding 2). Both are kept: with no capture in hand the
+   * connect readings are the only evidence there is, and an unread one still refuses.
+   */
   readonly readings: WalletSeamReadings;
   readonly plan: PlanSuccess;
   readonly simulation: LiveSimulationStanding | null;
@@ -186,9 +246,14 @@ export interface LiveExecuteGateInputs {
 export function liveExecuteRefusalOf(inputs: LiveExecuteGateInputs): LiveExecuteRefusal | null {
   const session = inputs.session;
   if (session === null) return { kind: "not-connected" };
-  const connect = liveConnectRefusalOf(session, inputs.readings, inputs.plan);
-  if (connect !== null) return connect;
   const standing = inputs.simulation;
+  // ATOMIC CAPTURE (Codex round-4 finding 2): the readings that gate are the ones the
+  // simulation stood on. The connect-time pair answers only while no capture exists — after
+  // one arrives, evaluating the older pair would let a wallet that gained code between
+  // connecting and simulating pass a plan that needs a code-free actor.
+  const readings = standing === null ? inputs.readings : standing.readings;
+  const connect = liveConnectRefusalOf(session, readings, inputs.plan);
+  if (connect !== null) return connect;
   if (standing === null) return { kind: "no-fresh-simulation" };
   const connected = getAddress(session.address);
   const simulatedFor = getAddress(standing.simulatedFor);

@@ -24,6 +24,15 @@
  * the identity is part of the key, a change of either half drops the capture, the standing and
  * the phase in the same render, and a capture pressed for the old identity cannot adopt state
  * when it settles.
+ *
+ * WHAT A STANDING STANDS ON (Codex round-4 finding 2). A capture is ONE atomic observation:
+ * `eth_getCode`, the §2 footprint predicate and the balances all arrive in the same block-pinned
+ * response. So the readings ride INTO the standing, and the Execute gate evaluates those rather
+ * than the connect-time seam pair, which is older by construction — an EOA that gains an EIP-7702
+ * delegation between connecting and simulating reads clear at connect and code-bearing in the
+ * capture, and the plan's WETH withdrawal needs the newer answer. The same readings also refuse
+ * the MINT: a capture that contradicts the plan it was taken for resolves into a stated refusal
+ * rather than a standing.
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { getAddress, type Address, type Hex } from "viem";
@@ -33,8 +42,13 @@ import { riskLedger } from "../../core/risk";
 import { planHashOf } from "../../lib/execution/plan-hash";
 import type { LiveCaptureSource } from "../../lib/live/live-transport";
 import type { LiveCapture } from "../../lib/live/snapshot-wire";
-import type { LiveSimulationStanding, LiveSnapshotIdentity } from "../../lib/wallet/gate";
+import {
+  readingsRefusalOf,
+  type LiveSimulationStanding,
+  type LiveSnapshotIdentity,
+} from "../../lib/wallet/gate";
 import type { ReadingTarget } from "../../lib/wallet/types";
+import { liveRefusalCopy } from "../wallet/connect-surface";
 import { useComposerStore } from "../../app/store/composer-provider";
 
 export type LiveStandingOutcome =
@@ -62,6 +76,20 @@ export function liveStandingOf(
         "the strategy does not plan against this wallet's captured chain state, so there is no simulation to stand behind Execute",
     };
   }
+  // The capture's OWN readings, against the plan they would stand behind (Codex round-4
+  // finding 2). `eth_getCode` and the §2 footprint arrived in the same block-pinned response
+  // as the balances, so a wallet that gained an EIP-7702 delegation since connect is caught
+  // HERE rather than admitted on the older connect-time answer. The decision is the gate's —
+  // one definition serves connect, this mint, and Execute — and the sentence is the T27 card's,
+  // so the refusal a user reads is the same sentence whichever surface states it.
+  const refused = readingsRefusalOf({ code: capture.code, footprint: capture.footprint }, plan);
+  if (refused !== null) {
+    const copy = liveRefusalCopy(refused);
+    return {
+      ok: false,
+      reason: `${copy.title} — ${copy.explanation} That was read at the capture's pinned block ${capture.identity.block}, not at connect.`,
+    };
+  }
   const ledger = riskLedger(doc, capture.snapshot);
   if (!ledger.ok) {
     return {
@@ -77,6 +105,10 @@ export function liveStandingOf(
       simulatedAtMonotonicMs: nowMonotonicMs,
       planHash: planHashOf(plan.steps),
       snapshot: capture.identity,
+      // Bound to the standing, not read from the seam later: the gate must be able to ask
+      // what THIS simulation stood on, and a pointer to whatever the connect seam holds at
+      // Execute time is a different question with a different answer.
+      readings: { code: capture.code, footprint: capture.footprint },
     },
   };
 }

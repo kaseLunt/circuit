@@ -7,7 +7,9 @@ import {
   LIVE_CHAIN_ID,
   liveConnectRefusalOf,
   liveExecuteRefusalOf,
+  msUntilStale,
   planRequiresCodeFreeActor,
+  readingsRefusalOf,
   simulationCanClear,
   walletDeparted,
   type LiveExecuteRefusal,
@@ -143,11 +145,17 @@ describe("liveExecuteRefusalOf", () => {
   const PINNED = { block: 22_000_000n, blockHash: `0x${"11".repeat(32)}` } as const;
   const OTHER_BLOCK = { block: 22_000_010n, blockHash: `0x${"22".repeat(32)}` } as const;
 
-  const standing = (atMs: number, simulatedFor: Address = WALLET) => ({
+  const standing = (
+    atMs: number,
+    simulatedFor: Address = WALLET,
+    /** What the CAPTURE read, which is what gates once a standing exists (round-4 finding 2). */
+    readings: WalletSeamReadings = CLEAR,
+  ) => ({
     simulatedFor,
     simulatedAtMonotonicMs: atMs,
     planHash: SIMULATED_HASH,
     snapshot: PINNED,
+    readings,
   });
 
   /** The inputs of the happy path; each test states only what it breaks. */
@@ -274,6 +282,163 @@ describe("liveExecuteRefusalOf", () => {
       kind: "stale-simulation",
       ageMs: LIVE_SIMULATION_MAX_AGE_MS + 1,
       maxAgeMs: LIVE_SIMULATION_MAX_AGE_MS,
+    });
+  });
+
+  /**
+   * Codex round-4 finding 2 — THE READINGS THAT GATE ARE THE CAPTURE'S OWN.
+   *
+   * The shipped gate evaluated the connect-time seam pair, which is older than the capture by
+   * construction. An EOA that gains an EIP-7702 delegation between connecting and simulating
+   * therefore read clear at connect and code-bearing in the capture, and the gate admitted a
+   * WETH-withdraw plan whose 2300-gas stipend send needs a code-free actor. Every beat below
+   * holds the connect readings CLEAR on purpose: with the older pair unable to refuse anything,
+   * the only thing that can refuse is the pair the simulation actually stood on.
+   */
+  describe("atomic capture — the standing's own readings gate, not the connect seam's", () => {
+    const CODE_BEARING: WalletSeamReadings = {
+      code: { status: "code-bearing", code: "0xef0100" },
+      footprint: { status: "clear" },
+    };
+    const OCCUPIED: WalletSeamReadings = {
+      code: { status: "clear" },
+      footprint: { status: "occupied" },
+    };
+
+    it("refuses a capture that read code where connect read clear (the 7702 window)", () => {
+      expect(
+        liveExecuteRefusalOf(
+          inputs({ readings: CLEAR, simulation: standing(0, WALLET, CODE_BEARING) }),
+        ),
+      ).toEqual({ kind: "code-bearing-wallet" });
+    });
+
+    it("admits the same capture for a plan with no stipend send — the gate is about the mechanism", () => {
+      expect(
+        liveExecuteRefusalOf(
+          inputs({
+            plan: noWithdrawPlan,
+            readings: CLEAR,
+            simulation: standing(0, WALLET, CODE_BEARING),
+          }),
+        ),
+      ).toBeNull();
+    });
+
+    it("refuses a capture that found an Aave position where connect found none", () => {
+      expect(
+        liveExecuteRefusalOf(inputs({ readings: CLEAR, simulation: standing(0, WALLET, OCCUPIED) })),
+      ).toEqual({ kind: "existing-footprint" });
+    });
+
+    it("keeps the connect readings as the authority while no standing exists", () => {
+      // The pre-standing state is unchanged: the connect pair is the only evidence there is,
+      // and an unread seam still refuses rather than defaulting to permissive (SPEC §5).
+      expect(liveExecuteRefusalOf(inputs({ readings: CODE_BEARING, simulation: null }))).toEqual({
+        kind: "code-bearing-wallet",
+      });
+    });
+
+    it("lets a capture supersede a connect reading that never resolved", () => {
+      // The capture READ the fact, at a named block, through the same configured RPC; the
+      // connect seam merely failed to. Superseding is not widening: `simulationCanClear` refuses
+      // to offer the simulate control against an unread seam at all, so no standing can be
+      // minted while one is outstanding — this is the semantics stated, not a reachable bypass.
+      const unread: WalletSeamReadings = {
+        code: { status: "unknown", reason: "the readiness call failed" },
+        footprint: { status: "unknown", reason: "the readiness call failed" },
+      };
+      expect(liveExecuteRefusalOf(inputs({ readings: unread }))).toBeNull();
+    });
+  });
+});
+
+/**
+ * The freshness alarm's arithmetic (Codex round-4 finding 1): the composer schedules a
+ * re-render at this delay, so what it returns has to be the instant the gate FLIPS — not the
+ * last instant it passes, and not a moment the gate would still admit.
+ */
+describe("msUntilStale", () => {
+  const standing = (atMs: number) => ({
+    simulatedFor: WALLET,
+    simulatedAtMonotonicMs: atMs,
+    planHash: `0x${"ab".repeat(32)}` as const,
+    snapshot: { block: 1n, blockHash: `0x${"11".repeat(32)}` } as const,
+    readings: CLEAR,
+  });
+
+  it("gives a just-minted standing the whole bound, plus the millisecond of the flip", () => {
+    expect(msUntilStale(standing(5_000), 5_000)).toBe(LIVE_SIMULATION_MAX_AGE_MS + 1);
+  });
+
+  it("still reports one millisecond left AT the bound — the gate admits an exactly-aged standing", () => {
+    const at = standing(0);
+    expect(msUntilStale(at, LIVE_SIMULATION_MAX_AGE_MS)).toBe(1);
+    expect(
+      liveExecuteRefusalOf({
+        session: session(),
+        readings: CLEAR,
+        plan: canonicalPlan,
+        simulation: at,
+        currentPlanHash: at.planHash,
+        currentSnapshot: at.snapshot,
+        nowMonotonicMs: LIVE_SIMULATION_MAX_AGE_MS,
+      }),
+    ).toBeNull();
+  });
+
+  it("lands exactly on the refusal: at now + msUntilStale, the gate is stale", () => {
+    const at = standing(2_000);
+    const now = 7_000;
+    const refusal = liveExecuteRefusalOf({
+      session: session(),
+      readings: CLEAR,
+      plan: canonicalPlan,
+      simulation: at,
+      currentPlanHash: at.planHash,
+      currentSnapshot: at.snapshot,
+      nowMonotonicMs: now + msUntilStale(at, now),
+    });
+    expect(refusal).toEqual({
+      kind: "stale-simulation",
+      ageMs: LIVE_SIMULATION_MAX_AGE_MS + 1,
+      maxAgeMs: LIVE_SIMULATION_MAX_AGE_MS,
+    });
+  });
+
+  it("reports a standing already past the bound as having no time left", () => {
+    expect(msUntilStale(standing(0), LIVE_SIMULATION_MAX_AGE_MS + 1)).toBe(0);
+    expect(msUntilStale(standing(0), LIVE_SIMULATION_MAX_AGE_MS + 500)).toBeLessThan(0);
+  });
+});
+
+/**
+ * The readings-vs-plan decision on its own, because three surfaces reach it: connect, the mint
+ * of a simulation standing over the capture's own readings, and the Execute gate. One definition
+ * is what keeps the connect-time answer and the capture-time answer from disagreeing.
+ */
+describe("readingsRefusalOf", () => {
+  it("is the chain-independent half of the connect check, verdict for verdict", () => {
+    const cases: readonly WalletSeamReadings[] = [
+      CLEAR,
+      { code: { status: "code-bearing", code: "0xef0100" }, footprint: { status: "clear" } },
+      { code: { status: "unknown", reason: "not read" }, footprint: { status: "clear" } },
+      { code: { status: "clear" }, footprint: { status: "occupied" } },
+      { code: { status: "clear" }, footprint: { status: "unknown", reason: "not read" } },
+    ];
+    for (const readings of cases) {
+      expect(readingsRefusalOf(readings, canonicalPlan)).toEqual(
+        liveConnectRefusalOf(session(), readings, canonicalPlan),
+      );
+    }
+  });
+
+  it("says nothing about the chain — that refusal belongs to the session, not the readings", () => {
+    expect(readingsRefusalOf(CLEAR, canonicalPlan)).toBeNull();
+    expect(liveConnectRefusalOf(session({ chainId: 8453 }), CLEAR, canonicalPlan)).toEqual({
+      kind: "wrong-chain",
+      chainId: 8453,
+      expected: LIVE_CHAIN_ID,
     });
   });
 });

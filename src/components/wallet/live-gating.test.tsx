@@ -16,8 +16,8 @@
  *    therefore walks the router rather than a bare demo source, and the injected-connector
  *    beats prove a real wallet cannot be served fabricated readings.
  */
-import { afterEach, describe, expect, it } from "vitest";
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { createConfig } from "wagmi";
 import { mainnet } from "wagmi/chains";
 import { mock } from "wagmi/connectors";
@@ -35,6 +35,9 @@ import { demoLiveCaptureSource } from "../../lib/live/demo-capture";
 import { liveSeam, type LiveCaptureSource } from "../../lib/live/live-transport";
 import type { ParsedLiveReadiness } from "../../lib/live/snapshot-wire";
 import { routedCaptureSource, routedSeam } from "../../lib/live/readiness-source";
+import { LIVE_SIMULATION_MAX_AGE_MS } from "../../lib/execution/tolerance";
+import type { PointerStorage } from "../../lib/tx/driver";
+import type { SandboxTransport } from "../../lib/tx/transport";
 import { ExecutionHost } from "../tx/execution-host";
 import { useLiveGate } from "../composer/sandbox-composer";
 import { captureIdentityOf, useLiveSimulation } from "../composer/live-simulation";
@@ -124,11 +127,18 @@ function composerWiring(options: {
   readonly accounts: readonly Address[];
   readonly occupied: readonly Address[];
   readonly captureOccupied: readonly Address[];
+  /** The CAPTURE's `eth_getCode` set, which the connect seam's need not agree with — that
+   *  disagreement is the whole of Codex round-4 finding 2. */
+  readonly captureCodeBearing?: readonly Address[];
 }): LiveWiring {
   const { accounts, occupied, captureOccupied } = options;
   return {
     source: routedCaptureSource({
-      demo: demoLiveCaptureSource({ accounts, codeBearing: [], occupied: captureOccupied }),
+      demo: demoLiveCaptureSource({
+        accounts,
+        codeBearing: options.captureCodeBearing ?? [],
+        occupied: captureOccupied,
+      }),
       rpc: unconfiguredRpcCapture,
     }),
     seam: routedSeam({
@@ -147,16 +157,21 @@ function composerWiring(options: {
 function LiveHost({
   allocationBps,
   source,
+  transport,
 }: {
   readonly allocationBps: number;
   readonly source: LiveCaptureSource;
+  /** A transport whose calls a test can count — `driver.arm`'s first act is `create`. */
+  readonly transport?: SandboxTransport;
 }) {
   const state = { status: "ready", snapshot } as const;
   const wallet = useWalletBoundary();
   const session = wallet.session;
   // The whole session, exactly as `ComposerBody` hands it over: the hook keys its held capture
-  // on address AND connector, and takes no target per press (round-3 finding 1).
-  const liveSim = useLiveSimulation(source, () => 1_000, session);
+  // on address AND connector, and takes no target per press (round-3 finding 1). ONE clock for
+  // the standing and for the gate, also as `ComposerBody` composes it — a harness that timed
+  // the mint on a different clock than the gate reads could not prove anything about freshness.
+  const liveSim = useLiveSimulation(source, wallet.monotonicNow, session);
   const live = useLiveGate(state, liveSim);
   return (
     <ExecutionHost
@@ -166,12 +181,21 @@ function LiveHost({
       borrowLimit={flagshipBorrowVerdict(allocationBps)}
       mode={live.mode}
       liveRefusal={live.refusal}
+      revalidateLive={live.revalidate}
       liveSimulationPhase={liveSim.phase}
       onLiveSimulate={session === null ? null : liveSim.simulate}
       now={() => 1_000}
+      {...(transport === undefined ? {} : { transport, storage: NO_POINTER })}
     />
   );
 }
+
+/** No persisted run to resume, so `driver.restore` reaches no transport call of its own. */
+const NO_POINTER: PointerStorage = {
+  read: () => null,
+  write: () => undefined,
+  clear: () => undefined,
+};
 
 function mountLive(options: {
   readonly accounts: readonly Address[];
@@ -186,26 +210,41 @@ function mountLive(options: {
   readonly seam?: WalletSeamSource;
   /** Override the CAPTURE source alone — a source whose resolution the test controls. */
   readonly source?: LiveCaptureSource;
+  /** The CAPTURE's code-bearing set, when it must disagree with the connect seam's. */
+  readonly captureCodeBearing?: readonly Address[];
+  /** The enforcement clock, for the freshness beats. Fixed unless a test advances it. */
+  readonly monotonicNow?: () => number;
+  /** A counting transport, so "no run began" is an assertion rather than an inference. */
+  readonly transport?: SandboxTransport;
 }) {
   const store = storeAt(options.allocationBps);
   const wiring = composerWiring({
     accounts: options.accounts,
     occupied: options.occupied,
     captureOccupied: options.captureOccupied ?? options.occupied,
+    captureCodeBearing: options.captureCodeBearing ?? [],
   });
   const view = render(
     <WalletProvider
       config={options.config ?? createWalletConfig(options.accounts, offlineTransport)}
       seam={options.seam ?? wiring.seam}
+      monotonicNow={options.monotonicNow ?? FIXED_CLOCK}
     >
       <ComposerStoreProvider store={store}>
         <ConnectSurface />
-        <LiveHost allocationBps={options.allocationBps} source={options.source ?? wiring.source} />
+        <LiveHost
+          allocationBps={options.allocationBps}
+          source={options.source ?? wiring.source}
+          {...(options.transport === undefined ? {} : { transport: options.transport })}
+        />
       </ComposerStoreProvider>
     </WalletProvider>,
   );
   return { store, view };
 }
+
+/** One reading, for every beat that is not about time passing. */
+const FIXED_CLOCK = () => 1_000;
 
 function mountHost(options: {
   readonly allocationBps: number;
@@ -693,6 +732,215 @@ describe("SPEC §3 step 7 — a capture that throws is a stated refusal, not a s
     ).toBe("true");
   });
 });
+
+/**
+ * Codex round-4 finding 1 — A GATE SAMPLED ONLY WHILE RENDERING IS NOT A GATE.
+ *
+ * The freshness bound is a reading of a monotonic clock, and a clock advances with no render to
+ * observe it. As shipped, nothing scheduled a render at expiry and the commit handler trusted
+ * the verdict the button had last been PAINTED with: after an idle wait past the bound, the
+ * still-enabled Execute started `driver.arm`, and the driver noticed the staleness only once
+ * arming had begun. Both halves of the fix are asserted here, and deliberately one at a time —
+ * the commit-time re-decision with the alarm never allowed to fire, then the alarm alone with
+ * nothing touched.
+ *
+ * Two knobs, one passage of time: `monotonic` is the enforcement clock the provider injects
+ * (D9), and the fake host timer is what the alarm is scheduled on. Advancing the enforcement
+ * clock alone is what "an idle wait" IS — no state changed, so nothing re-rendered.
+ */
+describe("SPEC §3 step 7 — an expired simulation cannot start a run (round-4 finding 1)", () => {
+  const EXECUTE = "Review & execute in sandbox";
+  const STALE_TITLE = "The simulation is out of date";
+  const executeButton = () => screen.getByRole("button", { name: EXECUTE });
+
+  /**
+   * A transport that counts what it is asked for and answers nothing. `driver.arm`'s first act
+   * is `create` (it opens or resets the sandbox session), so an empty call list is the proof
+   * that arming never began — not an inference from what the screen shows afterwards.
+   */
+  function recordingTransport(): {
+    readonly transport: SandboxTransport;
+    calls(): readonly string[];
+  } {
+    const calls: string[] = [];
+    const record = (name: string) => {
+      calls.push(name);
+      return Promise.reject(new Error(`the recording transport answers no ${name}`));
+    };
+    return {
+      transport: {
+        create: () => record("create"),
+        plan: () => record("plan"),
+        executeStep: () => record("executeStep"),
+        session: () => record("session"),
+        reconcile: () => record("reconcile"),
+        reset: () => record("reset"),
+        destroy: () => record("destroy"),
+      },
+      calls: () => calls,
+    };
+  }
+
+  /** Connect the mock session, capture its chain state, and wait for the gate to clear. */
+  async function connectAndClear(): Promise<void> {
+    fireEvent.click(screen.getByRole("button", { name: /Connect Mock/i }));
+    await waitFor(
+      () => {
+        expect(screen.queryByRole("button", { name: "Simulate against this wallet" })).not.toBeNull();
+      },
+      { timeout: 8_000 },
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Simulate against this wallet" }));
+    await waitFor(() => {
+      expect(executeButton().getAttribute("aria-disabled")).toBeNull();
+    });
+  }
+
+  it("refuses the commit itself when the simulation expired with nothing to re-render", async () => {
+    let monotonic = 1_000;
+    const spy = recordingTransport();
+    mountLive({
+      accounts: [CLEAN],
+      occupied: [],
+      allocationBps: 7000,
+      monotonicNow: () => monotonic,
+      transport: spy.transport,
+    });
+    await connectAndClear();
+
+    // The idle wait: the enforcement clock passes the bound, and NOTHING renders — no state
+    // moved, no timer ran. The button is still painted with the verdict it cleared with, which
+    // is exactly the stale authority the finding names.
+    monotonic += LIVE_SIMULATION_MAX_AGE_MS + 1;
+    expect(executeButton().getAttribute("aria-disabled")).toBeNull();
+
+    fireEvent.click(executeButton());
+
+    // Nothing was asked of the transport: the run never started, so there is no session to
+    // notice the staleness in afterwards.
+    expect(spy.calls()).toEqual([]);
+    // And the refusal is STATED, in the T27 grammar, at the control the user pressed.
+    await waitFor(() => {
+      expect(screen.getAllByText(STALE_TITLE).length).toBeGreaterThan(0);
+    });
+    expect(executeButton().getAttribute("aria-disabled")).toBe("true");
+    // The label proves no run was ever armed: an armed session renames this control (SPEC §6).
+    expect(screen.queryByRole("button", { name: "Re-simulate" })).toBeNull();
+    // Re-simulating is what answers it, and the control is offered again.
+    expect(screen.queryByRole("button", { name: "Simulate against this wallet" })).not.toBeNull();
+  });
+
+  it("flips the button to refused on the expiry alarm alone, with no interaction at all", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      let monotonic = 1_000;
+      mountLive({
+        accounts: [CLEAN],
+        occupied: [],
+        allocationBps: 7000,
+        monotonicNow: () => monotonic,
+      });
+      await connectAndClear();
+
+      // Time passes on BOTH clocks, as it does in the world. No click, no store write, no
+      // re-render is asked for: the standing's own alarm is the only thing that can fire.
+      monotonic += LIVE_SIMULATION_MAX_AGE_MS + 1;
+      act(() => {
+        vi.advanceTimersByTime(LIVE_SIMULATION_MAX_AGE_MS + 1);
+      });
+
+      expect(executeButton().getAttribute("aria-disabled")).toBe("true");
+      expect(screen.getAllByText(STALE_TITLE).length).toBeGreaterThan(0);
+      // Never `disabled`: the refusal has to be readable at the control it gates (T25/T33).
+      expect(executeButton().hasAttribute("disabled")).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
+
+/**
+ * Codex round-4 finding 2 — THE READINGS THAT GATE ARE THE CAPTURE'S OWN.
+ *
+ * The connect seam reads `eth_getCode` and the §2 footprint once, when the session appears. The
+ * capture reads both AGAIN, at a pinned block, in the same response as the balances the
+ * simulation prices. Shipped, the standing carried only the balances' identity and the gate kept
+ * evaluating the connect-time pair — so an EOA that gained an EIP-7702 delegation between
+ * connecting and simulating cleared the gate on the older answer, for a plan whose WETH
+ * withdrawal needs a code-free actor.
+ *
+ * Both beats hold the CONNECT seam clear and let only the CAPTURE disagree, which is the
+ * disagreement the fix is about. The gate-level property is proven pure in
+ * `src/lib/wallet/gate.test.ts`; what is proven here is that the capture's readings reach it.
+ */
+describe("SPEC §3 step 7 — a capture that contradicts its plan mints no standing", () => {
+  it("refuses the code-bearing capture the connect seam had read clear", async () => {
+    mountLive({
+      accounts: [CLEAN],
+      occupied: [],
+      allocationBps: 7000,
+      // The connect seam reads this wallet clear on both facts; the CAPTURE finds code.
+      captureCodeBearing: [CLEAN],
+    });
+    fireEvent.click(screen.getByRole("button", { name: /Connect Mock/i }));
+    await waitFor(
+      () => {
+        expect(screen.queryByRole("button", { name: "Simulate against this wallet" })).not.toBeNull();
+      },
+      { timeout: 8_000 },
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Simulate against this wallet" }));
+    await waitFor(() => {
+      expect(screen.getByTestId("live-simulation-refusal").textContent).toContain(
+        "This wallet has code deployed",
+      );
+    });
+    // The sentence is the gate's own T27 copy, and it cites WHERE the fact was read — the
+    // capture's pinned block, not the connect seam.
+    const stated = screen.getByTestId("live-simulation-refusal").textContent ?? "";
+    expect(stated).toContain("2300-gas stipend");
+    expect(stated).toContain("pinned block");
+    // No standing was minted, so the gate is still on the fresh-simulation refusal and Execute
+    // has never been clearable.
+    expect(executeGate()).toBe("true");
+    expect(
+      screen.getAllByText("No simulation against this wallet's balances yet").length,
+    ).toBeGreaterThan(0);
+  });
+
+  it("refuses the capture that found an Aave position the connect seam had not", async () => {
+    mountLive({
+      accounts: [CLEAN],
+      occupied: [],
+      allocationBps: 7000,
+      // The position was opened between the two reads: connect clear, capture occupied.
+      captureOccupied: [CLEAN],
+    });
+    fireEvent.click(screen.getByRole("button", { name: /Connect Mock/i }));
+    await waitFor(
+      () => {
+        expect(screen.queryByRole("button", { name: "Simulate against this wallet" })).not.toBeNull();
+      },
+      { timeout: 8_000 },
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Simulate against this wallet" }));
+    await waitFor(() => {
+      expect(screen.getByTestId("live-simulation-refusal").textContent).toContain(
+        "this wallet's captured chain state",
+      );
+    });
+    expect(executeGate()).toBe("true");
+    expect(
+      screen.getAllByText("No simulation against this wallet's balances yet").length,
+    ).toBeGreaterThan(0);
+  });
+});
+
+/** The Execute control's gate state, as the screen reports it. */
+const executeGate = (): string | null =>
+  screen.getByRole("button", { name: "Review & execute in sandbox" }).getAttribute("aria-disabled");
 
 /**
  * The identity key itself, as a pure decision (doctrine D10): the hook's held state is keyed on
