@@ -7,7 +7,7 @@ factor move as you change the allocation, and open any figure to see the chain r
 and the block it was read at.
 
 <!--
-  TODO: capture docs/media/demo.gif, then uncomment the image below.
+  Choreography record for the committed capture (docs/demo.gif):
   Choreography (SPEC §3 steps 1-3, one take, 20s loop, no audio, no captions):
 
     0:00  Land on / and click "Try sandbox". The flagship is already on screen.
@@ -24,8 +24,9 @@ and the block it was read at.
   against a pinned mainnet fork in CI. The last frame of the GIF is the configuration
   the fork suite proves.
 
-  ![circuit composing a leveraged restake loop](docs/media/demo.gif)
 -->
+
+![circuit composing a leveraged restake loop](docs/demo.gif)
 
 ## Every number carries its provenance
 
@@ -267,13 +268,14 @@ npm run test:e2e     # Playwright: SPEC §3 steps 1-3 + 8 on the recorded reads
 npm run test:fork    # anvil fork suite (requires an archive-capable FORK_RPC_URL)
 ```
 
-Four checks are required to merge:
+Five checks are required to merge:
 
 | Check | What it proves |
 |---|---|
 | `ci` | build, typecheck, zero-warning lint, script parse gate, full vitest suite |
 | `e2e` | the demo script, against a production build, on the recorded read set |
 | `fork` | the 13-step flagship plan against pinned mainnet state, twice |
+| `e2e-fork` | the sandbox execution arc — arm, review, execute, attribute, receipt — driven in a real browser against a per-session anvil fork whose pin is hash-verified from the committed read log |
 | Control plane trusted audit | scope, claim, and owner-approval policy replayed by server-owned code against the simulated merge |
 
 The product contract is [`SPEC.md`](SPEC.md). The porting contract is
