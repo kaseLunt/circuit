@@ -4,6 +4,7 @@ import { encodeShareGraph } from "../share/encode";
 import { flagshipGraph } from "../../../tests/helpers/graphs";
 import { fixtureSnapshot } from "../../../tests/helpers/chain-snapshot";
 import {
+  SCRIPT_ACTOR,
   SCRIPT_PLAN_HASH,
   SCRIPT_SESSION_KEY,
   memoryStorage,
@@ -1573,5 +1574,204 @@ describe("a shared fork is never certified clean by this client (round-7)", () =
     expect(driver.snapshot().machine.phase.kind).toBe("ready");
     expect(sandbox.calls.reset).toBe(1);
     expect(sandbox.calls.create).toBe(2);
+  });
+});
+
+/**
+ * Codex round-8 — WHAT A REFUSAL PROVES ABOUT THE RETAINED SESSION.
+ *
+ * Round-7 taught the client one refusal's remedy (`session-dirty` → reset). But the server refuses
+ * on the session PHASE before it ever reaches that check (`planForSession` runs `phaseRefusal`
+ * first), so a session another tab left `halted`, `failed` or `reconcile-required` arrived as
+ * itself — and every one of those took the unclassified path: the key retained as though clean, an
+ * arm-family Retry offered, and that Retry resubmitting the same plan to the same state forever.
+ *
+ * The mirror defect sat on the reset side. EVERY refused reset discarded the key, including
+ * `session-busy`, which proves only that another caller holds the one-at-a-time mutex. Below the
+ * cap that leaks a live fork until its TTL; at the cap the create that followed came back
+ * `at-capacity`, and the still-live session could no longer be named.
+ *
+ * Both halves are asserted through the door the user actually has: the fault card's Retry.
+ */
+describe("a refusal is classified by what it proves (round-8)", () => {
+  /** The other tab: one step on the shared key, whose outcome moves the session's phase. */
+  const otherClientStep = async (transport: SandboxTransport): Promise<void> => {
+    const response = await transport.executeStep(SCRIPT_SESSION_KEY, SCRIPT_PLAN_HASH, 0);
+    if (!response.ok) throw new Error(`the other client step was refused: ${response.refusal.kind}`);
+  };
+
+  const firstStep = () => {
+    const base = wireAttributed(plan, 0);
+    if (base.status !== "attributed") throw new Error("fixture");
+    return { stepId: base.stepId, receipt: base.receipt };
+  };
+
+  /**
+   * Arm, let the other tab move the phase, then edit the document — the §2.4 disarm — so the next
+   * arm is the ordinary "Re-simulate" a user presses, planning on a session this driver still
+   * believes is clean because IT dispatched nothing.
+   */
+  async function armIntoPhaseRefusal(result: WireStepResult) {
+    const sandbox = scriptedSandbox({
+      onExecuteStep: (index) => (index === 0 ? { ok: true, result } : undefined),
+    });
+    const { driver } = driverWith(sandbox);
+    await driver.arm(armInput);
+    expect(driver.snapshot().machine.phase.kind).toBe("ready");
+    await otherClientStep(sandbox.transport);
+    driver.documentMutated();
+    await driver.arm(armInput);
+    return { driver, sandbox };
+  }
+
+  /** The convergence every phase refusal must reach: one Retry, one reset, no new fork. */
+  async function expectRetryConverges(
+    driver: SandboxDriver,
+    sandbox: { readonly calls: { readonly reset: number; readonly create: number } },
+  ): Promise<void> {
+    await driver.retry();
+    expect(driver.snapshot().machine.phase.kind).toBe("ready");
+    expect(driver.snapshot().fault).toBeNull();
+    expect(sandbox.calls.reset).toBe(1);
+    expect(sandbox.calls.create).toBe(1);
+  }
+
+  it("converges out of a first-step revert the other tab left (failed)", async () => {
+    const step = firstStep();
+    const { driver, sandbox } = await armIntoPhaseRefusal({
+      status: "failed",
+      failure: {
+        stepIndex: 0,
+        stepId: step.stepId,
+        txHash: wireHash(0xdead),
+        decoded: { message: "health factor too low", raw: "0x36", source: "custom-error" },
+        raw: "0xdeadbeef",
+      },
+    });
+    // Refused AS a failure: the server's phase check runs before its moved-fork check, and the
+    // reset that clears the phase is what the Retry now performs.
+    expect(driver.snapshot().fault).toMatchObject({
+      kind: "refusal",
+      stage: "plan",
+      refusal: { kind: "failed" },
+      retry: "arm",
+    });
+    await expectRetryConverges(driver, sandbox);
+  });
+
+  it("converges out of a halt the other tab left, refused AS a halt", async () => {
+    const step = firstStep();
+    const { driver, sandbox } = await armIntoPhaseRefusal({
+      status: "halted",
+      stepIndex: 0,
+      stepId: step.stepId,
+      receipt: step.receipt,
+      resolvedAmountWei: null,
+      sharesDelta: null,
+      halt: {
+        kind: "residual-allowance",
+        stepIndex: 0,
+        stepId: step.stepId,
+        spender: SCRIPT_ACTOR,
+        residualAllowanceWei: "1",
+        receipt: step.receipt,
+      },
+    });
+    // The fixture-honesty half of the finding: a halted session must never be laundered into
+    // `session-dirty`, or the client is being proven against a server that does not exist.
+    expect(driver.snapshot().fault).toMatchObject({
+      kind: "refusal",
+      stage: "plan",
+      refusal: { kind: "halted" },
+      retry: "arm",
+    });
+    await expectRetryConverges(driver, sandbox);
+  });
+
+  it("converges out of an unresolved dispatch the other tab left (reconcile-required)", async () => {
+    const step = firstStep();
+    const { driver, sandbox } = await armIntoPhaseRefusal({
+      status: "dispatch-unresolved",
+      stepIndex: 0,
+      stepId: step.stepId,
+      txHash: wireHash(0xbeef),
+    });
+    // Nothing SETTLED here — the fork has no entries at all — so `session-dirty` could not have
+    // fired even in principle: the phase is the only thing that refuses, and so the only thing that
+    // could teach the client what to do about it.
+    expect(driver.snapshot().fault).toMatchObject({
+      kind: "refusal",
+      stage: "plan",
+      refusal: { kind: "reconcile-required" },
+      retry: "arm",
+    });
+    await expectRetryConverges(driver, sandbox);
+  });
+
+  it("retires a key the server no longer knows instead of re-planning it", async () => {
+    let unknownOnce = true;
+    const sandbox = scriptedSandbox({
+      onPlan: () => {
+        if (!unknownOnce) return undefined;
+        unknownOnce = false;
+        return { ok: false, refusal: { kind: "unknown-session" } };
+      },
+    });
+    const { driver, storage } = driverWith(sandbox);
+    await driver.arm(armInput);
+    expect(driver.snapshot().fault).toMatchObject({
+      kind: "refusal",
+      stage: "plan",
+      refusal: { kind: "unknown-session" },
+    });
+    // A key the registry will not serve again is not worth resetting and not worth remembering.
+    expect(storage.held()).toBeNull();
+
+    await driver.retry();
+    expect(driver.snapshot().machine.phase.kind).toBe("ready");
+    expect(sandbox.calls.create).toBe(2);
+    expect(sandbox.calls.reset).toBe(0);
+  });
+
+  it("keeps a live key when the reset is refused BUSY, and converges when the mutex frees", async () => {
+    let busyOnce = true;
+    let forks = 0;
+    const sandbox = scriptedSandbox({
+      onReset: () => {
+        if (!busyOnce) return undefined;
+        busyOnce = false;
+        return { ok: false, refusal: { kind: "session-busy" } };
+      },
+      // The sandbox is AT CAPACITY for a second fork, which is the shape of the defect: a client
+      // that discards a live key on a transient refusal cannot get another one, and can no longer
+      // name the one it abandoned.
+      onCreate: () => {
+        forks += 1;
+        return forks > 1 ? { ok: false, refusal: { kind: "at-capacity" } } : undefined;
+      },
+    });
+    const { driver } = driverWith(sandbox);
+    await driver.arm(armInput);
+    await driver.execute();
+    expect(driver.snapshot().machine.phase.kind).toBe("complete");
+
+    // The re-arm resets the fork this driver itself dirtied — and the other caller holds the mutex,
+    // so the reset is refused for a reason that says nothing at all about the session.
+    await driver.arm(armInput);
+    expect(driver.snapshot().fault).toMatchObject({
+      kind: "refusal",
+      stage: "reset",
+      refusal: { kind: "session-busy" },
+      retry: "arm",
+    });
+    // The leak assertion: no second fork was asked for while the first key is alive.
+    expect(sandbox.calls.create).toBe(1);
+    expect(sandbox.calls.reset).toBe(1);
+
+    await driver.retry();
+    expect(driver.snapshot().machine.phase.kind).toBe("ready");
+    expect(driver.snapshot().fault).toBeNull();
+    expect(sandbox.calls.reset).toBe(2);
+    expect(sandbox.calls.create).toBe(1);
   });
 });

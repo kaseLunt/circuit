@@ -243,6 +243,61 @@ const waitMs = (ms: number): Promise<void> =>
 const detailOf = (cause: unknown): string =>
   cause instanceof Error ? cause.message : String(cause);
 
+/**
+ * What a refusal PROVES about the retained session — the client's half of the server's session
+ * contract, classified in ONE place so the plan stage and the reset stage cannot drift (Codex
+ * round-8). Both stages advertise an arm-family Retry, and a Retry that resubmits the same call to
+ * the same state is not a recovery; the verdict is what makes it converge.
+ *
+ * `reset-clears` — the fork moved past its pinned base, or its phase is not plannable.
+ *   `registry.reset` restores `{kind:"active"}` with no entries, no plan, `txCount` 0, no pending
+ *   dispatch and a bumped generation, so every one of these is answered by a reset: `session-dirty`
+ *   (entries, or a non-active phase), `reconcile-required`, `halted`, `failed`, and `tx-cap` (the
+ *   count the cap reads is one of the fields a reset zeroes — which is what the card's own
+ *   "Re-simulating starts a fresh run" has always promised).
+ *
+ * `key-dead` — the registry will not serve this key again: `unknown-session` (never known, or
+ *   owner-destroyed), `session-expired` (swept, tombstoned), and `reset-failed`, whose contract is
+ *   explicitly transactional — the fork destroyed itself on the way out and the session was
+ *   removed. A reset cannot clear any of them; the key is retired and the next attempt creates.
+ *
+ * `transient` — nothing about the session is proven. `session-busy` is the one-at-a-time mutex held
+ *   by another caller (`beginExclusive` refuses this and nothing else) and `rate-limited` is the
+ *   session's own floor: the key stays, the fork flag stays, and the identical call is legal the
+ *   moment the mutex frees. Retiring here is how a live session gets abandoned at the cap.
+ *
+ * `not-session-state` — an execute/reconcile-stage bookkeeping refusal that says nothing about a
+ *   plannable fork. Unreachable at the two stages this is consulted from (the wire sets there are
+ *   closed by `planForSession` and the reset route), so it is classified rather than assumed.
+ */
+type SessionVerdict = "reset-clears" | "key-dead" | "transient" | "not-session-state";
+
+function sessionVerdictOf(refusal: SandboxRefusalFact): SessionVerdict {
+  switch (refusal.kind) {
+    case "session-dirty":
+    case "reconcile-required":
+    case "halted":
+    case "failed":
+    case "tx-cap":
+      return "reset-clears";
+    case "unknown-session":
+    case "session-expired":
+    case "reset-failed":
+      return "key-dead";
+    case "session-busy":
+    case "rate-limited":
+      return "transient";
+    case "at-capacity":
+    case "no-plan":
+    case "plan-changed":
+    case "plan-complete":
+    case "out-of-order":
+    case "nothing-to-reconcile":
+    case "reconcile-mismatch":
+      return "not-session-state";
+  }
+}
+
 /** The two plan-stage refusal kinds the resume mirror deliberately omits. */
 const isPlanStageRefusal = (
   refusal: WireTransportRefusal,
@@ -454,6 +509,55 @@ export class SandboxDriver {
     return true;
   }
 
+  /**
+   * Forget a key the registry will not serve again. The next attempt creates a fresh session; the
+   * pointer goes with it, because a pointer naming a dead key can resume nothing.
+   */
+  private retireSession(): void {
+    this.sessionKey = null;
+    this.session = null;
+    this.forkDirty = false;
+    this.retainedPlanHash = null;
+    this.storage.clear();
+  }
+
+  /**
+   * A refused reset, classified (Codex round-8). `retired` means the key is gone and the caller
+   * falls through to creating a fresh session; `stopped` means the fault is set and this arm is
+   * over with the session and its dirty flag exactly as they were — so the Retry the card offers
+   * re-runs the RESET, and converges the moment the other caller's mutex frees.
+   */
+  private afterRefusedReset(refusal: WireTransportRefusal): "retired" | "stopped" {
+    const cannotMean = (detail: string): "stopped" => {
+      this.setFault({ kind: "wire-mismatch", stage: "reset", detail, retry: "reload" });
+      return "stopped";
+    };
+    if (isPlanStageRefusal(refusal)) {
+      return cannotMean(`unexpected plan-stage refusal on reset: ${refusal.kind}`);
+    }
+    const parsed = refusalFactOf(refusal);
+    if (!parsed.ok) {
+      return cannotMean(
+        parsed.refusal.kind === "malformed-wire" ? parsed.refusal.detail : parsed.refusal.kind,
+      );
+    }
+    switch (sessionVerdictOf(parsed.value)) {
+      case "key-dead":
+        this.retireSession();
+        return "retired";
+      case "transient":
+        // The mutex, not the session. Keeping the key AND the dirty flag is what makes the retry a
+        // retry of the reset, rather than a plan on a fork that was never reset.
+        this.setFault({ kind: "refusal", stage: "reset", refusal: parsed.value, retry: "arm" });
+        return "stopped";
+      case "reset-clears":
+      case "not-session-state":
+        // A reset cannot honestly answer with either: the states a reset clears are what it is FOR,
+        // and the bookkeeping refusals belong to other stages. Skew, refused rather than guessed.
+        return cannotMean(`a reset cannot refuse ${parsed.value.kind}`);
+    }
+  }
+
   /** A session key ready to plan on, or null with the fault already set. */
   private async ensureSession(): Promise<string | null> {
     if (this.sessionKey !== null && this.forkDirty) {
@@ -472,12 +576,13 @@ export class SandboxDriver {
         }
         return this.sessionKey;
       }
-      // A session that cannot reset is not reused: expired, destroyed or reset-failed all
-      // resolve to a fresh session — the designed recovery the router names (finding 6).
-      this.sessionKey = null;
-      this.session = null;
-      this.retainedPlanHash = null;
-      this.storage.clear();
+      // A refused reset is CLASSIFIED, not read as "this session is finished" (Codex round-8).
+      // The reset route refuses from exactly three places — the lookup, the one-at-a-time mutex,
+      // and a transactional reset failure — and only two of the three say anything is wrong with
+      // the key. Discarding it on the third abandoned a session that was still alive and holding
+      // an anvil slot: below the cap that leaks a fork until its TTL, and at the cap the create
+      // that followed came back `at-capacity` — a live session the client could no longer name.
+      if (this.afterRefusedReset(response.refusal) !== "retired") return null;
     }
     if (this.sessionKey !== null) return this.sessionKey;
     const created = await this.transport.create();
@@ -548,21 +653,17 @@ export class SandboxDriver {
       }
       if (parsed.value.kind === "session-expired") {
         this.dispatch({ type: "session-lost", executedSteps: parsed.value.executedSteps });
-        this.retainedPlanHash = null;
-        this.storage.clear();
-        this.sessionKey = null;
-        this.session = null;
+        this.retireSession();
         return;
       }
-      if (parsed.value.kind === "session-dirty") {
-        // The refusal names its own remedy, and the client has to honour it or the Retry it
-        // advertises cannot converge (Codex round-7): re-planning stays refused until a RESET
-        // restores the pinned base (`planForSession`), because a plan's simulation base must BE
-        // the fork's current state. The fork moved without this driver dispatching anything — a
-        // second tab on the same persisted key — so the flag is corrected here, and the next
-        // attempt resets first (or, if the reset fails, lands on a fresh session).
-        this.forkDirty = true;
-      }
+      // Every other plan refusal is classified BEFORE the arm-family Retry is offered, because the
+      // action a card advertises has to be able to succeed (Codex round-7, generalised in round-8).
+      // The server refuses on the phase before it refuses on a moved fork (`planForSession` runs
+      // `phaseRefusal` first), so `halted`, `failed` and `reconcile-required` arrive here as
+      // themselves and never as `session-dirty` — and each of them is answered by the same reset.
+      const verdict = sessionVerdictOf(parsed.value);
+      if (verdict === "reset-clears") this.forkDirty = true;
+      if (verdict === "key-dead") this.retireSession();
       this.dispatch({ type: "plan-refused" });
       this.setFault({ kind: "refusal", stage: "plan", refusal: parsed.value, retry: "arm" });
       return;
