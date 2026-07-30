@@ -19,6 +19,7 @@ import os
 import re
 import sys
 
+import doctor
 from _control_plane import (
     ControlPlaneError,
     Snapshot,
@@ -393,6 +394,10 @@ def evaluate_commit(
             )
 
     expansions = scope_expansions(parent, commit)
+    # Terminal transitions re-arm D-006 strictly in the trusted replay too — the
+    # local gate is cooperative, so the same rule must hold where the token binds.
+    for error in doctor.transition_currency_errors(parent, commit, now):
+        raise ControlPlaneError(f"{commit_ref}: {error}")
     owner_reasons.extend(owner_transition_reasons(parent, commit, paths))
 
     base_claims = active_claims(parent)

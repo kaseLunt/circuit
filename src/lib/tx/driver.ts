@@ -93,7 +93,8 @@ export type DriverFault =
       readonly kind: "refusal";
       readonly stage: DriverStage;
       readonly refusal: SandboxRefusalFact;
-      readonly retry: "arm" | "run";
+      /** `reload` joins the two at round-13: a transient expiry is answered by looking again. */
+      readonly retry: "arm" | "run" | "reload";
     }
   | {
       readonly kind: "transport-failed";
@@ -125,6 +126,11 @@ export interface DriverSnapshot {
   readonly nowMs: number;
 }
 
+/**
+ * The pointer slot. `clear` exists for owner-initiated forgetting (and is exercised by
+ * `localPointerStorage`'s own tests); the DRIVER never calls it — see the narrowed field on
+ * `SandboxDriver`, which is what keeps that true.
+ */
 export interface PointerStorage {
   read(): string | null;
   write(value: string): void;
@@ -243,6 +249,76 @@ const waitMs = (ms: number): Promise<void> =>
 const detailOf = (cause: unknown): string =>
   cause instanceof Error ? cause.message : String(cause);
 
+/**
+ * What a refusal PROVES about the retained session — the client's half of the server's session
+ * contract, classified in ONE place so the plan stage and the reset stage cannot drift (Codex
+ * round-8). Both stages advertise an arm-family Retry, and a Retry that resubmits the same call to
+ * the same state is not a recovery; the verdict is what makes it converge.
+ *
+ * `reset-clears` — the fork moved past its pinned base, or its phase is not plannable.
+ *   `registry.reset` restores `{kind:"active"}` with no entries, no plan, `txCount` 0, no pending
+ *   dispatch and a bumped generation, so every one of these is answered by a reset: `session-dirty`
+ *   (entries, or a non-active phase), `reconcile-required`, `halted`, `failed`, and `tx-cap` (the
+ *   count the cap reads is one of the fields a reset zeroes — which is what the card's own
+ *   "Re-simulating starts a fresh run" has always promised).
+ *
+ * `key-dead` — the registry will not serve this key again: `unknown-session` (never known, or
+ *   owner-destroyed), `session-expired` (swept, tombstoned), and `reset-failed`, whose contract is
+ *   explicitly transactional — the fork destroyed itself on the way out and the session was
+ *   removed. A reset cannot clear any of them; the key is retired and the next attempt creates.
+ *
+ * `transient` — nothing about the session is proven. `session-busy` is the one-at-a-time mutex held
+ *   by another caller (`beginExclusive` refuses this and nothing else), `rate-limited` is the
+ *   session's own floor, and `expiring-in-flight` is the TTL passing while an operation still holds
+ *   the session (round-13): the key stays, the fork flag stays, and the identical call is legal the
+ *   moment the mutex frees. Retiring here is how a live session gets abandoned at the cap.
+ *
+ * `not-session-state` — an execute/reconcile-stage bookkeeping refusal that says nothing about a
+ *   plannable fork. Unreachable at the two stages this is consulted from (the wire sets there are
+ *   closed by `planForSession` and the reset route), so it is classified rather than assumed.
+ */
+type SessionVerdict = "reset-clears" | "key-dead" | "transient" | "not-session-state";
+
+function sessionVerdictOf(refusal: SandboxRefusalFact): SessionVerdict {
+  switch (refusal.kind) {
+    case "session-dirty":
+    case "reconcile-required":
+    case "halted":
+    case "failed":
+    case "tx-cap":
+      return "reset-clears";
+    case "unknown-session":
+    case "session-expired":
+    case "reset-failed":
+      return "key-dead";
+    case "session-busy":
+    case "expiring-in-flight":
+    case "rate-limited":
+      return "transient";
+    case "at-capacity":
+    case "no-plan":
+    case "plan-changed":
+    case "plan-complete":
+    case "out-of-order":
+    case "nothing-to-reconcile":
+    case "reconcile-mismatch":
+      return "not-session-state";
+  }
+}
+
+/**
+ * The binding, in ONE definition (Codex round-9): a run's evidence may bind to exactly one plan —
+ * the one whose money-bearing fingerprint the run was captured with. Step identity cannot stand in
+ * for this: two plans with the same topology and different amounts agree step for step, and a
+ * session whose only record is a first-step failure has no settled money row left to disagree over.
+ *
+ * It takes the fingerprint VALUE, so each caller supplies the one it is entitled to consult — the
+ * parsed pointer at mount restore, this driver's own retained capture everywhere else (round-10).
+ */
+function fingerprintBinds(fingerprint: Hex | null, plan: PlanSuccess): boolean {
+  return fingerprint !== null && planHashOf(plan.steps) === fingerprint;
+}
+
 /** The two plan-stage refusal kinds the resume mirror deliberately omits. */
 const isPlanStageRefusal = (
   refusal: WireTransportRefusal,
@@ -251,7 +327,14 @@ const isPlanStageRefusal = (
 
 export class SandboxDriver {
   private readonly transport: SandboxTransport;
-  private readonly storage: PointerStorage;
+  /**
+   * The pointer is OVERWRITE-ON-ARM-ONLY (Codex round-11), and the narrowed type is the
+   * enforcement rather than a convention: `clear` is unreachable from inside the driver, so no
+   * future decision path can empty an origin-wide slot it cannot prove it owns. Every retirement
+   * is in-memory; a stale value is inert by construction, because adoption is gated on the
+   * retained fingerprint and the next `plan-ready` writes over it.
+   */
+  private readonly storage: Pick<PointerStorage, "read" | "write">;
   private readonly now: () => number;
   private readonly listeners = new Set<() => void>();
 
@@ -270,9 +353,29 @@ export class SandboxDriver {
    * pointer.
    */
   private retainedPlanHash: Hex | null = null;
+  /**
+   * The third leg of the retained triple (Codex round-10): the money-bearing fingerprint of the plan
+   * this driver captured `sessionKey`/`retainedPlanHash` WITH. Written and cleared with them, at the
+   * same two capture sites, so the three can never name different runs.
+   *
+   * It exists because the pointer lives in origin-wide storage and a second tab writes its own
+   * valid pointer there. Re-reading that pointer to decide what THIS driver may adopt reads one
+   * run's fingerprint against another run's key and hash: a pointer vouching for the newest arm
+   * would wave through an adoption of the retained session's evidence. The capture is immutable
+   * from this driver's side, so it is what the gate consults.
+   */
+  private retainedFingerprint: Hex | null = null;
   /** True once the session fork has seen any transaction — a re-arm must reset it first. */
   private forkDirty = false;
   private lastArm: ArmInput | null = null;
+  /**
+   * The DOCUMENT generation, bumped by every `documentMutated` call whatever the phase. An arm
+   * spends its whole flight in `simulating` with no fault to retire, so this counter is the only
+   * thing an in-flight attempt can compare itself against to learn that the document it is
+   * arming no longer exists (Codex round-6). The server keeps the same kind of counter per
+   * session fork (`recordPlan`'s `expectedGeneration`) for the same reason.
+   */
+  private generation = 0;
 
   constructor(options: DriverOptions) {
     this.transport = options.transport;
@@ -371,6 +474,9 @@ export class SandboxDriver {
    */
   async arm(input: ArmInput): Promise<void> {
     if (!this.begin("plan")) return;
+    // Captured at entry, compared after every await: the attempt belongs to THIS document
+    // generation and to no other (Codex round-6).
+    const generation = this.generation;
     this.lastArm = input;
     try {
       // Recovery is a NEW machine (machine.ts PINNED note): terminal and failed states
@@ -381,13 +487,17 @@ export class SandboxDriver {
       }
       if (!this.dispatch({ type: "simulate" })) return;
       const key = await this.ensureSession();
+      if (this.discardStaleArm(generation)) return;
       if (key === null) {
         // ensureSession set the fault; the machine returns to idle honestly.
         this.dispatch({ type: "plan-refused" });
         return;
       }
-      await this.planOnSession(key, input);
+      await this.planOnSession(key, input, generation);
     } catch (cause) {
+      // The same gate on the failure path: a thrown call for a document that is gone must not
+      // leave a fault behind whose Retry re-runs the plan the canvas replaced.
+      if (this.discardStaleArm(generation)) return;
       this.dispatch({ type: "plan-refused" });
       this.setFault({
         kind: "transport-failed",
@@ -397,6 +507,96 @@ export class SandboxDriver {
       });
     } finally {
       this.end();
+    }
+  }
+
+  /**
+   * The generation gate for an in-flight arm (Codex round-6).
+   *
+   * An edit landing DURING the flight is invisible to the round-5 retirement rule: the machine is
+   * `simulating` and there is no fault yet, so nothing was recorded — and the attempt then
+   * adopted `ready` for the pre-edit plan, or minted an arm fault whose Retry re-ran it.
+   *
+   * So the attempt is discarded whole, and it is discarded BEFORE anything is adopted, stated or
+   * persisted. The machine leaves `simulating` through the same `plan-refused` transition every
+   * other failed arm uses, the retained input goes with it (nothing legitimate is left to
+   * re-arm), and no fault is minted — the landing is exactly the one the round-5 retirement
+   * produces, where the only offer on screen is a fresh arm of the current document.
+   *
+   * The SESSION is kept rather than destroyed — but it is no longer CERTIFIED, so the fork is
+   * marked dirty and the next arm resets it first (Codex round-7). "This driver dispatched
+   * nothing" is not proof the fork is still pinned at its base: the key is persisted and shared,
+   * so another tab can hold it and execute the moment the planning mutex frees, after which the
+   * server refuses every re-plan `session-dirty` until a reset restores the base
+   * (`planForSession`). One reset the client may not have needed is the cheap side of that
+   * trade; an un-armable document until reload or TTL is the expensive one. Destroying instead
+   * would be worse: the client owns no teardown surface today, the fork is not orphaned (the
+   * driver still holds the key, and `ensureSession` retires it outright if the reset fails), and
+   * the registry's TTL reclaims it on either route.
+   */
+  private discardStaleArm(generation: number): boolean {
+    if (this.generation === generation) return false;
+    this.lastArm = null;
+    // Any fault the discarded attempt already set — a refused create, say — names the dead
+    // document too. Dropped BEFORE the transition, so a genuine machine refusal below stands.
+    this.fault = null;
+    this.forkDirty = true;
+    if (this.machine.phase.kind === "simulating") {
+      this.dispatch({ type: "plan-refused" });
+      return true;
+    }
+    this.notify();
+    return true;
+  }
+
+  /**
+   * Forget a key the registry will not serve again. IN MEMORY only: proving THIS driver's key dead
+   * proves nothing about what the shared slot now holds (Codex round-11). Retiring the retained
+   * triple is what stops adoption — `rehydrate`'s fallback gate reads that triple and refuses once
+   * it is null — and the next `plan-ready` overwrites the slot with a live pointer.
+   */
+  private retireSession(): void {
+    this.sessionKey = null;
+    this.session = null;
+    this.forkDirty = false;
+    this.retainedPlanHash = null;
+    this.retainedFingerprint = null;
+  }
+
+  /**
+   * A refused reset, classified (Codex round-8). `retired` means the key is gone and the caller
+   * falls through to creating a fresh session; `stopped` means the fault is set and this arm is
+   * over with the session and its dirty flag exactly as they were — so the Retry the card offers
+   * re-runs the RESET, and converges the moment the other caller's mutex frees.
+   */
+  private afterRefusedReset(refusal: WireTransportRefusal): "retired" | "stopped" {
+    const cannotMean = (detail: string): "stopped" => {
+      this.setFault({ kind: "wire-mismatch", stage: "reset", detail, retry: "reload" });
+      return "stopped";
+    };
+    if (isPlanStageRefusal(refusal)) {
+      return cannotMean(`unexpected plan-stage refusal on reset: ${refusal.kind}`);
+    }
+    const parsed = refusalFactOf(refusal);
+    if (!parsed.ok) {
+      return cannotMean(
+        parsed.refusal.kind === "malformed-wire" ? parsed.refusal.detail : parsed.refusal.kind,
+      );
+    }
+    switch (sessionVerdictOf(parsed.value)) {
+      case "key-dead":
+        this.retireSession();
+        return "retired";
+      case "transient":
+        // The mutex, not the session. Keeping the key AND the dirty flag is what makes the retry a
+        // retry of the reset, rather than a plan on a fork that was never reset.
+        this.setFault({ kind: "refusal", stage: "reset", refusal: parsed.value, retry: "arm" });
+        return "stopped";
+      case "reset-clears":
+      case "not-session-state":
+        // A reset cannot honestly answer with either: the states a reset clears are what it is FOR,
+        // and the bookkeeping refusals belong to other stages. Skew, refused rather than guessed.
+        return cannotMean(`a reset cannot refuse ${parsed.value.kind}`);
     }
   }
 
@@ -418,12 +618,13 @@ export class SandboxDriver {
         }
         return this.sessionKey;
       }
-      // A session that cannot reset is not reused: expired, destroyed or reset-failed all
-      // resolve to a fresh session — the designed recovery the router names (finding 6).
-      this.sessionKey = null;
-      this.session = null;
-      this.retainedPlanHash = null;
-      this.storage.clear();
+      // A refused reset is CLASSIFIED, not read as "this session is finished" (Codex round-8).
+      // The reset route refuses from exactly three places — the lookup, the one-at-a-time mutex,
+      // and a transactional reset failure — and only two of the three say anything is wrong with
+      // the key. Discarding it on the third abandoned a session that was still alive and holding
+      // an anvil slot: below the cap that leaks a fork until its TTL, and at the cap the create
+      // that followed came back `at-capacity` — a live session the client could no longer name.
+      if (this.afterRefusedReset(response.refusal) !== "retired") return null;
     }
     if (this.sessionKey !== null) return this.sessionKey;
     const created = await this.transport.create();
@@ -456,8 +657,15 @@ export class SandboxDriver {
     return this.sessionKey;
   }
 
-  private async planOnSession(key: string, input: ArmInput): Promise<void> {
+  private async planOnSession(
+    key: string,
+    input: ArmInput,
+    generation: number,
+  ): Promise<void> {
     const response = await this.transport.plan(key, input.token);
+    // Before ANY reading of the response: a plan for a document that is gone is not adopted, not
+    // refused in words, and not persisted (Codex round-6).
+    if (this.discardStaleArm(generation)) return;
     if (!response.ok) {
       if (isPlanStageRefusal(response.refusal)) {
         // The client's own encode/plan gates passed, so a server-side document or plan
@@ -487,12 +695,17 @@ export class SandboxDriver {
       }
       if (parsed.value.kind === "session-expired") {
         this.dispatch({ type: "session-lost", executedSteps: parsed.value.executedSteps });
-        this.retainedPlanHash = null;
-        this.storage.clear();
-        this.sessionKey = null;
-        this.session = null;
+        this.retireSession();
         return;
       }
+      // Every other plan refusal is classified BEFORE the arm-family Retry is offered, because the
+      // action a card advertises has to be able to succeed (Codex round-7, generalised in round-8).
+      // The server refuses on the phase before it refuses on a moved fork (`planForSession` runs
+      // `phaseRefusal` first), so `halted`, `failed` and `reconcile-required` arrive here as
+      // themselves and never as `session-dirty` — and each of them is answered by the same reset.
+      const verdict = sessionVerdictOf(parsed.value);
+      if (verdict === "reset-clears") this.forkDirty = true;
+      if (verdict === "key-dead") this.retireSession();
       this.dispatch({ type: "plan-refused" });
       this.setFault({ kind: "refusal", stage: "plan", refusal: parsed.value, retry: "arm" });
       return;
@@ -515,10 +728,10 @@ export class SandboxDriver {
       return;
     }
     this.plannedAtMs = this.now();
+    const fingerprint = planHashOf(input.plan.steps);
     this.retainedPlanHash = planHash;
-    this.storage.write(
-      encodePointer({ sessionKey: key, planHash, fingerprint: planHashOf(input.plan.steps) }),
-    );
+    this.retainedFingerprint = fingerprint;
+    this.storage.write(encodePointer({ sessionKey: key, planHash, fingerprint }));
     this.notify();
   }
 
@@ -632,8 +845,10 @@ export class SandboxDriver {
     }
     const refusal = parsed.value;
     if (refusal.kind === "session-expired") {
+      // The binding retires; the shared slot is not ours to empty (round-11). The run lands on
+      // `abandoned` from the refusal's own evidence, which reads nothing from storage.
       this.retainedPlanHash = null;
-      this.storage.clear();
+      this.retainedFingerprint = null;
     }
     const result = reduce(this.machine, { type: "step-refused", refusal });
     this.machine = result.machine;
@@ -720,13 +935,21 @@ export class SandboxDriver {
     }
     const refusal = parsed.value;
     if (refusal.kind === "session-expired") {
+      // Binding only, as above (round-11).
       this.retainedPlanHash = null;
-      this.storage.clear();
+      this.retainedFingerprint = null;
       // `session-lost` is legal from every reconcile-gated phase (SESSION_LOSABLE).
       this.dispatch({ type: "session-lost", executedSteps: refusal.executedSteps });
       return "stop";
     }
-    if (refusal.kind === "session-busy" || refusal.kind === "rate-limited") {
+    if (
+      refusal.kind === "session-busy" ||
+      refusal.kind === "rate-limited" ||
+      refusal.kind === "expiring-in-flight"
+    ) {
+      // `expiring-in-flight` joins the transient pair (round-13): the session is finishing a call,
+      // and re-entering the loop is what discovers how it ended — never a rehydration that adopts
+      // a record still being written.
       this.setFault({ kind: "refusal", stage: "reconcile", refusal, retry: "run" });
       return "stop";
     }
@@ -760,13 +983,27 @@ export class SandboxDriver {
    * retained pointer — never re-derived. `silentStale` is the mount-restore mode: a
    * pointer the current document can no longer vouch for is DISCARDED without a fault
    * (judgment call 6); the fault-retry mode surfaces the same refusal as a wire fault.
+   *
+   * The pairing is GATED here, at the one place a plan and a hash meet (Codex round-9). A live
+   * machine's pair is self-consistent — both were adopted together at `plan-ready` — but the
+   * fallback pair is not: `lastArm` is the NEWEST arm and `retainedPlanHash` belongs to the run the
+   * capture named, and after a failed run is re-simulated those are different plans. It cannot be
+   * checked in the callers: `retry`'s reload family is one of three routes in, and the invariant
+   * belongs to the pairing rather than to any one of them.
+   *
+   * What the gate consults is this driver's RETAINED triple, never storage (Codex round-10). The
+   * pointer is origin-wide and a second tab writes its own valid one; a re-read compares that tab's
+   * fingerprint against this tab's key and hash, which is not one run's evidence but two — a pointer
+   * vouching for our newest arm would wave through an adoption of our retained session's record.
+   * The capture cannot be moved by anyone else, so it is the only honest authority here.
    */
   private async rehydrate(
     silentStale = false,
     stillCurrent: () => boolean = () => true,
   ): Promise<boolean> {
     const key = this.sessionKey;
-    const plan = this.machine.plan ?? this.lastArm?.plan ?? null;
+    const adopted = this.machine.plan;
+    const plan = adopted ?? this.lastArm?.plan ?? null;
     const planHash = this.machine.planHash ?? this.retainedPlanHash;
     if (key === null || plan === null || planHash === null) {
       this.setFault({
@@ -774,6 +1011,19 @@ export class SandboxDriver {
         detail: "nothing to rehydrate: no session, plan, or plan hash",
         retry: "reload",
       });
+      return false;
+    }
+    if (adopted === null && !fingerprintBinds(this.retainedFingerprint, plan)) {
+      // The retained capture names a run this plan cannot claim. Nothing is looked up, because no
+      // answer could legally be adopted: the evidence would be another plan's, rendered against
+      // this one. Only the IN-MEMORY binding is dropped — storage is not touched, because this
+      // driver cannot prove the pointer now there is its own (round-10: it may be a second tab's
+      // valid pointer, and there is no compare-and-swap on localStorage that would make
+      // "clear it if it is mine" true by the time the clear lands). A pointer of our own that is
+      // genuinely stale retires at the next mount, where `restore` reads it and refuses it.
+      this.retainedPlanHash = null;
+      this.retainedFingerprint = null;
+      this.notify();
       return false;
     }
     let transportResponse;
@@ -805,14 +1055,33 @@ export class SandboxDriver {
         outcome.refusal.refusal === "unknown-session"
       ) {
         // Owner-destroy silence is deliberate (D8): the key is simply unknown; the
-        // designed story is a fresh session, not an error.
+        // designed story is a fresh session, not an error. The slot keeps whatever it holds
+        // (round-11) — a dead pointer of ours costs one lookup at the next mount and is then
+        // overwritten by the arm that follows.
         this.sessionKey = null;
         this.session = null;
         this.retainedPlanHash = null;
-        this.storage.clear();
+        this.retainedFingerprint = null;
         this.machine = createExecutionMachine({ mode: "sandbox" });
         this.plannedAtMs = null;
         this.notify();
+        return false;
+      }
+      if (
+        outcome.refusal.kind === "unresumable-refusal" &&
+        outcome.refusal.refusal === "expiring-in-flight"
+      ) {
+        // The TTL passed while the session still held an operation (Codex round-13). There is no
+        // final record yet — the running call may still settle a receipt — so nothing is adopted
+        // and NOTHING is retired: the key is the only route back to the record that call is about
+        // to complete. The state is retryable in the driver's own reload grammar, and the next
+        // look answers with the tombstone once the operation releases.
+        this.setFault({
+          kind: "refusal",
+          stage: "resume",
+          refusal: { kind: "expiring-in-flight" },
+          retry: "reload",
+        });
         return false;
       }
       if (silentStale && outcome.refusal.kind !== "money-claim-mismatch") {
@@ -822,7 +1091,7 @@ export class SandboxDriver {
         // pointer is not stale (the fingerprint matched); the server's record failed
         // the recompute gate, and evidence of that is never swallowed — it faults.
         this.retainedPlanHash = null;
-        this.storage.clear();
+        this.retainedFingerprint = null;
         this.notify();
         return false;
       }
@@ -842,7 +1111,7 @@ export class SandboxDriver {
       this.sessionKey = null;
       this.session = null;
       this.retainedPlanHash = null;
-      this.storage.clear();
+      this.retainedFingerprint = null;
       this.notify();
       return false;
     }
@@ -858,6 +1127,14 @@ export class SandboxDriver {
         };
       }
       this.forkDirty = response.session.txCount > 0;
+    } else {
+      // A TOMBSTONE was adopted (Codex round-12). It is the only refusal `resumePlan` resumes
+      // from — every other one is `unresumable-refusal` and returned above — so reaching here on a
+      // non-ok response means the session is swept and its key will never be served again. The
+      // machine it produced is real evidence and stays; the KEY does not, or the card's own
+      // "Start a fresh session" plans on the dead key, is refused `session-expired`, and lands
+      // back on the same card. A designed action must work the first time it is pressed.
+      this.retireSession();
     }
     this.notify();
     return true;
@@ -880,17 +1157,21 @@ export class SandboxDriver {
       const pointer = parsePointer(this.storage.read());
       if (pointer === null) return;
       // Codex hard-gate finding 1: the pointer binds to the MONEY-BEARING fingerprint
-      // of the plan that was armed. The current document's plan must recompute to the
-      // same hash BEFORE anything is looked up or adopted — step identity alone cannot
-      // distinguish same-topology plans with different amounts. A mismatch retires the
-      // pointer silently (the stale-pointer ruling): the run it names belongs to a
-      // document no longer on the canvas.
-      if (planHashOf(input.plan.steps) !== pointer.fingerprint) {
-        this.storage.clear();
+      // of the plan that was armed, and the current document's plan must recompute to the
+      // same hash BEFORE anything is looked up or adopted. The comparison itself is
+      // `fingerprintBinds`, shared with `rehydrate` (round-9/round-10) so the binding has one
+      // definition. A mismatch retires the pointer silently (the stale-pointer ruling):
+      // the run it names belongs to a document no longer on the canvas.
+      if (!fingerprintBinds(pointer.fingerprint, input.plan)) {
+        // Nothing is adopted, and nothing is written back: read-then-clear is not atomic on an
+        // origin-wide key, so this driver cannot prove the value it just read is still the value
+        // there — or was ever its own (round-11). An unvouched-for pointer is inert; the next arm
+        // overwrites it.
         return;
       }
       this.sessionKey = pointer.sessionKey;
       this.retainedPlanHash = pointer.planHash;
+      this.retainedFingerprint = pointer.fingerprint;
       resumed = await this.rehydrate(true, stillCurrent);
       if (resumed) this.plannedAtMs = null;
       // Re-checked between adoption and continuation (Codex thread 019fa749 finding
@@ -901,8 +1182,8 @@ export class SandboxDriver {
         this.sessionKey = null;
         this.session = null;
         this.retainedPlanHash = null;
+        this.retainedFingerprint = null;
         this.plannedAtMs = null;
-        this.storage.clear();
         this.notify();
         resumed = false;
       }
@@ -914,15 +1195,45 @@ export class SandboxDriver {
     }
   }
 
-  /** §2.4: a document mutation while `ready` disarms the run — back to idle, with notice. */
+  /**
+   * §2.4: a document mutation while `ready` disarms the run — back to idle, with notice.
+   *
+   * And while idle holding an ARM-family fault, the same mutation retires the RETRY (Codex
+   * round-5). `lastArm` is the input `retry()` re-arms from, and a fault card outlives the
+   * document it was raised against: an edit followed by Retry opened a session, reset a fork and
+   * planned — for the document the canvas no longer shows. Retiring the fault with its input
+   * leaves exactly one offer on screen, a fresh arm of the CURRENT document, which is what
+   * "Re-simulate" has meant since SPEC §6; nothing is stated because nothing survived to state,
+   * and the edit that caused it is the user's own.
+   *
+   * The other two families survive an edit on purpose: `run` and `reload` name a run the user
+   * already committed, whose record the server holds. An edit is not standing to cancel the only
+   * route back to that record (D6/D11) — the document changing does not un-execute a step.
+   *
+   * The generation bump is unconditional and comes first, because the two rules below are about
+   * states the mutation can SEE, and an arm in flight is neither of them (round-6,
+   * `discardStaleArm`): the notification arrives once, so what it cannot act on now it must at
+   * least record.
+   */
   documentMutated(): void {
-    if (this.machine.phase.kind !== "ready") return;
-    this.dispatch({ type: "document-mutated" });
-    this.plannedAtMs = null;
-    // The session fork is untouched (nothing dispatched from ready), so the key is kept
-    // for reuse; only the resumable-run pointer retires with the plan it named.
-    this.retainedPlanHash = null;
-    this.storage.clear();
+    this.generation += 1;
+    if (this.machine.phase.kind === "ready") {
+      this.dispatch({ type: "document-mutated" });
+      this.plannedAtMs = null;
+      // The session fork is untouched (nothing dispatched from ready), so the key is kept for
+      // reuse; the run's BINDING retires with the plan it named. Not the shared slot: this
+      // driver's in-memory `ready` state says nothing about whose pointer is in it, and another
+      // tab mid-run needs its own pointer to survive an edit made over here (round-11).
+      this.retainedPlanHash = null;
+      this.retainedFingerprint = null;
+      this.notify();
+      return;
+    }
+    if (this.fault === null || this.fault.retry !== "arm") return;
+    // The pointer stays: it names an earlier COMMITTED run, not this failed arm, and the
+    // fingerprint gate in `restore` is what decides whether the current document may adopt it.
+    this.lastArm = null;
+    this.fault = null;
     this.notify();
   }
 

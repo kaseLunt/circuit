@@ -4,6 +4,7 @@ import { encodeShareGraph } from "../share/encode";
 import { flagshipGraph } from "../../../tests/helpers/graphs";
 import { fixtureSnapshot } from "../../../tests/helpers/chain-snapshot";
 import {
+  SCRIPT_ACTOR,
   SCRIPT_PLAN_HASH,
   SCRIPT_SESSION_KEY,
   memoryStorage,
@@ -11,7 +12,9 @@ import {
   wireAttributed,
   wireHash,
   predictedWeiOf,
+  type ScriptOverrides,
 } from "../../../tests/helpers/sandbox-transport";
+import type { SandboxTransport } from "./transport";
 import { stepRequirementsOf } from "../execution/machine";
 import { planHashOf } from "../execution/plan-hash";
 import { SANDBOX_OUTPUT_TOLERANCE, toleranceWeiFor } from "../execution/tolerance";
@@ -25,6 +28,7 @@ import {
   localPointerStorage,
   parsePointer,
   planAgreementFailure,
+  type PointerStorage,
 } from "./driver";
 
 const graph = flagshipGraph();
@@ -45,12 +49,43 @@ function localToken(): string {
 const plan = localPlan();
 const token = localToken();
 const armInput = { plan, token };
+
+/** Plan B: the same strategy at a different borrow allocation — same steps, different money. */
+const graphB = flagshipGraph("10", 5_000);
+const planB: PlanSuccess = (() => {
+  const built = buildPlan(graphB, snapshot);
+  if (!built.ok) throw new Error("plan B failed to build");
+  return built;
+})();
+const tokenB: string = (() => {
+  const encoded = encodeShareGraph(graphB);
+  if (!encoded.ok) throw new Error("document B failed to encode");
+  return encoded.token;
+})();
+const armInputB = { plan: planB, token: tokenB };
 const FINGERPRINT = planHashOf(plan.steps);
 
 /** First flagship step whose output is attributed from Transfer logs — halt fixture site. */
 const transferStepIndex = plan.steps.findIndex(
   (step) => stepRequirementsOf(plan, step).output === "transfer-event",
 );
+
+/**
+ * The round-11 pointer contract, asserted by name.
+ *
+ * A retirement is IN MEMORY. The pointer is one origin-wide key every tab shares, so no decision
+ * path may empty it: proving THIS driver's key dead, or its plan stale, says nothing about whose
+ * pointer is in the slot now, and read-then-clear is not atomic. The beats using this helper each
+ * used to assert the slot emptied, which encoded the defect — the value being emptied could be a
+ * second tab's live pointer for a run mid-execution.
+ *
+ * Leaving it is safe by construction: adoption is gated on this driver's own retained fingerprint
+ * (round-9/round-10), so a stale value cannot be adopted, and the next `plan-ready` overwrites the
+ * slot with a live pointer.
+ */
+const expectPointerLeftInert = (held: string | null): void => {
+  expect(held).not.toBeNull();
+};
 
 function driverWith(
   sandbox = scriptedSandbox(),
@@ -290,7 +325,7 @@ describe("execute", () => {
     expect(sandbox.calls.executeStep.length).toBe(failedAt + 1);
   });
 
-  it("treats session expiry mid-run as abandoned and clears the pointer (T24)", async () => {
+  it("treats session expiry mid-run as abandoned and retires its binding (T24)", async () => {
     const sandbox = scriptedSandbox({
       onExecuteStep: (index) =>
         index === 4
@@ -309,7 +344,7 @@ describe("execute", () => {
     await driver.arm(armInput);
     await driver.execute();
     expect(driver.snapshot().machine.phase).toMatchObject({ kind: "abandoned", executedSteps: 4 });
-    expect(storage.held()).toBeNull();
+    expectPointerLeftInert(storage.held());
   });
 
   it("surfaces session-busy as a retryable refusal without losing the run", async () => {
@@ -440,7 +475,7 @@ describe("restore and lifecycle", () => {
     expect(snap.session?.baseBlockHash).toBeDefined();
   });
 
-  it("clears a pointer whose session the server no longer knows (owner-destroy silence)", async () => {
+  it("lands on a fresh session when the server no longer knows the key (owner-destroy silence)", async () => {
     const storage = memoryStorage();
     storage.write(
       encodePointer({
@@ -455,10 +490,12 @@ describe("restore and lifecycle", () => {
     const driver = new SandboxDriver({ transport: sandbox.transport, storage, now: () => 0 });
     await driver.restore(armInput);
     expect(driver.snapshot().machine.phase.kind).toBe("idle");
-    expect(storage.held()).toBeNull();
+    // One dead lookup, an in-memory retire, and the fresh-arm state — no loop and no error surface.
+    expect(sandbox.calls.session).toBe(1);
+    expectPointerLeftInert(storage.held());
   });
 
-  it("discards a pointer whose plan hash no longer matches the local document", async () => {
+  it("refuses a pointer whose plan hash no longer matches the local document", async () => {
     const storage = memoryStorage();
     storage.write(
       encodePointer({
@@ -474,21 +511,88 @@ describe("restore and lifecycle", () => {
     const driver = new SandboxDriver({ transport: sandbox.transport, storage, now: () => 0 });
     await driver.restore(armInput);
     expect(driver.snapshot().machine.phase.kind).toBe("idle");
-    expect(storage.held()).toBeNull();
+    // The FINGERPRINT vouches here (the document is unchanged); it is the pointer's plan HASH that
+    // the server's record contradicts, so the refusal comes from `resumePlan` after the lookup.
+    expect(sandbox.calls.session).toBe(1);
+    // Nothing is written back either way: read-then-clear is not atomic on a shared key, so the
+    // value read is not proof of the value there (round-11).
+    expectPointerLeftInert(storage.held());
   });
 
-  it("document mutation at ready disarms the run and retires the pointer (§2.4)", async () => {
-    const { driver, storage } = driverWith();
+  it("document mutation at ready disarms the run and retires its binding (§2.4)", async () => {
+    const { driver, storage, sandbox } = driverWith();
     await driver.arm(armInput);
+    const armed = storage.held();
     driver.documentMutated();
     expect(driver.snapshot().machine.phase.kind).toBe("idle");
-    expect(storage.held()).toBeNull();
+    // The BINDING retires, not the shared slot — another tab mid-run needs its own pointer to
+    // survive an edit made over here (round-11).
+    expect(storage.held()).toBe(armed);
+    // And the slot is corrected the one way it may be: the next arm overwrites it.
+    await driver.arm(armInput);
+    expect(sandbox.calls.plan).toBe(2);
+    expectPointerLeftInert(storage.held());
   });
 
   it("document mutation anywhere else is a no-op", async () => {
     const { driver } = driverWith();
     driver.documentMutated();
     expect(driver.snapshot().machine.phase.kind).toBe("idle");
+  });
+
+  it("a document mutation retires an arm-family fault with the input it would re-arm", async () => {
+    let failing = true;
+    const sandbox = scriptedSandbox({
+      onCreate: () => {
+        if (!failing) return undefined;
+        throw new Error("the sandbox service did not answer");
+      },
+    });
+    const { driver } = driverWith(sandbox);
+    await driver.arm(armInput);
+    expect(driver.snapshot().fault).toMatchObject({ kind: "transport-failed", retry: "arm" });
+    expect(sandbox.calls.create).toBe(1);
+
+    driver.documentMutated();
+    expect(driver.snapshot().fault).toBeNull();
+
+    // The advertised retry named a document that no longer exists, so it reaches no wire: the
+    // arm input went with the fault rather than waiting to be re-run against the wrong plan.
+    await driver.retry();
+    expect(sandbox.calls.create).toBe(1);
+    expect(sandbox.calls.reset).toBe(0);
+    expect(sandbox.calls.plan).toBe(0);
+    expect(driver.snapshot().machine.phase.kind).toBe("idle");
+
+    // What the host still offers works: a fresh arm, of whatever the canvas now holds.
+    failing = false;
+    await driver.arm(armInput);
+    expect(driver.snapshot().machine.phase.kind).toBe("ready");
+    expect(sandbox.calls.create).toBe(2);
+  });
+
+  it("a document mutation leaves a committed run's own recovery standing", async () => {
+    let busyOnce = true;
+    const sandbox = scriptedSandbox({
+      onExecuteStep: (index) => {
+        if (index === 1 && busyOnce) {
+          busyOnce = false;
+          return { ok: false, refusal: { kind: "session-busy" } };
+        }
+        return undefined;
+      },
+    });
+    const { driver } = driverWith(sandbox);
+    await driver.arm(armInput);
+    await driver.execute();
+    expect(driver.snapshot().fault).toMatchObject({ kind: "refusal", retry: "run" });
+
+    // The edit does not un-execute step 1. A mid-run fault is the route back to what the server
+    // holds, and cancelling it on a canvas edit would strand the run (D6/D11).
+    driver.documentMutated();
+    expect(driver.snapshot().fault).toMatchObject({ kind: "refusal", retry: "run" });
+    await driver.retry();
+    expect(driver.snapshot().machine.phase.kind).toBe("complete");
   });
 
   it("re-arming after a completed run resets the dirty fork before planning (D8 hygiene)", async () => {
@@ -575,7 +679,7 @@ describe("reconcile paths (D3/D6)", () => {
     expect(sandbox.calls.executeStep.filter((index) => index === 3).length).toBe(1);
   });
 
-  it("session expiry during reconciliation abandons with the pointer cleared", async () => {
+  it("session expiry during reconciliation abandons with its binding retired", async () => {
     const sandbox = scriptedSandbox({
       onExecuteStep: (index) => (index === 2 ? { ok: true, result: unavailableAt(2) } : undefined),
       onReconcile: () => ({
@@ -592,7 +696,7 @@ describe("reconcile paths (D3/D6)", () => {
     await driver.arm(armInput);
     await driver.execute();
     expect(driver.snapshot().machine.phase).toMatchObject({ kind: "abandoned", executedSteps: 2 });
-    expect(storage.held()).toBeNull();
+    expectPointerLeftInert(storage.held());
   });
 
   it("a busy reconcile faults retryable and the retry finishes the run", async () => {
@@ -1013,13 +1117,16 @@ describe("restoration binds to the money-bearing fingerprint (hard-gate finding 
       now: () => 0,
     });
     await second.restore({ plan: planB, token: encodedB.token });
-    // The pointer is retired BEFORE any lookup: session A is never adopted under plan
-    // B's predictions, and nothing executes.
+    // Refused BEFORE any lookup: session A is never adopted under plan B's predictions, and
+    // nothing executes.
     expect(second.snapshot().machine.phase.kind).toBe("idle");
     expect(second.snapshot().machine.plan).toBeNull();
     expect(first.sandbox.calls.session).toBe(sessionCallsBefore);
     expect(first.sandbox.calls.executeStep.length).toBe(stepCallsBefore);
-    expect(first.storage.held()).toBeNull();
+    // And A's pointer SURVIVES the refusal, which is the round-11 half of the same story: this
+    // driver holds plan B, the pointer belongs to A's still-live run, and deleting it here is how
+    // a second tab's resumability used to disappear.
+    expectPointerLeftInert(first.storage.held());
   });
 
   it("still restores when the document's plan recomputes to the armed fingerprint", async () => {
@@ -1230,7 +1337,7 @@ describe("the wire-mismatch gate is durable across reload (thread 019fa749 findi
 });
 
 describe("restore is bound to the document generation (thread 019fa749 finding 2)", () => {
-  it("an edit while the lookup is in flight adopts nothing and retires the pointer", async () => {
+  it("an edit while the lookup is in flight adopts nothing", async () => {
     const first = driverWith();
     await first.driver.arm(armInput);
     await first.driver.execute();
@@ -1259,8 +1366,996 @@ describe("restore is bound to the document generation (thread 019fa749 finding 2
     expect(snap.machine.phase.kind).toBe("idle");
     expect(snap.machine.plan).toBeNull();
     expect(snap.fault).toBeNull();
-    expect(first.storage.held()).toBeNull();
+    // The run the pointer names is still the server's, and an undo could still resume it: nothing
+    // about a document edit here entitles this driver to empty the shared slot (round-11).
+    expectPointerLeftInert(first.storage.held());
     expect(first.sandbox.calls.executeStep.length).toBe(stepCalls);
   });
 });
 
+
+/**
+ * Codex round-6 — AN ARM IS BOUND TO THE DOCUMENT GENERATION.
+ *
+ * The round-5 retirement reads state a mutation can SEE: `ready`, or an arm fault already on
+ * screen. An arm in flight is neither — the machine sits in `simulating` with no fault yet — so an
+ * edit landing between the request and its response went unrecorded, and the attempt then adopted
+ * `ready` for the pre-edit plan (executable), or minted a fault whose Retry re-ran it. The
+ * notification arrives once, and normal network latency is all the window it needs.
+ *
+ * Every beat below holds ONE wire call open and lands the edit while it is genuinely out, which is
+ * the only way to reach this seam: a transport that answers immediately cannot be interrupted.
+ */
+/**
+ * A transport that HOLDS one verb: the call is announced as asked and its response withheld until
+ * the test releases it. Everything else answers through the scripted server unchanged, so the plan
+ * agreement and identity checks stay real. Shared by the round-6 and round-7 beats — an edit or a
+ * second client can only land mid-flight against a call that is genuinely still out.
+ */
+function heldSandbox(verb: "create" | "plan" | "executeStep", overrides: ScriptOverrides = {}) {
+  const inner = scriptedSandbox(overrides);
+  let announce!: () => void;
+  const asked = new Promise<void>((resolve) => {
+    announce = () => resolve();
+  });
+  let release!: () => void;
+  const released = new Promise<void>((resolve) => {
+    release = () => resolve();
+  });
+  const hold = <T>(run: () => Promise<T>): Promise<T> => {
+    // The operation ENTERS the server immediately and only its ANSWER is withheld — which is what
+    // "in flight" means, and what the registry's deferred sweep is about: the mutex-holder is
+    // already past the lookup gate. A wrapper that deferred the call itself would be modelling a
+    // request that never left the client (round-13).
+    const started = run();
+    // The rejection still travels through the chain below; this only marks it handled meanwhile.
+    started.catch(() => undefined);
+    announce();
+    return released.then(() => started);
+  };
+  const held: Partial<SandboxTransport> =
+    verb === "create"
+      ? { create: () => hold(() => inner.transport.create()) }
+      : verb === "plan"
+        ? { plan: (key: string, document: string) => hold(() => inner.transport.plan(key, document)) }
+        : {
+            executeStep: (key: string, planHash: string, stepIndex: number) =>
+              hold(() => inner.transport.executeStep(key, planHash, stepIndex)),
+          };
+  const transport: SandboxTransport = { ...inner.transport, ...held };
+  return { ...inner, transport, asked, release };
+}
+
+describe("an arm is bound to the document generation (round-6)", () => {
+  it("adopts ready when nothing edits the document while the plan call is out", async () => {
+    const sandbox = heldSandbox("plan");
+    const { driver, storage } = driverWith(sandbox);
+    const arming = driver.arm(armInput);
+    await sandbox.asked;
+    expect(driver.snapshot().machine.phase.kind).toBe("simulating");
+    sandbox.release();
+    await arming;
+    expect(driver.snapshot().machine.phase.kind).toBe("ready");
+    expect(driver.snapshot().fault).toBeNull();
+    expect(storage.held()).not.toBeNull();
+  });
+
+  it("adopts nothing when the document changes while the plan call is out and it SUCCEEDS", async () => {
+    const sandbox = heldSandbox("plan");
+    const { driver, storage } = driverWith(sandbox);
+    const arming = driver.arm(armInput);
+    await sandbox.asked;
+
+    driver.documentMutated();
+    sandbox.release();
+    await arming;
+
+    // A plan for a document that is gone may not become executable, and may not be remembered.
+    const snap = driver.snapshot();
+    expect(snap.machine.phase.kind).toBe("idle");
+    expect(snap.machine.plan).toBeNull();
+    expect(snap.machine.planHash).toBeNull();
+    expect(snap.fault).toBeNull();
+    expect(snap.plannedAtMs).toBeNull();
+    expect(storage.held()).toBeNull();
+
+    // The session it opened is KEPT — the fresh arm reuses the key rather than paying to spawn
+    // another — and what it pins is the CURRENT document's plan.
+    //
+    // The reset here is round-7 correcting round-6: this beat originally asserted `reset === 0`,
+    // on the reasoning that a driver which dispatched nothing leaves a clean fork. That reasoning
+    // does not hold for a SHARED session (the key is persisted, a second tab can execute the
+    // moment the planning mutex frees), and an uncertified fork reused without a reset is how the
+    // `session-dirty` loop below became reachable. The claim was weakened on purpose: one reset
+    // this driver may not have needed, instead of a document that cannot be armed at all.
+    await driver.arm(armInput);
+    expect(driver.snapshot().machine.phase.kind).toBe("ready");
+    expect(storage.held()).not.toBeNull();
+    expect(sandbox.calls.create).toBe(1);
+    expect(sandbox.calls.reset).toBe(1);
+    expect(sandbox.calls.plan).toBe(2);
+  });
+
+  it("mints no fault when the document changes while the plan call is out and it FAILS", async () => {
+    let failing = true;
+    const sandbox = heldSandbox("plan", {
+      onPlan: () => {
+        if (!failing) return undefined;
+        throw new Error("the plan call did not answer");
+      },
+    });
+    const { driver, storage } = driverWith(sandbox);
+    const arming = driver.arm(armInput);
+    await sandbox.asked;
+
+    driver.documentMutated();
+    sandbox.release();
+    await arming;
+
+    // No card, so no Retry — the offer that would have re-run the dead plan does not exist.
+    expect(driver.snapshot().fault).toBeNull();
+    expect(driver.snapshot().machine.phase.kind).toBe("idle");
+    expect(storage.held()).toBeNull();
+    await driver.retry();
+    expect(sandbox.calls.plan).toBe(1);
+    expect(sandbox.calls.create).toBe(1);
+
+    failing = false;
+    await driver.arm(armInput);
+    expect(driver.snapshot().machine.phase.kind).toBe("ready");
+  });
+
+  it("stops before the plan call when the document changes while the session call is out", async () => {
+    const sandbox = heldSandbox("create");
+    const { driver, storage } = driverWith(sandbox);
+    const arming = driver.arm(armInput);
+    await sandbox.asked;
+
+    driver.documentMutated();
+    sandbox.release();
+    await arming;
+
+    expect(driver.snapshot().machine.phase.kind).toBe("idle");
+    expect(driver.snapshot().fault).toBeNull();
+    expect(storage.held()).toBeNull();
+    // Nothing was planned for the dead document — the gate closed at the first await.
+    expect(sandbox.calls.plan).toBe(0);
+    expect(sandbox.calls.create).toBe(1);
+  });
+
+  it("drops a fault the discarded attempt had already set", async () => {
+    const sandbox = heldSandbox("create", {
+      onCreate: () => ({ ok: false, refusal: { kind: "at-capacity" } }),
+    });
+    const { driver } = driverWith(sandbox);
+    const arming = driver.arm(armInput);
+    await sandbox.asked;
+
+    driver.documentMutated();
+    sandbox.release();
+    await arming;
+
+    // The refusal was real, but it was refused FOR a document that no longer exists: keeping the
+    // card would keep an arm-family Retry pointed at the plan the canvas replaced.
+    expect(driver.snapshot().fault).toBeNull();
+    expect(driver.snapshot().machine.phase.kind).toBe("idle");
+    await driver.retry();
+    expect(sandbox.calls.create).toBe(1);
+  });
+});
+
+/**
+ * Codex round-7 — A SHARED FORK'S STATE IS NOT THIS CLIENT'S TO CERTIFY.
+ *
+ * `forkDirty` used to mean "did I dispatch anything", and the driver read that as "is the fork
+ * still pinned at its base". The session key is PERSISTED, so those are different questions: a
+ * second tab holding the same key executes the moment the planning mutex frees, and the server then
+ * refuses every re-plan `session-dirty` until a reset restores the base (`planForSession`).
+ *
+ * Both halves of the loop are asserted here. The client stops claiming a fork is clean when it
+ * cannot know (the discard marks it dirty), and it honours the refusal's own remedy when the server
+ * says the fork moved — without either, the fault's Retry re-sends the same plan call for the same
+ * refusal, and the document cannot be armed until a reload or the session's TTL.
+ */
+describe("a shared fork is never certified clean by this client (round-7)", () => {
+  /** The other tab: the same key, the same wire, a step this driver never dispatched. */
+  const executeElsewhere = async (transport: SandboxTransport): Promise<void> => {
+    const response = await transport.executeStep(SCRIPT_SESSION_KEY, SCRIPT_PLAN_HASH, 0);
+    if (!response.ok) throw new Error("the other client's step was refused by the fixture");
+  };
+
+  it("resets the fork a discarded arm could no longer vouch for", async () => {
+    const sandbox = heldSandbox("plan");
+    const { driver, storage } = driverWith(sandbox);
+    const arming = driver.arm(armInput);
+    await sandbox.asked;
+
+    // The canvas moves while the plan call is out, so this attempt is discarded (round-6) — but
+    // the plan it asked for still LANDED server-side, and another client runs a step on it.
+    driver.documentMutated();
+    sandbox.release();
+    await arming;
+    await executeElsewhere(sandbox.transport);
+
+    // One arm, one convergence: the reset restores the base the server requires, and the current
+    // document reaches ready. Before this, the arm planned on a fork the server called dirty and
+    // every Retry repeated the refusal.
+    await driver.arm(armInput);
+    expect(driver.snapshot().machine.phase.kind).toBe("ready");
+    expect(driver.snapshot().fault).toBeNull();
+    expect(sandbox.calls.reset).toBe(1);
+    expect(sandbox.calls.create).toBe(1);
+    expect(storage.held()).not.toBeNull();
+  });
+
+  it("converges on a plan-stage session-dirty refusal instead of looping it", async () => {
+    const sandbox = scriptedSandbox();
+    const { driver } = driverWith(sandbox);
+    await driver.arm(armInput);
+    expect(driver.snapshot().machine.phase.kind).toBe("ready");
+
+    // The fork moves under a driver that dispatched nothing and therefore believes it is clean.
+    await executeElsewhere(sandbox.transport);
+    driver.documentMutated();
+    await driver.arm(armInput);
+
+    // The refusal is designed and its Retry is offered — the question is whether pressing it can
+    // ever succeed.
+    expect(driver.snapshot().fault).toMatchObject({
+      kind: "refusal",
+      stage: "plan",
+      retry: "arm",
+    });
+    expect(driver.snapshot().machine.phase.kind).toBe("idle");
+    const plansBefore = sandbox.calls.plan;
+
+    await driver.retry();
+    expect(driver.snapshot().machine.phase.kind).toBe("ready");
+    expect(driver.snapshot().fault).toBeNull();
+    expect(sandbox.calls.reset).toBe(1);
+    expect(sandbox.calls.plan).toBe(plansBefore + 1);
+  });
+
+  it("falls back to a fresh session when the reset the refusal requires is itself refused", async () => {
+    const sandbox = scriptedSandbox({
+      onReset: () => ({ ok: false, refusal: { kind: "reset-failed" } }),
+    });
+    const { driver } = driverWith(sandbox);
+    await driver.arm(armInput);
+    await executeElsewhere(sandbox.transport);
+    driver.documentMutated();
+    await driver.arm(armInput);
+    expect(driver.snapshot().fault).toMatchObject({ kind: "refusal", stage: "plan" });
+
+    // A session that cannot reset is not reused (`ensureSession`): the convergence still happens,
+    // one step further out, on a fork nobody else holds.
+    await driver.retry();
+    expect(driver.snapshot().machine.phase.kind).toBe("ready");
+    expect(sandbox.calls.reset).toBe(1);
+    expect(sandbox.calls.create).toBe(2);
+  });
+});
+
+/**
+ * Codex round-8 — WHAT A REFUSAL PROVES ABOUT THE RETAINED SESSION.
+ *
+ * Round-7 taught the client one refusal's remedy (`session-dirty` → reset). But the server refuses
+ * on the session PHASE before it ever reaches that check (`planForSession` runs `phaseRefusal`
+ * first), so a session another tab left `halted`, `failed` or `reconcile-required` arrived as
+ * itself — and every one of those took the unclassified path: the key retained as though clean, an
+ * arm-family Retry offered, and that Retry resubmitting the same plan to the same state forever.
+ *
+ * The mirror defect sat on the reset side. EVERY refused reset discarded the key, including
+ * `session-busy`, which proves only that another caller holds the one-at-a-time mutex. Below the
+ * cap that leaks a live fork until its TTL; at the cap the create that followed came back
+ * `at-capacity`, and the still-live session could no longer be named.
+ *
+ * Both halves are asserted through the door the user actually has: the fault card's Retry.
+ */
+describe("a refusal is classified by what it proves (round-8)", () => {
+  /** The other tab: one step on the shared key, whose outcome moves the session's phase. */
+  const otherClientStep = async (transport: SandboxTransport): Promise<void> => {
+    const response = await transport.executeStep(SCRIPT_SESSION_KEY, SCRIPT_PLAN_HASH, 0);
+    if (!response.ok) throw new Error(`the other client step was refused: ${response.refusal.kind}`);
+  };
+
+  const firstStep = () => {
+    const base = wireAttributed(plan, 0);
+    if (base.status !== "attributed") throw new Error("fixture");
+    return { stepId: base.stepId, receipt: base.receipt };
+  };
+
+  /**
+   * Arm, let the other tab move the phase, then edit the document — the §2.4 disarm — so the next
+   * arm is the ordinary "Re-simulate" a user presses, planning on a session this driver still
+   * believes is clean because IT dispatched nothing.
+   */
+  async function armIntoPhaseRefusal(result: WireStepResult) {
+    const sandbox = scriptedSandbox({
+      onExecuteStep: (index) => (index === 0 ? { ok: true, result } : undefined),
+    });
+    const { driver } = driverWith(sandbox);
+    await driver.arm(armInput);
+    expect(driver.snapshot().machine.phase.kind).toBe("ready");
+    await otherClientStep(sandbox.transport);
+    driver.documentMutated();
+    await driver.arm(armInput);
+    return { driver, sandbox };
+  }
+
+  /** The convergence every phase refusal must reach: one Retry, one reset, no new fork. */
+  async function expectRetryConverges(
+    driver: SandboxDriver,
+    sandbox: { readonly calls: { readonly reset: number; readonly create: number } },
+  ): Promise<void> {
+    await driver.retry();
+    expect(driver.snapshot().machine.phase.kind).toBe("ready");
+    expect(driver.snapshot().fault).toBeNull();
+    expect(sandbox.calls.reset).toBe(1);
+    expect(sandbox.calls.create).toBe(1);
+  }
+
+  it("converges out of a first-step revert the other tab left (failed)", async () => {
+    const step = firstStep();
+    const { driver, sandbox } = await armIntoPhaseRefusal({
+      status: "failed",
+      failure: {
+        stepIndex: 0,
+        stepId: step.stepId,
+        txHash: wireHash(0xdead),
+        decoded: { message: "health factor too low", raw: "0x36", source: "custom-error" },
+        raw: "0xdeadbeef",
+      },
+    });
+    // Refused AS a failure: the server's phase check runs before its moved-fork check, and the
+    // reset that clears the phase is what the Retry now performs.
+    expect(driver.snapshot().fault).toMatchObject({
+      kind: "refusal",
+      stage: "plan",
+      refusal: { kind: "failed" },
+      retry: "arm",
+    });
+    await expectRetryConverges(driver, sandbox);
+  });
+
+  it("converges out of a halt the other tab left, refused AS a halt", async () => {
+    const step = firstStep();
+    const { driver, sandbox } = await armIntoPhaseRefusal({
+      status: "halted",
+      stepIndex: 0,
+      stepId: step.stepId,
+      receipt: step.receipt,
+      resolvedAmountWei: null,
+      sharesDelta: null,
+      halt: {
+        kind: "residual-allowance",
+        stepIndex: 0,
+        stepId: step.stepId,
+        spender: SCRIPT_ACTOR,
+        residualAllowanceWei: "1",
+        receipt: step.receipt,
+      },
+    });
+    // The fixture-honesty half of the finding: a halted session must never be laundered into
+    // `session-dirty`, or the client is being proven against a server that does not exist.
+    expect(driver.snapshot().fault).toMatchObject({
+      kind: "refusal",
+      stage: "plan",
+      refusal: { kind: "halted" },
+      retry: "arm",
+    });
+    await expectRetryConverges(driver, sandbox);
+  });
+
+  it("converges out of an unresolved dispatch the other tab left (reconcile-required)", async () => {
+    const step = firstStep();
+    const { driver, sandbox } = await armIntoPhaseRefusal({
+      status: "dispatch-unresolved",
+      stepIndex: 0,
+      stepId: step.stepId,
+      txHash: wireHash(0xbeef),
+    });
+    // Nothing SETTLED here — the fork has no entries at all — so `session-dirty` could not have
+    // fired even in principle: the phase is the only thing that refuses, and so the only thing that
+    // could teach the client what to do about it.
+    expect(driver.snapshot().fault).toMatchObject({
+      kind: "refusal",
+      stage: "plan",
+      refusal: { kind: "reconcile-required" },
+      retry: "arm",
+    });
+    await expectRetryConverges(driver, sandbox);
+  });
+
+  it("retires a key the server no longer knows instead of re-planning it", async () => {
+    let unknownOnce = true;
+    const sandbox = scriptedSandbox({
+      onPlan: () => {
+        if (!unknownOnce) return undefined;
+        unknownOnce = false;
+        return { ok: false, refusal: { kind: "unknown-session" } };
+      },
+    });
+    const { driver, storage } = driverWith(sandbox);
+    await driver.arm(armInput);
+    expect(driver.snapshot().fault).toMatchObject({
+      kind: "refusal",
+      stage: "plan",
+      refusal: { kind: "unknown-session" },
+    });
+    // A key the registry will not serve again is not worth resetting. Nothing has been written to
+    // the slot in this beat — the run never reached `plan-ready` — and the retirement adds no write
+    // of its own, because a retirement is in-memory (round-11).
+    expect(storage.held()).toBeNull();
+
+    await driver.retry();
+    expect(driver.snapshot().machine.phase.kind).toBe("ready");
+    expect(sandbox.calls.create).toBe(2);
+    expect(sandbox.calls.reset).toBe(0);
+    // The one write there is: the arm that succeeded, naming the session it actually opened.
+    expectPointerLeftInert(storage.held());
+  });
+
+  it("keeps a live key when the reset is refused BUSY, and converges when the mutex frees", async () => {
+    let busyOnce = true;
+    let forks = 0;
+    const sandbox = scriptedSandbox({
+      onReset: () => {
+        if (!busyOnce) return undefined;
+        busyOnce = false;
+        return { ok: false, refusal: { kind: "session-busy" } };
+      },
+      // The sandbox is AT CAPACITY for a second fork, which is the shape of the defect: a client
+      // that discards a live key on a transient refusal cannot get another one, and can no longer
+      // name the one it abandoned.
+      onCreate: () => {
+        forks += 1;
+        return forks > 1 ? { ok: false, refusal: { kind: "at-capacity" } } : undefined;
+      },
+    });
+    const { driver } = driverWith(sandbox);
+    await driver.arm(armInput);
+    await driver.execute();
+    expect(driver.snapshot().machine.phase.kind).toBe("complete");
+
+    // The re-arm resets the fork this driver itself dirtied — and the other caller holds the mutex,
+    // so the reset is refused for a reason that says nothing at all about the session.
+    await driver.arm(armInput);
+    expect(driver.snapshot().fault).toMatchObject({
+      kind: "refusal",
+      stage: "reset",
+      refusal: { kind: "session-busy" },
+      retry: "arm",
+    });
+    // The leak assertion: no second fork was asked for while the first key is alive.
+    expect(sandbox.calls.create).toBe(1);
+    expect(sandbox.calls.reset).toBe(1);
+
+    await driver.retry();
+    expect(driver.snapshot().machine.phase.kind).toBe("ready");
+    expect(driver.snapshot().fault).toBeNull();
+    expect(sandbox.calls.reset).toBe(2);
+    expect(sandbox.calls.create).toBe(1);
+  });
+});
+
+/**
+ * Codex round-9 — A POINTER'S EVIDENCE BINDS TO ONE PLAN.
+ *
+ * `rehydrate` pairs a plan with a plan hash, and when the machine is empty it takes them from two
+ * different places: the plan from `lastArm` (the NEWEST arm) and the hash from `retainedPlanHash`
+ * (the run the pointer names). After a failed run is re-simulated those are different plans, and the
+ * round-8 reset fallback opened the door — an out-of-contract reset refusal advertises the reload
+ * family while retaining the old hash.
+ *
+ * `restore` had always checked the money-bearing fingerprint before adopting anything; the reload
+ * retry never did. Same-topology plans agree step for step, and a session whose only record is a
+ * first-step failure has no settled money row left to disagree over — so plan A's run could be
+ * adopted, and rendered, under plan B. The check now lives at the pairing itself.
+ */
+describe("a retained hash binds only to the plan the pointer named (round-9)", () => {
+  /** A first-step revert, and a reset stage that answers out of contract exactly once. */
+  function failedRunThenBrokenReset() {
+    const base = wireAttributed(plan, 0);
+    if (base.status !== "attributed") throw new Error("fixture");
+    let outOfContract = true;
+    return scriptedSandbox({
+      onExecuteStep: (index) =>
+        index === 0
+          ? {
+              ok: true,
+              result: {
+                status: "failed",
+                failure: {
+                  stepIndex: 0,
+                  stepId: base.stepId,
+                  txHash: wireHash(0xdead),
+                  decoded: { message: "health factor too low", raw: "0x36", source: "custom-error" },
+                  raw: "0xdeadbeef",
+                },
+              },
+            }
+          : undefined,
+      // `tx-cap` cannot honestly come back from a reset, so the round-8 classifier lands it on
+      // wire-mismatch / reload — the one fault family that rehydrates.
+      onReset: () => {
+        if (!outOfContract) return undefined;
+        outOfContract = false;
+        return { ok: false, refusal: { kind: "tx-cap" } };
+      },
+    });
+  }
+
+  it("proves its own premise: B is A's topology with different money", () => {
+    const identity = (candidate: PlanSuccess) =>
+      candidate.steps.map((step) => `${step.id}@${step.index}`);
+    expect(identity(planB)).toEqual(identity(plan));
+    expect(planHashOf(planB.steps)).not.toBe(planHashOf(plan.steps));
+  });
+
+  it("adopts no evidence from the run the pointer named when the plan has moved on", async () => {
+    const sandbox = failedRunThenBrokenReset();
+    const { driver, storage } = driverWith(sandbox);
+    await driver.arm(armInput);
+    await driver.execute();
+    expect(driver.snapshot().machine.phase).toMatchObject({ kind: "failed-at", stepIndex: 0 });
+    expect(storage.held()).not.toBeNull();
+
+    // The user re-simulates the EDITED document, and the reset stage answers out of contract: the
+    // fault offers "Reload session state" while the retained hash still belongs to plan A.
+    await driver.arm(armInputB);
+    expect(driver.snapshot().fault).toMatchObject({
+      kind: "wire-mismatch",
+      stage: "reset",
+      retry: "reload",
+    });
+
+    await driver.retry();
+
+    // The claim, first: plan A's run is not adopted, so nothing of A's can be rendered against B.
+    expect(driver.snapshot().machine.phase.kind).toBe("idle");
+    expect(driver.snapshot().machine.record).toBeNull();
+    expect(driver.snapshot().machine.planHash).toBeNull();
+    expect(driver.snapshot().machine.plan).toBeNull();
+    expect(driver.snapshot().fault).toBeNull();
+    // And its corollary: nothing was even looked up, because no answer to that lookup could have
+    // been legally adopted — asking only produces another plan's evidence to render against this one.
+    expect(sandbox.calls.session).toBe(0);
+
+    // STORAGE IS LEFT ALONE, and that is round-10 correcting round-9, which asserted the pointer
+    // cleared here. The pointer is origin-wide: this driver cannot prove the bytes now in it are its
+    // own rather than a second tab's valid pointer, and localStorage offers no compare-and-swap that
+    // would keep "clear it if it is mine" true by the time the clear lands. Dropping the in-memory
+    // binding is what refuses the adoption; the pointer is not the thing that had to go.
+    expect(storage.held()).not.toBeNull();
+
+    // A remount refuses it too, and still writes nothing back (round-11 replaced round-9's clear
+    // here): the stale value is inert, not dangerous.
+    const remounted = new SandboxDriver({ transport: sandbox.transport, storage, now: () => 5_000 });
+    await remounted.restore(armInputB);
+    expect(remounted.snapshot().machine.phase.kind).toBe("idle");
+    expectPointerLeftInert(storage.held());
+
+    // What remains on offer is a fresh arm of the document on the canvas, and it is B that arms —
+    // which is also the one operation that corrects the slot, by overwriting it.
+    await driver.arm(armInputB);
+    expect(driver.snapshot().machine.phase.kind).toBe("ready");
+    const served = sandbox.planned();
+    if (served === null) throw new Error("the scripted server planned nothing");
+    expect(planHashOf(served.steps)).toBe(planHashOf(planB.steps));
+    expect(parsePointer(storage.held())?.fingerprint).toBe(planHashOf(planB.steps));
+  });
+
+  /**
+   * The scope of the gate, pinned (it is a decision, so it is asserted rather than assumed).
+   *
+   * The binding is demanded only when the plan comes from the FALLBACK. A live machine's plan and
+   * hash were adopted together at `plan-ready` and cannot disagree, and demanding a pointer for them
+   * would break mid-run recovery wherever there IS no pointer: `localPointerStorage` degrades to no
+   * persistence in a private window, so a lost response during a committed run would strand a
+   * session the server can still account for — D6 discovery traded away for a check that had nothing
+   * to check.
+   */
+  it("recovers a committed run by rehydration with no pointer in storage at all", async () => {
+    let lostOnce = true;
+    const sandbox = scriptedSandbox({
+      onExecuteStep: (index, canonical, record) => {
+        if (index === 2 && lostOnce) {
+          lostOnce = false;
+          // The server executed and the RESPONSE was lost: the D6 dark case, recovered by
+          // discovery through `sandbox.session`.
+          if (canonical.ok) record(canonical.result);
+          throw new Error("the response never arrived");
+        }
+        return undefined;
+      },
+    });
+    const denied: PointerStorage = { read: () => null, write: () => undefined, clear: () => undefined };
+    const driver = new SandboxDriver({ transport: sandbox.transport, storage: denied, now: () => 5_000 });
+    await driver.arm(armInput);
+    await driver.execute();
+    expect(driver.snapshot().machine.phase.kind).toBe("complete");
+    expect(sandbox.calls.session).toBeGreaterThan(0);
+  });
+
+  /**
+   * Codex round-10 — THE POINTER IS ORIGIN-WIDE, THE CAPTURE IS THIS DRIVER'S.
+   *
+   * Round-9's gate re-read the shared pointer and checked only its fingerprint, while the key and
+   * hash it would rehydrate with came from this driver's retained state. That mixes two runs: a
+   * second tab writing its own perfectly valid pointer for a session whose fingerprint happens to
+   * match THIS tab's newest arm waved the adoption through — `session(A)` looked up, plan B adopted
+   * against A's hash and A's evidence. The mirror of it was just as bad: a fingerprint that did not
+   * match had this tab clearing the other tab's live pointer.
+   *
+   * Two tabs on one origin is ordinary use, not hostile storage. The gate now reads the retained
+   * capture, which nobody else can move.
+   */
+  it("adopts nothing when another tab's valid pointer lands between the fault and Retry", async () => {
+    const sandbox = failedRunThenBrokenReset();
+    const { driver, storage } = driverWith(sandbox);
+    await driver.arm(armInput);
+    await driver.execute();
+    expect(driver.snapshot().machine.phase).toMatchObject({ kind: "failed-at", stepIndex: 0 });
+
+    await driver.arm(armInputB);
+    expect(driver.snapshot().fault).toMatchObject({
+      kind: "wire-mismatch",
+      stage: "reset",
+      retry: "reload",
+    });
+
+    // A second tab finishes arming its own run and writes ITS pointer to the shared key. Valid in
+    // every respect, and its fingerprint is plan B's — which is exactly what makes it dangerous to
+    // a gate that reads the fingerprint alone: this tab is holding session A and A's hash.
+    const otherTab = encodePointer({
+      sessionKey: "cd".repeat(32),
+      planHash: `0x${"ab".repeat(32)}`,
+      fingerprint: planHashOf(planB.steps),
+    });
+    storage.write(otherTab);
+
+    await driver.retry();
+
+    // No adoption: the retained capture is plan A's, and no pointer written by anyone else can make
+    // A's session answer for B.
+    expect(sandbox.calls.session).toBe(0);
+    expect(driver.snapshot().machine.phase.kind).toBe("idle");
+    expect(driver.snapshot().machine.record).toBeNull();
+    expect(driver.snapshot().machine.plan).toBeNull();
+    expect(driver.snapshot().fault).toBeNull();
+    // And the other tab's pointer is untouched — its run is still resumable. A driver may only ever
+    // retire a pointer it can prove is about its own pair, and this one provably is not.
+    expect(storage.held()).toBe(otherTab);
+
+    // The landing is the fresh-arm-only state, and arming writes THIS tab's pointer honestly.
+    await driver.arm(armInputB);
+    expect(driver.snapshot().machine.phase.kind).toBe("ready");
+    expect(storage.held()).not.toBe(otherTab);
+  });
+
+  it("still rehydrates its own committed run when another tab overwrites the pointer", async () => {
+    const sandbox = failedRunThenBrokenReset();
+    const { driver, storage } = driverWith(sandbox);
+    await driver.arm(armInput);
+    await driver.execute();
+    await driver.arm(armInput);
+    expect(driver.snapshot().fault).toMatchObject({ stage: "reset", retry: "reload" });
+
+    // The other tab writes a pointer for a run this driver knows nothing about. Under a gate that
+    // re-read storage and demanded the full triple, this legitimate recovery would now REFUSE —
+    // another tab's write would have disabled this tab's discovery of its own committed session.
+    // The capture is the authority, so the reload proceeds exactly as it did before anyone wrote.
+    storage.write(
+      encodePointer({
+        sessionKey: "cd".repeat(32),
+        planHash: `0x${"ab".repeat(32)}`,
+        fingerprint: `0x${"12".repeat(32)}`,
+      }),
+    );
+
+    await driver.retry();
+    expect(sandbox.calls.session).toBe(1);
+    expect(driver.snapshot().machine.phase.kind).not.toBe("idle");
+    expect(driver.snapshot().fault).toBeNull();
+  });
+
+  it("still rehydrates the reload family when the pointer vouches for the plan", async () => {
+    const sandbox = failedRunThenBrokenReset();
+    const { driver, storage } = driverWith(sandbox);
+    await driver.arm(armInput);
+    await driver.execute();
+
+    // The same document, re-simulated: nothing has moved, so the pointer still vouches and the
+    // reload path is the discovery it has always been.
+    await driver.arm(armInput);
+    expect(driver.snapshot().fault).toMatchObject({
+      kind: "wire-mismatch",
+      stage: "reset",
+      retry: "reload",
+    });
+
+    await driver.retry();
+    expect(sandbox.calls.session).toBe(1);
+    expect(storage.held()).not.toBeNull();
+    expect(driver.snapshot().machine.phase.kind).not.toBe("idle");
+    expect(driver.snapshot().fault).toBeNull();
+  });
+});
+
+
+/**
+ * Codex round-11 — THE SLOT IS SHARED, SO NO DECISION PATH EMPTIES IT.
+ *
+ * Production runs one origin-wide localStorage key. Every clear in this driver used to fire on a
+ * decision about THIS driver's own state — its machine was `ready`, its key was dead, the pointer it
+ * had just read did not vouch for its document — and none of those facts say anything about whose
+ * pointer is in the slot at the moment of the clear. Two tabs is ordinary use, no timing race
+ * required: tab A editing its canvas deleted tab B's pointer, and a mid-run tab B that then reloaded
+ * could no longer restore a run its server still held.
+ *
+ * The contract is now write-on-arm-only: `plan-ready` writes, nothing clears, and a stale value is
+ * inert because adoption is gated on the retained fingerprint. Both beats run TWO drivers over ONE
+ * storage, which is the only way to state the property at all.
+ */
+describe("the pointer slot is shared, so no decision path empties it (round-11)", () => {
+  /** Two tabs, two sessions, one origin: separate servers, one storage. */
+  function twoTabs() {
+    const storage = memoryStorage();
+    const serverB = scriptedSandbox();
+    const tabB = new SandboxDriver({ transport: serverB.transport, storage, now: () => 5_000 });
+    return { storage, serverB, tabB };
+  }
+
+  /** Tab B arms its own document and runs it, taking the slot with a pointer that is really B's. */
+  async function tabBTakesTheSlot(tabB: SandboxDriver, storage: { held(): string | null }) {
+    await tabB.arm(armInputB);
+    await tabB.execute();
+    expect(tabB.snapshot().machine.phase.kind).toBe("complete");
+    const pointerB = storage.held();
+    expect(parsePointer(pointerB)?.fingerprint).toBe(planHashOf(planB.steps));
+    return pointerB;
+  }
+
+  it("tab A's document edit leaves tab B's pointer, and B still restores its run", async () => {
+    const { storage, serverB, tabB } = twoTabs();
+    const serverA = scriptedSandbox();
+    const tabA = new SandboxDriver({ transport: serverA.transport, storage, now: () => 5_000 });
+
+    // Tab A arms and holds at ready; the slot is A's for the moment.
+    await tabA.arm(armInput);
+    expect(tabA.snapshot().machine.phase.kind).toBe("ready");
+    expect(parsePointer(storage.held())?.fingerprint).toBe(planHashOf(plan.steps));
+
+    const pointerB = await tabBTakesTheSlot(tabB, storage);
+
+    // The edit that used to delete it. A disarms — in memory, and only in memory.
+    tabA.documentMutated();
+    expect(tabA.snapshot().machine.phase.kind).toBe("idle");
+    expect(storage.held()).toBe(pointerB);
+
+    // And the property a user would feel: B reloads, and the run its server holds is still there.
+    const tabBReloaded = new SandboxDriver({
+      transport: serverB.transport,
+      storage,
+      now: () => 5_000,
+    });
+    await tabBReloaded.restore(armInputB);
+    expect(tabBReloaded.snapshot().machine.phase.kind).toBe("complete");
+    expect(tabBReloaded.snapshot().machine.record?.settled.length).toBe(planB.steps.length);
+    expect(tabBReloaded.snapshot().fault).toBeNull();
+  });
+
+  it("a dead-key answer landing in tab A leaves tab B's pointer, and B still restores", async () => {
+    const { storage, serverB, tabB } = twoTabs();
+    // A's plan call is held open, so the answer that kills A's key arrives AFTER B owns the slot.
+    const serverA = heldSandbox("plan", {
+      onPlan: () => ({ ok: false, refusal: { kind: "unknown-session" } }),
+    });
+    const tabA = new SandboxDriver({ transport: serverA.transport, storage, now: () => 5_000 });
+    const arming = tabA.arm(armInput);
+    await serverA.asked;
+
+    const pointerB = await tabBTakesTheSlot(tabB, storage);
+
+    serverA.release();
+    await arming;
+
+    // A's key is dead and A has retired it — in memory. The slot never belonged to that decision.
+    expect(tabA.snapshot().fault).toMatchObject({
+      kind: "refusal",
+      stage: "plan",
+      refusal: { kind: "unknown-session" },
+    });
+    expect(storage.held()).toBe(pointerB);
+
+    const tabBReloaded = new SandboxDriver({
+      transport: serverB.transport,
+      storage,
+      now: () => 5_000,
+    });
+    await tabBReloaded.restore(armInputB);
+    expect(tabBReloaded.snapshot().machine.phase.kind).toBe("complete");
+    expect(tabBReloaded.snapshot().fault).toBeNull();
+  });
+});
+
+
+/**
+ * Codex round-12 — AN ADOPTED TOMBSTONE IS EVIDENCE, NOT A SESSION.
+ *
+ * A swept session still resumes: `resumePlan` reads its tombstone and returns a real `abandoned`
+ * machine, which is why the reload after a TTL expiry lands on the T24 card with the executed record
+ * intact. What the adoption must NOT keep is the key. It did — `rehydrate` retired nothing unless
+ * the response was `ok` — so the card's own "Start a fresh session" planned on the dead key, was
+ * refused `session-expired`, and landed back on the same card. The session only appeared on the
+ * SECOND press, which is the kind of defect a user reads as the button being broken.
+ *
+ * Since round-11 deliberately preserves the pointer, expiry-then-reload reaches this reliably.
+ */
+describe("an adopted tombstone retires the key it names (round-12)", () => {
+  /** A driver whose writes to the shared slot can be counted — "overwritten" is an assertion. */
+  function countingStorage(inner: ReturnType<typeof memoryStorage>) {
+    const writes: string[] = [];
+    const storage: PointerStorage = {
+      read: () => inner.read(),
+      write: (value) => {
+        writes.push(value);
+        inner.write(value);
+      },
+      clear: () => inner.clear(),
+    };
+    return { storage, writes };
+  }
+
+  it("reaches ready on ONE fresh-session arm, against a newly created session", async () => {
+    const held = memoryStorage();
+    const sandbox = scriptedSandbox();
+    const first = new SandboxDriver({ transport: sandbox.transport, storage: held, now: () => 5_000 });
+    await first.arm(armInput);
+    await first.execute();
+    expect(first.snapshot().machine.phase.kind).toBe("complete");
+
+    // TTL: the registry sweeps the fork, and every verb on that key now answers from its tombstone.
+    sandbox.expire();
+
+    // The reload. The card renders from the server's own evidence, which is the point of D11.
+    const { storage, writes } = countingStorage(held);
+    const reloaded = new SandboxDriver({ transport: sandbox.transport, storage, now: () => 5_000 });
+    await reloaded.restore(armInput);
+    expect(reloaded.snapshot().machine.phase).toMatchObject({
+      kind: "abandoned",
+      executedSteps: plan.steps.length,
+    });
+    expect(reloaded.snapshot().fault).toBeNull();
+    expect(writes.length).toBe(0);
+
+    const createsBefore = sandbox.calls.create;
+
+    // ONE press of the action the card advertises.
+    await reloaded.arm(armInput);
+
+    expect(reloaded.snapshot().machine.phase.kind).toBe("ready");
+    expect(reloaded.snapshot().fault).toBeNull();
+    // A NEW session — not a reset of the swept one, which could not have answered anyway.
+    expect(sandbox.calls.create).toBe(createsBefore + 1);
+    expect(sandbox.calls.reset).toBe(0);
+    // And the slot now carries the new run's triple, written by the one operation that may write.
+    expect(writes.length).toBe(1);
+    const written = parsePointer(writes[0] ?? null);
+    expect(written?.fingerprint).toBe(planHashOf(plan.steps));
+    expect(written?.planHash).toBe(SCRIPT_PLAN_HASH);
+    expect(parsePointer(held.held())?.fingerprint).toBe(planHashOf(plan.steps));
+  });
+
+  it("keeps the adopted evidence while the key goes: the card still reads the run", async () => {
+    const storage = memoryStorage();
+    const sandbox = scriptedSandbox();
+    const first = new SandboxDriver({ transport: sandbox.transport, storage, now: () => 5_000 });
+    await first.arm(armInput);
+    await first.execute();
+    sandbox.expire();
+
+    const reloaded = new SandboxDriver({ transport: sandbox.transport, storage, now: () => 5_000 });
+    await reloaded.restore(armInput);
+
+    // The retirement is of the KEY, not of the record: T24's card names how far the run got, and
+    // that sentence comes from the tombstone this driver just adopted.
+    const snap = reloaded.snapshot();
+    expect(snap.machine.record?.settled.length).toBe(plan.steps.length);
+    expect(snap.machine.phase).toMatchObject({ kind: "abandoned" });
+    // Nothing further is asked of the dead key — no reset, no second lookup.
+    expect(sandbox.calls.session).toBe(1);
+    expect(sandbox.calls.reset).toBe(0);
+  });
+});
+
+
+/**
+ * Codex round-13 — A TOMBSTONE THE CLIENT ADOPTS MUST BE FINAL.
+ *
+ * The registry defers the sweep for a session holding the mutex, and its lookup used to answer that
+ * window with `session-expired` and a tombstone built from whatever had been recorded SO FAR. The
+ * running call could then add a settled receipt. Round-12 made adopting that payload consequential:
+ * the client adopts it as `abandoned` and retires the key, throwing away its only route to ask what
+ * the call finally did — a read-only card showing an incomplete record, and at the extreme
+ * "expired before any step executed" while a dispatch was still outstanding.
+ *
+ * The window now has its own refusal carrying no record at all. The client treats it as what it is:
+ * come back and look again.
+ */
+describe("the TTL boundary with a dispatch outstanding (round-13)", () => {
+  it("adopts nothing while the session is still finishing, then adopts the FINAL record", async () => {
+    const storage = memoryStorage();
+    // Step 0's dispatch is held open: it is in flight across the TTL boundary.
+    const sandbox = heldSandbox("executeStep");
+    const runner = new SandboxDriver({
+      transport: sandbox.transport,
+      storage,
+      now: () => 5_000,
+    });
+    await runner.arm(armInput);
+    const running = runner.execute();
+    await sandbox.asked;
+    const armedPointer = storage.held();
+
+    // The TTL passes while that dispatch is outstanding.
+    sandbox.expireInFlight();
+
+    // A reload — or a second tab — looks now. It is told to come back, and it keeps everything:
+    // the key it would need to look again is the whole point.
+    const reloaded = new SandboxDriver({
+      transport: sandbox.transport,
+      storage,
+      now: () => 5_000,
+    });
+    await reloaded.restore(armInput);
+    expect(reloaded.snapshot().machine.phase.kind).toBe("idle");
+    expect(reloaded.snapshot().machine.record).toBeNull();
+    expect(reloaded.snapshot().fault).toMatchObject({
+      kind: "refusal",
+      stage: "resume",
+      refusal: { kind: "expiring-in-flight" },
+      retry: "reload",
+    });
+    // Nothing was adopted, so nothing could have been armed over it either: the pointer still names
+    // the run that is finishing.
+    expect(storage.held()).toBe(armedPointer);
+
+    // The outstanding dispatch settles its receipt, and only then is the session swept.
+    sandbox.release();
+    await running;
+    sandbox.expire();
+
+    // Looking again adopts the FINAL record — including the evidence that landed after the boundary.
+    await reloaded.retry();
+    const snap = reloaded.snapshot();
+    expect(snap.machine.phase).toMatchObject({ kind: "abandoned", executedSteps: 1 });
+    expect(snap.machine.record?.settled.length).toBe(1);
+    expect(snap.fault).toBeNull();
+  });
+
+  it("the transient refusal retires nothing, so the retry has a key to look with", async () => {
+    const storage = memoryStorage();
+    const sandbox = heldSandbox("executeStep");
+    const runner = new SandboxDriver({ transport: sandbox.transport, storage, now: () => 5_000 });
+    await runner.arm(armInput);
+    const running = runner.execute();
+    await sandbox.asked;
+    sandbox.expireInFlight();
+
+    const reloaded = new SandboxDriver({ transport: sandbox.transport, storage, now: () => 5_000 });
+    await reloaded.restore(armInput);
+    const lookupsAfterFirst = sandbox.calls.session;
+    expect(lookupsAfterFirst).toBe(1);
+
+    // The retry looks AGAIN at the same session — which is only possible because the transient
+    // refusal retired neither the key nor the binding.
+    await reloaded.retry();
+    expect(sandbox.calls.session).toBe(2);
+    expect(reloaded.snapshot().fault).toMatchObject({ refusal: { kind: "expiring-in-flight" } });
+
+    sandbox.release();
+    await running;
+  });
+});

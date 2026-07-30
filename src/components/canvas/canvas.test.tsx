@@ -10,6 +10,7 @@ import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import {
   CONNECT_REJECTION_MESSAGES,
   ConnectionRejectionNotice,
+  connectRejectionMessage,
   NODE_TYPE_FOR,
   allocationEdgesOf,
   blockDataOf,
@@ -28,7 +29,12 @@ import {
 import { CanvasEmptyState } from "./canvas-empty-state";
 import { BLOCK_COMPONENTS } from "./blocks";
 import { ComposerStoreProvider } from "../../app/store/composer-provider";
-import { connectRejection, createComposerStore } from "../../app/store/composer-store";
+import {
+  connectRejection,
+  createComposerStore,
+  overAllocatedSourceIds,
+} from "../../app/store/composer-store";
+import { RUN_LOCK_REASON } from "../tx/step-status";
 import { FLAGSHIP_TEMPLATE_ID, STRATEGY_TEMPLATES } from "../../lib/strategy/templates";
 import { valueOf } from "../../core/provenance";
 import { simulate } from "../../core/risk";
@@ -39,7 +45,9 @@ import { fixtureSnapshot } from "../../../tests/helpers/chain-snapshot";
 
 afterEach(cleanup);
 
-const ALL_CODES: readonly ConnectRejection["code"][] = [
+/** Every code whose copy the CANVAS owns. `document-locked` is not one: its sentence is
+ *  minted where the lock is held and rides the rejection (see the T26 beat below). */
+const ALL_CODES: readonly Exclude<ConnectRejection["code"], "document-locked">[] = [
   "unknown-block",
   "self-loop",
   "duplicate-edge",
@@ -120,7 +128,7 @@ describe("isValidConnection agrees with the store", () => {
     store.getState().addBlock("lend", { x: 640, y: 0 });
 
     const doc = store.getState().doc;
-    const isValid = makeIsValidConnection(doc);
+    const isValid = makeIsValidConnection(doc, null);
     const ids = doc.blocks.map((b) => b.id);
     const accepted: string[] = [];
 
@@ -140,7 +148,7 @@ describe("isValidConnection agrees with the store", () => {
 
   it("refuses a self-loop and a duplicate edge through the same predicate", () => {
     const doc = restaked().getState().doc;
-    const isValid = makeIsValidConnection(doc);
+    const isValid = makeIsValidConnection(doc, null);
 
     expect(isValid({ source: "in", target: "in", sourceHandle: null, targetHandle: null })).toBe(
       false,
@@ -174,12 +182,14 @@ describe("the refusal strip has a runtime trigger", () => {
 
   it("reports nothing when the drop was permitted — onConnect owns that outcome", () => {
     const store = restaked();
+    // Null would mean the write was refused, which only a run lock does; there is none here.
     const lendId = store.getState().addBlock("lend", { x: 640, y: 0 });
+    expect(lendId).not.toBeNull();
     expect(
       rejectionFromConnectionEnd(store.getState().doc, {
         isValid: true,
         fromNode: { id: "stake1" },
-        toNode: { id: lendId },
+        toNode: { id: lendId ?? "" },
       }),
     ).toBeNull();
   });
@@ -278,7 +288,7 @@ describe("the doc → view-model mapping", () => {
   it("hands every edge the names the canvas shows, never the store's ids", () => {
     const doc = flagship().getState().doc;
     const labels = blockLabelsOf({ doc, paramOrigins: {} }, blockParamErrors(doc));
-    const edges = allocationEdgesOf(doc.edges, labels, new Set());
+    const edges = allocationEdgesOf(doc.edges, labels, new Set(), null);
 
     expect(edges.length).toBeGreaterThan(0);
     const ids = new Set(doc.blocks.map((b) => b.id));
@@ -503,6 +513,30 @@ describe("empty state template cards", () => {
     }
   });
 
+  it("states the run lock instead of loading, and leaves the document alone (T26)", () => {
+    // The last document-write route in the family. It is not reachable during a run today —
+    // `clear` is refused too, so the canvas cannot empty mid-run — but "unreachable" is the
+    // argument this finding rejected, so the card refuses in words like every other control.
+    const store = createComposerStore();
+    store.getState().setWriteLock(RUN_LOCK_REASON);
+    const { container } = render(
+      <ComposerStoreProvider store={store}>
+        <CanvasEmptyState writeLockReason={RUN_LOCK_REASON} />
+      </ComposerStoreProvider>,
+    );
+    const card = screen.getByRole("button", { name: /Leveraged Restake Loop/ });
+    expect(card.getAttribute("aria-disabled")).toBe("true");
+    expect(card.getAttribute("title")).toBe(RUN_LOCK_REASON);
+    expect(card.hasAttribute("disabled")).toBe(false);
+
+    fireEvent.click(card);
+    expect(store.getState().doc.blocks).toEqual([]);
+    expect(store.getState().loadedFrom).toEqual({ kind: "blank" });
+    // The visible half says WHY, rather than reporting a template that failed to load.
+    expect(container.textContent).toContain(RUN_LOCK_REASON);
+    expect(container.textContent).not.toContain("could not be loaded");
+  });
+
   it("opens the flagship from its own card", () => {
     const store = createComposerStore();
     render(
@@ -614,5 +648,135 @@ describe("the arrival fit (treatment §3 amendment: the legibility floor)", () =
 
   it("never zooms past the canvas maximum for a tiny graph", () => {
     expect(arrivalViewport({ x: 0, y: 0, width: 10, height: 10 }, FIELD).zoom).toBe(2);
+  });
+});
+
+/**
+ * T26's write lockdown at the CANVAS seams (Codex round-3 finding 2).
+ *
+ * Same file convention as the rest of this suite: no `<ReactFlow>` is mounted, so what is
+ * asserted is what the canvas claims and can be checked without a layout engine — the
+ * connection predicate, the clipboard and delete gestures, the edge view model, and the
+ * document after every one of them is attempted under the lock.
+ *
+ * `RUN_LOCK_REASON` is imported rather than restated: the sentence has one definition, and a
+ * suite that typed its own copy would pass while the two drifted.
+ */
+describe("T26 — the canvas write seams under the run lock", () => {
+  function locked() {
+    const store = flagship();
+    store.getState().setWriteLock(RUN_LOCK_REASON);
+    return store;
+  }
+
+  it("refuses every connection the predicate would otherwise accept", () => {
+    const store = flagship();
+    const lendId = store.getState().addBlock("lend", { x: 640, y: 0 });
+    expect(lendId).not.toBeNull();
+    const doc = store.getState().doc;
+    const ids = doc.blocks.map((b) => b.id);
+
+    const open = makeIsValidConnection(doc, null);
+    const held = makeIsValidConnection(doc, RUN_LOCK_REASON);
+    let accepted = 0;
+    for (const source of ids) {
+      for (const target of ids) {
+        const candidate = { source, target, sourceHandle: null, targetHandle: null };
+        if (open(candidate)) accepted += 1;
+        // The drag never begins while a run holds the document: refusing a connection the
+        // user already dragged across the canvas is the worse refusal.
+        expect(held(candidate)).toBe(false);
+      }
+    }
+    expect(accepted).toBeGreaterThan(0);
+  });
+
+  it("states the run's own sentence for a refused connect, never canvas copy", () => {
+    const store = locked();
+    const result = store.getState().connect("supply2", "borrow");
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(connectRejectionMessage(result.rejection)).toBe(RUN_LOCK_REASON);
+    // The strip renders the same string, from the rejection rather than from a table.
+    const { container } = render(<ConnectionRejectionNotice rejection={result.rejection} />);
+    expect(container.textContent).toBe(RUN_LOCK_REASON);
+    // And the table it is NOT in stays total over the codes the canvas does own.
+    expect(Object.keys(CONNECT_REJECTION_MESSAGES)).not.toContain("document-locked");
+  });
+
+  it("leaves the document untouched through every canvas write route", () => {
+    // The clipboard is filled BEFORE the lock: copying is a read, and pasting is the write.
+    const store = flagship();
+    store.getState().setSelection(["borrow", "unwrap"]);
+    const snapshot = buildClipboard(store.getState());
+    expect(snapshot).not.toBeNull();
+    if (snapshot === null) return;
+    store.getState().setWriteLock(RUN_LOCK_REASON);
+
+    const before = store.getState();
+    // Drop (the palette drag's landing) and keyboard add.
+    expect(store.getState().addBlock("stake", { x: 12, y: 12 })).toBeNull();
+    // Paste and duplicate share this one seam.
+    expect(pasteClipboard(store, snapshot)).toEqual([]);
+    // Delete reports what the DOCUMENT lost, so a refused delete announces nothing.
+    expect(deleteSelectedBlocks(store)).toEqual([]);
+    // Connect, disconnect, the two param writes, movement, and the history walk.
+    expect(store.getState().connect("supply2", "borrow").ok).toBe(false);
+    store.getState().disconnect(before.doc.edges[0]?.id ?? "");
+    expect(store.getState().setBlockParam("in", "amount", "42").ok).toBe(false);
+    expect(store.getState().setBorrowAllocationBps("borrow", 1000).ok).toBe(false);
+    expect(store.getState().setEdgeAllocationBps(before.doc.edges[0]?.id ?? "", 4000).ok).toBe(false);
+    store.getState().moveBlock("borrow", { x: 999, y: 999 });
+    store.getState().undo();
+    store.getState().redo();
+
+    const after = store.getState();
+    expect(after.doc).toBe(before.doc);
+    expect(after.rev).toBe(before.rev);
+    expect(after.view).toBe(before.view);
+    expect(after.past).toBe(before.past);
+    // Selection survived every refusal: reads are never locked.
+    expect(after.selectedBlockIds).toEqual(before.selectedBlockIds);
+  });
+
+  it("keeps the reads the canvas draws from live while the document is held", () => {
+    const store = locked();
+    const state = store.getState();
+    const paramErrors = blockParamErrors(state.doc);
+    const labels = blockLabelsOf(state, paramErrors);
+    expect(Object.keys(labels).length).toBe(state.doc.blocks.length);
+    // Copying is a read and stays available; over-allocation and the connect probe still answer.
+    store.getState().setSelection(["borrow"]);
+    expect(buildClipboard(store.getState())).not.toBeNull();
+    expect(overAllocatedSourceIds(state.doc)).toEqual([]);
+    expect(connectRejection(state.doc, "in", "stake1")).toEqual({ code: "duplicate-edge" });
+  });
+
+  it("carries the lock into the edge view model, so an edge's writes can state it", () => {
+    const store = locked();
+    const state = store.getState();
+    const labels = blockLabelsOf(state, blockParamErrors(state.doc));
+    const edges = allocationEdgesOf(state.doc.edges, labels, new Set(), RUN_LOCK_REASON);
+    expect(edges.length).toBeGreaterThan(0);
+    for (const edge of edges) expect(edge.data?.writeLockReason).toBe(RUN_LOCK_REASON);
+    // Outside a run the same view model carries no lock, so nothing refuses.
+    for (const edge of allocationEdgesOf(state.doc.edges, labels, new Set(), null)) {
+      expect(edge.data?.writeLockReason).toBeNull();
+    }
+  });
+
+  it("lifts on release: the same seams land once the run settles", () => {
+    const store = locked();
+    store.getState().setWriteLock(null);
+    const added = store.getState().addBlock("stake", { x: 1, y: 2 });
+    expect(added).not.toBeNull();
+    store.getState().setSelection([added ?? ""]);
+    expect(deleteSelectedBlocks(store)).toEqual([added]);
+    expect(makeIsValidConnection(store.getState().doc, null)({
+      source: "in",
+      target: "in",
+      sourceHandle: null,
+      targetHandle: null,
+    })).toBe(false);
   });
 });

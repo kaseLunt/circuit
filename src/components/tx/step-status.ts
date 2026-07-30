@@ -105,6 +105,38 @@ export function stepRowStatusOf(machine: ExecutionMachine, stepIndex: number): S
  * phase through the frozen plan, so the canvas and the column can never disagree about
  * which block is executing.
  */
+/**
+ * Phases in which the DOCUMENT is frozen (treatment §2.4, rendered per T26).
+ *
+ * Every phase from the first dispatch until the run settles: the plan under execution is the
+ * frozen one, and a mid-run edit would make the canvas describe a strategy that is not the
+ * one moving money. On a terminal state the lock lifts — editing is how the user starts over,
+ * and editing invalidates continue-from-k by definition.
+ *
+ * T26 rules what the lock LOOKS like, and it is not a veil: reads stay live at full
+ * legibility (pan, zoom, provenance tooltips, disclosures — mid-execution is precisely when
+ * inspection matters most). Only WRITES refuse, and they refuse through the typed-rejection
+ * strip the block family already owns.
+ */
+const RUN_LOCKED: ReadonlySet<ExecutionPhase["kind"]> = new Set([
+  "awaiting-signature",
+  "pending",
+  "timeout",
+  "attributing",
+  "attributed",
+  "attribution-unavailable",
+  "persistence-failed",
+  "dispatch-unresolved",
+  "dispatch-vacated",
+]);
+
+/** The one sentence every refused write states while a run holds the document (T26). */
+export const RUN_LOCK_REASON = "Execution in progress — the strategy is locked.";
+
+export function runLocksDocument(machine: ExecutionMachine): boolean {
+  return RUN_LOCKED.has(machine.phase.kind);
+}
+
 export function executingBlockIdOf(machine: ExecutionMachine): string | null {
   const phase = machine.phase;
   if (machine.plan === null) return null;

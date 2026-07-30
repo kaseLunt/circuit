@@ -84,8 +84,12 @@ export interface SidebarProps {
    * Adds a block. The host places it at the canvas centre: drag is the pointer
    * affordance, and a palette reachable only by drag is an accessibility failure, so
    * every row is a real button whose activation adds.
+   *
+   * The store's verdict, like the other two: `false` means the document refused the write
+   * (the T26 run lock), and announcing an add that did not happen is the same dishonesty as
+   * reporting a template load that never landed.
    */
-  onAddBlock: (type: BlockType) => void;
+  onAddBlock: (type: BlockType) => boolean;
   /** The store's verdict. `false` means nothing was loaded, and the sidebar says so. */
   onLoadTemplate: (templateId: string) => boolean;
   /**
@@ -94,26 +98,42 @@ export interface SidebarProps {
    * template load that never happened.
    */
   onClear: () => boolean;
+  /**
+   * T26: the sentence every write refusal states while an execution holds the document.
+   * Null outside a run. Nothing here dims, veils or blurs — every write control states the
+   * refusal (`aria-disabled` plus the sentence), and the store refuses behind all of them.
+   */
+  lockReason?: string | null;
 }
 
 interface PaletteRowProps {
   readonly type: BlockType;
   readonly collapsed: boolean;
   readonly onAdd: (type: BlockType) => void;
+  /** T26: why writes are refused right now, or null. Never `disabled` — always a reason. */
+  readonly lockReason: string | null;
 }
 
-function PaletteRow({ type, collapsed, onAdd }: PaletteRowProps) {
+function PaletteRow({ type, collapsed, onAdd, lockReason }: PaletteRowProps) {
   const entry = PALETTE[type];
   const Icon = entry.icon;
 
   function handleDragStart(event: DragEvent<HTMLButtonElement>): void {
+    // T26: the drag SOURCE deactivates while a run holds the document — refusing the drop
+    // after the user has already dragged across the screen is a worse refusal than never
+    // letting the drag start.
+    if (lockReason !== null) {
+      event.preventDefault();
+      return;
+    }
     event.dataTransfer.setData(BLOCK_DRAG_MIME, type);
     event.dataTransfer.effectAllowed = "move";
   }
 
-  // Guard before preventDefault, and preventDefault before adding: suppressing the
-  // native activation is what stops Enter from adding twice (once here, once via the
-  // click the browser would synthesise afterwards).
+  // preventDefault before adding: suppressing the native activation is what stops Enter from
+  // adding twice (once here, once via the click the browser would synthesise afterwards). The
+  // LOCK is not checked here — `onAdd` is the sidebar's one refusal point, so a locked
+  // activation states the reason instead of returning in silence.
   function handleKeyDown(event: KeyboardEvent<HTMLButtonElement>): void {
     if (event.key !== "Enter" && event.key !== " ") return;
     event.preventDefault();
@@ -123,11 +143,14 @@ function PaletteRow({ type, collapsed, onAdd }: PaletteRowProps) {
   return (
     <button
       type="button"
-      draggable
+      draggable={lockReason === null}
       data-block-type={type}
       onDragStart={handleDragStart}
+      // `aria-disabled` with the write intercepted downstream, never `disabled` (B3 forward
+      // rule): a disabled control cannot be focused, so it cannot announce why it refused.
       onClick={() => onAdd(type)}
       onKeyDown={handleKeyDown}
+      {...(lockReason === null ? {} : { "aria-disabled": true, title: lockReason })}
       {...(collapsed ? { "aria-label": `${entry.label} block`, title: entry.label } : {})}
       className={cn(
         "focus-ring transition-fast flex h-9 shrink-0 cursor-grab items-center gap-2 rounded-sm",
@@ -152,7 +175,7 @@ interface Announcement {
   readonly nonce: number;
 }
 
-export function Sidebar({ onAddBlock, onLoadTemplate, onClear }: SidebarProps) {
+export function Sidebar({ onAddBlock, onLoadTemplate, onClear, lockReason = null }: SidebarProps) {
   const baseId = useId();
   const [collapsed, setCollapsed] = useState(false);
   const [tab, setTab] = useState<TabId>("blocks");
@@ -166,17 +189,36 @@ export function Sidebar({ onAddBlock, onLoadTemplate, onClear }: SidebarProps) {
     setAnnouncement((previous) => ({ text, nonce: previous.nonce + 1 }));
   }
 
+  /**
+   * The sidebar's ONE lock refusal (T26, Codex round-3 finding 2): it states the run's own
+   * sentence in the region that is already mounted and dispatches nothing. Every write control
+   * here — palette rows, template rows, Clear canvas — asks it first, so none of them can
+   * carry its own opinion about the lock, and the store refuses behind all three anyway.
+   */
+  function refusedByLock(): boolean {
+    if (lockReason === null) return false;
+    announce(lockReason);
+    return true;
+  }
+
   function handleAdd(type: BlockType): void {
-    onAddBlock(type);
-    announce(`${PALETTE[type].label} block added to the canvas.`);
+    if (refusedByLock()) return;
+    const label = PALETTE[type].label;
+    announce(
+      onAddBlock(type)
+        ? `${label} block added to the canvas.`
+        : `${label} block could not be added.`,
+    );
   }
 
   function handleTemplate(templateId: string, name: string): void {
+    if (refusedByLock()) return;
     const loaded = onLoadTemplate(templateId);
     announce(loaded ? `${name} loaded.` : `${name} could not be loaded.`);
   }
 
   function handleClear(): void {
+    if (refusedByLock()) return;
     const cleared = onClear();
     announce(cleared ? "Canvas cleared." : "Canvas is already empty — nothing to clear.");
   }
@@ -233,7 +275,7 @@ export function Sidebar({ onAddBlock, onLoadTemplate, onClear }: SidebarProps) {
       {collapsed ? (
         <div id={contentId} className="flex flex-col items-center gap-1 overflow-y-auto pt-4">
           {COLLAPSED_ORDER.map((type) => (
-            <PaletteRow key={type} type={type} collapsed onAdd={handleAdd} />
+            <PaletteRow key={type} type={type} collapsed lockReason={lockReason} onAdd={handleAdd} />
           ))}
         </div>
       ) : (
@@ -278,7 +320,13 @@ export function Sidebar({ onAddBlock, onLoadTemplate, onClear }: SidebarProps) {
                   {section.label}
                 </p>
                 {section.types.map((type) => (
-                  <PaletteRow key={type} type={type} collapsed={false} onAdd={handleAdd} />
+                  <PaletteRow
+                    key={type}
+                    type={type}
+                    collapsed={false}
+                    lockReason={lockReason}
+                    onAdd={handleAdd}
+                  />
                 ))}
               </div>
             ))}
@@ -302,6 +350,7 @@ export function Sidebar({ onAddBlock, onLoadTemplate, onClear }: SidebarProps) {
                 key={template.id}
                 type="button"
                 onClick={() => handleTemplate(template.id, template.name)}
+                {...(lockReason === null ? {} : { "aria-disabled": true, title: lockReason })}
                 className="focus-ring transition-fast w-full rounded-sm px-3 py-2 text-left hover:bg-card-hover"
               >
                 <span className="block text-sm font-medium text-foreground">{template.name}</span>
@@ -313,7 +362,12 @@ export function Sidebar({ onAddBlock, onLoadTemplate, onClear }: SidebarProps) {
           </div>
 
           <div className="shrink-0 border-t border-border p-2">
-            <Button variant="outline" className="w-full" onClick={handleClear}>
+            <Button
+              variant="outline"
+              className="w-full"
+              onClick={handleClear}
+              {...(lockReason === null ? {} : { "aria-disabled": true, title: lockReason })}
+            >
               Clear canvas
             </Button>
           </div>

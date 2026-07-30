@@ -873,6 +873,448 @@ def test_historical_drift_review(root: Path) -> None:
     )
 
 
+def test_same_phase_successor_drift(root: Path) -> None:
+    print("Same-phase successor drift (currency relaxed while a successor is active; re-arms at rest)")
+    repo = root / "successor-drift"
+    baseline = build_candidate(repo)
+    set_work_state(repo, "achieved", ["src/**"])
+    receipt = "roadmap/evidence/E-SYNTHETIC.md"
+    work_path = repo / "roadmap" / "work" / "W0.md"
+    write(
+        work_path,
+        read(work_path).replace(
+            "evidence_receipts: []", f"evidence_receipts:\n  - {receipt}"
+        ),
+    )
+    write(repo / receipt, evidence_text(baseline, *receipt_basis(repo, baseline)))
+    must(git(repo, "add", "roadmap"), "stage achieved contract and receipt")
+    must(
+        tool(repo, "doctor.py", "--stamp", "W0", "--now", "2030-01-02T00:00:00Z"),
+        "stamp synthetic achieved work",
+    )
+    # A SECOND work item in the SAME phase becomes the active task — the split-phase
+    # shape (W07 achieved, W08 active) whose charter is to evolve the shared inputs.
+    write(
+        repo / "roadmap" / "work" / "W1.md",
+        work_text("active", ["src/**"]).replace("id: W0", "id: W1").replace(
+            "title: Synthetic work", "title: Synthetic successor"
+        ),
+    )
+    write(
+        repo / "roadmap" / "STATUS.md",
+        read(repo / "roadmap" / "STATUS.md").replace(
+            "active_task: none", "active_task: W1"
+        ),
+    )
+    write(
+        repo / "roadmap" / "ROADMAP.md",
+        read(repo / "roadmap" / "ROADMAP.md").replace(
+            "| W0 | Synthetic work | P0 | — | Correct | achieved |",
+            "| W0 | Synthetic work | P0 | — | Correct | achieved |\n"
+            "| W1 | Synthetic successor | P0 | — | Correct | active |",
+        ),
+    )
+    must(tool(repo, "claim.py", "open", "writer", "W1", "--integrator"), "open successor claim")
+    commit_all(repo, "synthetic same-phase successor activation")
+    quiet = tool(repo, "doctor.py", "--now", "2030-01-02T00:00:00Z")
+    write(repo / "src" / "allowed.txt", "the successor evolved a shared input\n")
+    commit_all(repo, "synthetic successor drift")
+    relaxed = tool(repo, "doctor.py", "--now", "2030-01-02T00:00:00Z")
+    check(
+        "successor:drift-relaxed-while-active",
+        quiet.returncode == 0 and relaxed.returncode == 0,
+        "\n".join(map(output, (quiet, relaxed))),
+    )
+    # The phase comes to rest: the successor releases and active_task returns to
+    # none — the ERROR-level checks re-arm, so the drift cannot go unexplained.
+    must(tool(repo, "claim.py", "release", "writer"), "release successor claim")
+    write(
+        repo / "roadmap" / "STATUS.md",
+        read(repo / "roadmap" / "STATUS.md").replace(
+            "active_task: W1", "active_task: none"
+        ),
+    )
+    write(
+        repo / "roadmap" / "work" / "W1.md",
+        read(repo / "roadmap" / "work" / "W1.md").replace(
+            "status: active", "status: candidate"
+        ),
+    )
+    write(
+        repo / "roadmap" / "ROADMAP.md",
+        read(repo / "roadmap" / "ROADMAP.md").replace(
+            "| W1 | Synthetic successor | P0 | — | Correct | active |",
+            "| W1 | Synthetic successor | P0 | — | Correct | candidate |",
+        ),
+    )
+    commit_all(repo, "synthetic phase rest")
+    rearmed = tool(repo, "doctor.py", "--now", "2030-01-02T00:00:00Z")
+    check(
+        "successor:currency-re-arms-at-rest",
+        rearmed.returncode == 1
+        and "differ from the tested commit" in output(rearmed),
+        output(rearmed),
+    )
+
+
+def test_terminal_transition_re_arm(root: Path) -> None:
+    print("Terminal transitions re-arm D-006 (close-and-activate; phase exit without rest)")
+    repo = root / "terminal-re-arm"
+    build_candidate(repo)
+    set_work_state(repo, "achieved", ["src/**"])
+    receipt = "roadmap/evidence/E-SYNTHETIC.md"
+    work_path = repo / "roadmap" / "work" / "W0.md"
+    write(
+        work_path,
+        read(work_path).replace(
+            "evidence_receipts: []", f"evidence_receipts:\n  - {receipt}"
+        ),
+    )
+    honest_base = commit_all(repo, "synthetic close preparation")
+    write(repo / receipt, evidence_text(honest_base, *receipt_basis(repo, honest_base)))
+    must(git(repo, "add", "roadmap"), "stage achieved contract and receipt")
+    must(
+        tool(repo, "doctor.py", "--stamp", "W0", "--now", "2030-01-02T00:00:00Z"),
+        "stamp synthetic achieved work",
+    )
+    # Successor W1 activates, then evolves the shared inputs (relaxed, proven elsewhere).
+    write(
+        repo / "roadmap" / "work" / "W1.md",
+        work_text("active", ["src/**"]).replace("id: W0", "id: W1").replace(
+            "title: Synthetic work", "title: Synthetic successor"
+        ),
+    )
+    write(
+        repo / "roadmap" / "STATUS.md",
+        read(repo / "roadmap" / "STATUS.md").replace(
+            "active_task: none", "active_task: W1"
+        ),
+    )
+    write(
+        repo / "roadmap" / "ROADMAP.md",
+        read(repo / "roadmap" / "ROADMAP.md").replace(
+            "| W0 | Synthetic work | P0 | — | Correct | achieved |",
+            "| W0 | Synthetic work | P0 | — | Correct | achieved |\n"
+            "| W1 | Synthetic successor | P0 | — | Correct | active |",
+        ),
+    )
+    w1_added = commit_all(repo, "synthetic successor activation")
+    write(repo / "src" / "allowed.txt", "the successor evolved a shared input\n")
+    drifted_head = commit_all(repo, "synthetic successor drift")
+
+    # BYPASS 1 — close-and-activate: W1 flips achieved citing a receipt whose basis
+    # predates the drift, while W2 activates in the same commit. Never rests at none.
+    w1_receipt = "roadmap/evidence/E-SYNTHETIC-W1.md"
+    write(
+        repo / w1_receipt,
+        evidence_text(w1_added, *receipt_basis(repo, w1_added, "W1"), work_id="W1").replace(
+            "id: E-SYNTHETIC", "id: E-SYNTHETIC-W1"
+        ),
+    )
+    write(
+        repo / "roadmap" / "work" / "W1.md",
+        read(repo / "roadmap" / "work" / "W1.md")
+        .replace("status: active", "status: achieved")
+        .replace("evidence_receipts: []", f"evidence_receipts:\n  - {w1_receipt}"),
+    )
+    write(
+        repo / "roadmap" / "work" / "W2.md",
+        work_text("active", ["src/**"]).replace("id: W0", "id: W2").replace(
+            "title: Synthetic work", "title: Synthetic third"
+        ),
+    )
+    write(
+        repo / "roadmap" / "STATUS.md",
+        read(repo / "roadmap" / "STATUS.md").replace(
+            "active_task: W1", "active_task: W2"
+        ),
+    )
+    write(
+        repo / "roadmap" / "ROADMAP.md",
+        read(repo / "roadmap" / "ROADMAP.md")
+        .replace(
+            "| W1 | Synthetic successor | P0 | — | Correct | active |",
+            "| W1 | Synthetic successor | P0 | — | Correct | achieved |\n"
+            "| W2 | Synthetic third | P0 | — | Correct | active |",
+        ),
+    )
+    must(git(repo, "add", "roadmap"), "stage close-and-activate bypass")
+    bypass = tool(
+        repo, "scope_gate.py", env={"CONTROL_PLANE_OWNER_REVIEWED": "1"}
+    )
+    bypass_head = commit_all(repo, "synthetic close-and-activate bypass")
+    bypass_replay = tool(repo, "scope_diff.py", drifted_head, bypass_head)
+    check(
+        "terminal:close-and-activate-blocked",
+        bypass.returncode == 1
+        and "terminal transition" in output(bypass)
+        and bypass_replay.returncode == 1
+        and "terminal transition re-arms D-006" in output(bypass_replay),
+        "\n".join(map(output, (bypass, bypass_replay))),
+    )
+    reset(repo, drifted_head)
+
+    # BYPASS 2 — phase exit without rest: active_phase advances while achieved W0's
+    # receipt is stale from the successor's drift.
+    write(
+        repo / "roadmap" / "STATUS.md",
+        read(repo / "roadmap" / "STATUS.md").replace(
+            "active_phase: P0", "active_phase: P1"
+        ),
+    )
+    write(
+        repo / "roadmap" / "ROADMAP.md",
+        read(repo / "roadmap" / "ROADMAP.md").replace(
+            "| P0 | Synthetic | Test | **In progress** |",
+            "| P0 | Synthetic | Test | Done |\n| P1 | Later | Test | **In progress** |",
+        ),
+    )
+    must(git(repo, "add", "roadmap"), "stage phase exit without rest")
+    exit_gate = tool(
+        repo, "scope_gate.py", env={"CONTROL_PLANE_OWNER_REVIEWED": "1"}
+    )
+    check(
+        "terminal:phase-exit-blocked",
+        exit_gate.returncode == 1 and "terminal transition" in output(exit_gate),
+        output(exit_gate),
+    )
+    reset(repo, drifted_head)
+
+    # POSITIVE CONTROL — the honest close: W1's receipt re-based on the drifted head
+    # passes the same gate, so the re-arm admits exactly the drift-explained path.
+    write(
+        repo / w1_receipt,
+        evidence_text(
+            drifted_head, *receipt_basis(repo, drifted_head, "W1"), work_id="W1"
+        ).replace("id: E-SYNTHETIC", "id: E-SYNTHETIC-W1"),
+    )
+    write(
+        repo / "roadmap" / "work" / "W1.md",
+        read(repo / "roadmap" / "work" / "W1.md")
+        .replace("status: active", "status: achieved")
+        .replace("evidence_receipts: []", f"evidence_receipts:\n  - {w1_receipt}"),
+    )
+    write(
+        repo / "roadmap" / "STATUS.md",
+        read(repo / "roadmap" / "STATUS.md").replace(
+            "active_task: W1", "active_task: none"
+        ),
+    )
+    write(
+        repo / "roadmap" / "ROADMAP.md",
+        read(repo / "roadmap" / "ROADMAP.md").replace(
+            "| W1 | Synthetic successor | P0 | — | Correct | active |",
+            "| W1 | Synthetic successor | P0 | — | Correct | achieved |",
+        ),
+    )
+    must(git(repo, "add", "roadmap"), "stage honest close")
+    honest = tool(repo, "scope_gate.py", env={"CONTROL_PLANE_OWNER_REVIEWED": "1"})
+    check(
+        "terminal:honest-close-admitted",
+        honest.returncode == 0,
+        output(honest),
+    )
+
+
+def test_completion_scopes_re_arm(root: Path) -> None:
+    print("Project completion re-arms only the exiting phase (historical drift stays legitimate)")
+    repo = root / "completion-scope"
+    build_candidate(repo)
+    set_work_state(repo, "achieved", ["src/**"])
+    receipt = "roadmap/evidence/E-SYNTHETIC.md"
+    work_path = repo / "roadmap" / "work" / "W0.md"
+    write(
+        work_path,
+        read(work_path).replace(
+            "evidence_receipts: []", f"evidence_receipts:\n  - {receipt}"
+        ),
+    )
+    prepared = commit_all(repo, "synthetic close preparation")
+    write(repo / receipt, evidence_text(prepared, *receipt_basis(repo, prepared)))
+    must(git(repo, "add", "roadmap"), "stage achieved contract and receipt")
+    must(
+        tool(repo, "doctor.py", "--stamp", "W0", "--now", "2030-01-02T00:00:00Z"),
+        "stamp synthetic achieved work",
+    )
+    # P0 exits honestly (W0's receipt is current at this transition), P1 begins.
+    write(
+        repo / "roadmap" / "ROADMAP.md",
+        read(repo / "roadmap" / "ROADMAP.md").replace(
+            "| P0 | Synthetic | Test | **In progress** |",
+            "| P0 | Synthetic | Test | Done |\n| P1 | Later | Test | **In progress** |",
+        ),
+    )
+    write(
+        repo / "roadmap" / "STATUS.md",
+        read(repo / "roadmap" / "STATUS.md").replace(
+            "active_phase: P0", "active_phase: P1"
+        ),
+    )
+    commit_all(repo, "synthetic phase advance")
+    # P1's own work evolves the shared inputs — legitimate later-phase drift over W0.
+    write(repo / "src" / "allowed.txt", "later-phase work evolved a shared input\n")
+    drifted = commit_all(repo, "synthetic later-phase drift")
+    w1_receipt = "roadmap/evidence/E-SYNTHETIC-W1.md"
+    write(
+        repo / "roadmap" / "work" / "W1.md",
+        work_text("achieved", ["src/**"])
+        .replace("id: W0", "id: W1")
+        .replace("phase: P0", "phase: P1")
+        .replace("title: Synthetic work", "title: Synthetic later work")
+        .replace("evidence_receipts: []", f"evidence_receipts:\n  - {w1_receipt}"),
+    )
+    write(
+        repo / "roadmap" / "ROADMAP.md",
+        read(repo / "roadmap" / "ROADMAP.md").replace(
+            "| W0 | Synthetic work | P0 | — | Correct | achieved |",
+            "| W0 | Synthetic work | P0 | — | Correct | achieved |\n"
+            "| W1 | Synthetic later work | P1 | — | Correct | achieved |",
+        ),
+    )
+    w1_added = commit_all(repo, "synthetic later-phase achieved work")
+    write(
+        repo / w1_receipt,
+        evidence_text(w1_added, *receipt_basis(repo, w1_added, "W1"), work_id="W1").replace(
+            "id: E-SYNTHETIC", "id: E-SYNTHETIC-W1"
+        ),
+    )
+    current_head = commit_all(repo, "synthetic W1 receipt")
+    # Completion: P1 flips Done, project_state complete. W0 is drifted but HISTORICAL;
+    # W1 (the exiting phase) is current — the gate must admit this.
+    completion = read(repo / "roadmap" / "ROADMAP.md").replace(
+        "| P1 | Later | Test | **In progress** |", "| P1 | Later | Test | Done |"
+    )
+    write(repo / "roadmap" / "ROADMAP.md", completion)
+    write(
+        repo / "roadmap" / "STATUS.md",
+        read(repo / "roadmap" / "STATUS.md").replace(
+            "project_state: active", "project_state: complete"
+        ),
+    )
+    must(git(repo, "add", "roadmap"), "stage honest completion")
+    honest = tool(repo, "scope_gate.py", env={"CONTROL_PLANE_OWNER_REVIEWED": "1"})
+    check(
+        "completion:historical-drift-admitted",
+        honest.returncode == 0,
+        output(honest),
+    )
+    reset(repo, current_head)
+    # Negative control: the EXITING phase's receipt is stale (post-receipt drift) — the
+    # same completion must block on W1, proving the re-arm still has teeth where it aims.
+    write(repo / "src" / "allowed.txt", "drift after the exiting phase receipt\n")
+    evasion_base = commit_all(repo, "synthetic exiting-phase drift")
+
+    def stage_completion() -> None:
+        write(
+            repo / "roadmap" / "ROADMAP.md",
+            read(repo / "roadmap" / "ROADMAP.md").replace(
+                "| P1 | Later | Test | **In progress** |", "| P1 | Later | Test | Done |"
+            ),
+        )
+        write(
+            repo / "roadmap" / "STATUS.md",
+            read(repo / "roadmap" / "STATUS.md").replace(
+                "project_state: active", "project_state: complete"
+            ),
+        )
+
+    stage_completion()
+    must(git(repo, "add", "roadmap"), "stage stale completion")
+    stale = tool(repo, "scope_gate.py", env={"CONTROL_PLANE_OWNER_REVIEWED": "1"})
+    check(
+        "completion:exiting-phase-still-strict",
+        stale.returncode == 1
+        and "terminal transition" in output(stale)
+        and "W1" in output(stale),
+        output(stale),
+    )
+    reset(repo, evasion_base)
+
+    # EVASION 1 (Codex round 4): reclassify the drifted item's PHASE in the completion
+    # commit — selection from the before snapshot must still demand its currency.
+    stage_completion()
+    write(
+        repo / "roadmap" / "work" / "W1.md",
+        read(repo / "roadmap" / "work" / "W1.md").replace("phase: P1", "phase: P0"),
+    )
+    must(git(repo, "add", "roadmap"), "stage phase-reclassify evasion")
+    rephased = tool(repo, "scope_gate.py", env={"CONTROL_PLANE_OWNER_REVIEWED": "1"})
+    check(
+        "completion:phase-reclassify-still-strict",
+        rephased.returncode == 1
+        and "terminal transition" in output(rephased)
+        and "W1" in output(rephased),
+        output(rephased),
+    )
+    reset(repo, evasion_base)
+
+    # EVASION 2 (Codex round 4): flip the drifted item to archived in the same commit —
+    # what it claimed BEFORE the transition decides that it owes currency AT it.
+    stage_completion()
+    write(
+        repo / "roadmap" / "work" / "W1.md",
+        read(repo / "roadmap" / "work" / "W1.md").replace(
+            "status: achieved", "status: archived"
+        ),
+    )
+    must(git(repo, "add", "roadmap"), "stage archive evasion")
+    archived = tool(repo, "scope_gate.py", env={"CONTROL_PLANE_OWNER_REVIEWED": "1"})
+    check(
+        "completion:archive-still-strict",
+        archived.returncode == 1
+        and "terminal transition" in output(archived)
+        and "W1" in output(archived),
+        output(archived),
+    )
+    reset(repo, evasion_base)
+
+    # TWO-COMMIT EVASIONS (Codex round 5): the departure itself — archive, rephase, or
+    # delete a drifted achieved item WITHOUT any phase exit in the commit — must block,
+    # or a later completion sees nothing left to re-arm for.
+    write(
+        repo / "roadmap" / "work" / "W1.md",
+        read(repo / "roadmap" / "work" / "W1.md").replace(
+            "status: achieved", "status: archived"
+        ),
+    )
+    must(git(repo, "add", "roadmap"), "stage bare archive departure")
+    bare_archive = tool(repo, "scope_gate.py", env={"CONTROL_PLANE_OWNER_REVIEWED": "1"})
+    check(
+        "departure:bare-archive-blocked",
+        bare_archive.returncode == 1
+        and "terminal transition" in output(bare_archive)
+        and "W1" in output(bare_archive),
+        output(bare_archive),
+    )
+    reset(repo, evasion_base)
+
+    write(
+        repo / "roadmap" / "work" / "W1.md",
+        read(repo / "roadmap" / "work" / "W1.md").replace("phase: P1", "phase: P0"),
+    )
+    must(git(repo, "add", "roadmap"), "stage bare rephase departure")
+    bare_rephase = tool(repo, "scope_gate.py", env={"CONTROL_PLANE_OWNER_REVIEWED": "1"})
+    check(
+        "departure:bare-rephase-blocked",
+        bare_rephase.returncode == 1
+        and "terminal transition" in output(bare_rephase)
+        and "W1" in output(bare_rephase),
+        output(bare_rephase),
+    )
+    reset(repo, evasion_base)
+
+    (repo / "roadmap" / "work" / "W1.md").unlink()
+    must(git(repo, "add", "-u", "roadmap"), "stage bare deletion departure")
+    bare_delete = tool(repo, "scope_gate.py", env={"CONTROL_PLANE_OWNER_REVIEWED": "1"})
+    check(
+        "departure:bare-deletion-blocked",
+        bare_delete.returncode == 1
+        and "cannot disappear" in output(bare_delete)
+        and "W1" in output(bare_delete),
+        output(bare_delete),
+    )
+
+
 def test_enforcement_posture(root: Path) -> None:
     print("Evidence-backed enforcement posture")
     repo = root / "enforcement-posture"
@@ -1728,6 +2170,9 @@ def main() -> int:
         test_reviewer_core_rules(root)
         test_evidence_round_trip(root)
         test_historical_drift_review(root)
+        test_same_phase_successor_drift(root)
+        test_terminal_transition_re_arm(root)
+        test_completion_scopes_re_arm(root)
         test_enforcement_posture(root)
         test_project_completion(root)
         test_owner_semantics_and_immutability(root)

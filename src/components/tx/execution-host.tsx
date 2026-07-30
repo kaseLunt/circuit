@@ -26,6 +26,11 @@ import {
   useSyncExternalStore,
   type ReactNode,
 } from "react";
+import type { BorrowLimitVerdict } from "../../core/borrow-limit";
+import { simulationCanClear, type LiveExecuteRefusal } from "../../lib/wallet/gate";
+import type { LiveSimulationPhase } from "../composer/live-simulation";
+import { LiveRefusalCard, liveRefusalCopy, type ComposerMode } from "../wallet/connect-surface";
+import { formatBpsAsPercent } from "../../core/format";
 import { buildPlan, type PlanSuccess } from "../../core/plan";
 import { riskLedger, type RiskCheckpoint } from "../../core/risk";
 import { encodeShareGraph } from "../../lib/share/encode";
@@ -50,6 +55,38 @@ export interface ExecutionHostProps {
   readonly snapshot: SnapshotState;
   readonly simulation: SimulationResult | null;
   readonly simulationPending: boolean;
+  /**
+   * SPEC §3 step 4's client-side verdict (`useBorrowLimit`). An `over-limit` verdict GATES
+   * Simulate; the gate is lifted only by the store's explicit one-shot override, which any
+   * document mutation disarms.
+   */
+  readonly borrowLimit?: BorrowLimitVerdict | null;
+  /**
+   * SPEC §3 step 7. `sandbox` is the default no-wallet experience; connecting a wallet
+   * switches the session to `live`, where the sandbox arm control is replaced by the live
+   * gate. The refusal is computed by the pure gate and passed in — this component never
+   * decides whether a wallet may execute.
+   */
+  readonly mode?: ComposerMode;
+  readonly liveRefusal?: LiveExecuteRefusal | null;
+  /**
+   * The live gate, re-decided at the instant of commitment (Codex round-4 finding 1).
+   *
+   * `liveRefusal` above is what the button was PAINTED with, and a paint is a reading of a
+   * clock: the freshness bound can expire with no render to notice, so the verdict on screen is
+   * not the authority at the moment a run starts. This callback asks the gate again — the
+   * composer owns the inputs and reads the monotonic clock fresh — and a non-null answer stops
+   * the run before `driver.arm` opens a session. Surfacing is the gate's own (it re-renders
+   * through `liveRefusal`), so this component decides nothing and states nothing new.
+   */
+  readonly revalidateLive?: (() => LiveExecuteRefusal | null) | null;
+  /**
+   * The live-simulation path's phase and trigger (Codex D-011 F2). The trigger is offered
+   * only against refusals a fresh simulation can CLEAR (`simulationCanClear` — the pure
+   * gate decides, this component renders); a null trigger means no wallet is connected.
+   */
+  readonly liveSimulationPhase?: LiveSimulationPhase;
+  readonly onLiveSimulate?: (() => void) | null;
   /**
    * An externally owned driver (the composer body creates one so the canvas can read
    * the executing step for its T26 frame). Omitted, the host composes its own from the
@@ -126,6 +163,12 @@ export function ExecutionHost({
   snapshot,
   simulation,
   simulationPending,
+  borrowLimit = null,
+  mode = "sandbox",
+  liveRefusal = null,
+  revalidateLive = null,
+  liveSimulationPhase = { kind: "idle" },
+  onLiveSimulate = null,
   driver: externalDriver,
   transport,
   storage,
@@ -133,6 +176,8 @@ export function ExecutionHost({
 }: ExecutionHostProps) {
   const doc = useComposerStore((state) => state.doc);
   const rev = useComposerStore((state) => state.rev);
+  const overrideArmed = useComposerStore((state) => state.overrideGateArmed);
+  const armOverride = useComposerStore((state) => state.armOverride);
 
   const [driver] = useState(
     () =>
@@ -164,6 +209,29 @@ export function ExecutionHost({
     if (!encoded.ok) {
       return { input: null, checkpoints: null, reason: "the document cannot be encoded for transport" };
     }
+    // SPEC §3 step 4: the client-side gate. `buildPlan` deliberately does NOT refuse on LTV
+    // — the over-limit document has to stay representable so the block can show the math and
+    // the override can run it — so the refusal lives here, and it is the store's one-shot
+    // `overrideGateArmed` that lifts it. An UNAVAILABLE verdict gates too: a limit that could
+    // not be evaluated is not a satisfied one (SPEC §5).
+    if (borrowLimit !== null && !overrideArmed) {
+      if (borrowLimit.status === "over-limit") {
+        return {
+          input: null,
+          checkpoints: null,
+          reason: `the borrow is past the limit the active configuration allows (${formatBpsAsPercent(
+            borrowLimit.ceiling.maxAllocationBps,
+          )} of collateral value) — edit it, or override with "Simulate anyway"`,
+        };
+      }
+      if (borrowLimit.status === "unavailable") {
+        return {
+          input: null,
+          checkpoints: null,
+          reason: `the borrow limit could not be evaluated: ${borrowLimit.reason}`,
+        };
+      }
+    }
     // The plan's own risk walk (§0: one prediction home) — pinned with the plan at arm.
     const ledger = riskLedger(doc, snapshot.snapshot);
     return {
@@ -171,7 +239,7 @@ export function ExecutionHost({
       checkpoints: ledger.ok ? ledger.checkpoints : null,
       reason: null,
     };
-  }, [doc, snapshot]);
+  }, [doc, snapshot, borrowLimit, overrideArmed]);
 
   // Codex fix 1: the predictions a run renders are PINNED at the moment it is armed or
   // restored — the same document instance produced the plan reference, the simulation,
@@ -181,6 +249,33 @@ export function ExecutionHost({
     if (armable.input !== null) {
       setPinned({ plan: armable.input.plan, simulation, checkpoints: armable.checkpoints });
     }
+  };
+
+  /**
+   * The last thing asked before a run starts (Codex round-4 finding 1): does the live gate
+   * STILL refuse nothing, decided now rather than at the last paint? Every route that ARMS asks
+   * it — the two direct controls below and a fault's re-arm Retry — because each opens a session
+   * and none of them may do so on an expired simulation.
+   */
+  const liveCommitRefused = (): boolean => revalidateLive !== null && revalidateLive() !== null;
+
+  /**
+   * The same question, asked for a FAULT's Retry (Codex round-5). `DriverFault.retry` names the
+   * family the action belongs to, and one of the three IS an arm: `retry: "arm"` re-enters
+   * create/reset/plan inside the driver, from the retained arm input, without passing either
+   * button's guard. A fault card sits on screen for as long as the user leaves it there, so by
+   * the time Retry is pressed the standing may have expired with no render to notice — the same
+   * stale authority the two direct handlers already refuse, reaching the wire by another door.
+   *
+   * The other two families stay ungated on purpose, because they are the machine's rather than a
+   * new commitment: `run` re-enters the step loop of a run the user already committed, and
+   * `reload` rehydrates server truth about it (both idempotent replay and discovery, D6/D11).
+   * Holding those hostage to simulation freshness would strand a committed mid-run session with
+   * no way to learn what the server did — the opposite of the guard's purpose.
+   */
+  const retryFault = (): void => {
+    if (snap.fault !== null && snap.fault.retry === "arm" && liveCommitRefused()) return;
+    void driver.retry();
   };
 
   // §2.4: the driver no-ops unless the machine is `ready`, so every rev bump may relay.
@@ -257,6 +352,19 @@ export function ExecutionHost({
     </p>
   );
 
+  // SPEC §6, verbatim: "The UI labels it 'Re-simulate', never 'Resume'." A failed or
+  // over-limit simulation has NO resumable prefix, so once this session has armed a run the
+  // control that runs it again says so. `armed` is session state, not document state: it
+  // survives the mutation that disarmed the override, which is exactly the §3.4 beat (drag
+  // back to 70% → "Re-simulate" reruns the ENTIRE bundle from the base snapshot).
+  const [hasArmed, setHasArmed] = useState(false);
+  const armLabel = hasArmed ? "Re-simulate" : "Review & execute in sandbox";
+  const overrideOffered =
+    borrowLimit !== null && borrowLimit.status === "over-limit" && !overrideArmed;
+  // In live mode the refusal's own title IS the gate reason — one sentence, one source.
+  const liveGateReason =
+    mode === "live" && liveRefusal !== null ? liveRefusalCopy(liveRefusal).title : null;
+
   if (!flowActive) {
     const busyReason =
       snap.busy === null ? null : "Preparing the session — a sandbox call is in flight.";
@@ -271,25 +379,88 @@ export function ExecutionHost({
             {snap.fault === null ? null : (
               <FaultCard
                 fault={snap.fault}
-                onRetryFault={() => void driver.retry()}
+                onRetryFault={retryFault}
                 busyReason={busyReason}
               />
             )}
-            <p className="text-xs text-muted-foreground">
-              Run this strategy on a forked-mainnet sandbox session — no wallet, no
-              signatures.
-            </p>
+            {mode === "live" ? (
+              /*
+               * SPEC §3 step 7: Execute STAYS GATED in live mode until a fresh simulation
+               * against the connected wallet's real balances passes, and the §2 footprint
+               * predicate refuses a wallet that already holds a position. Both arrive here
+               * as one verdict from the pure gate, rendered in the T27 designed-stop
+               * grammar — a state, never a toast.
+               */
+              <>
+                {liveRefusal === null ? null : <LiveRefusalCard refusal={liveRefusal} />}
+                {liveSimulationPhase.kind === "refused" ? (
+                  /*
+                   * A capture or simulation that refused is a designed state with its
+                   * reason stated (SPEC §5) — never a silent return to the gated button.
+                   */
+                  <p
+                    role="status"
+                    data-testid="live-simulation-refusal"
+                    className="text-xs text-muted-foreground"
+                  >
+                    {liveSimulationPhase.reason}
+                  </p>
+                ) : null}
+                {onLiveSimulate !== null &&
+                liveRefusal !== null &&
+                simulationCanClear(liveRefusal) ? (
+                  /*
+                   * The F2 clearing path: capture the wallet's block-pinned chain state
+                   * through our RPC, run the same pure simulation, and the standing it
+                   * mints is what lifts the gate. Offered ONLY against refusals a fresh
+                   * simulation can answer — the pure gate decides which those are.
+                   */
+                  <TransactionButton
+                    variant="default"
+                    onClick={onLiveSimulate}
+                    gateReason={
+                      liveSimulationPhase.kind === "capturing"
+                        ? "Capturing this wallet's chain state…"
+                        : null
+                    }
+                  >
+                    Simulate against this wallet
+                  </TransactionButton>
+                ) : null}
+                <p className="text-xs text-muted-foreground">
+                  Live execution signs from the connected wallet against Ethereum mainnet.
+                  Nothing is sent until a fresh simulation against its real balances passes.
+                </p>
+              </>
+            ) : (
+              <p className="text-xs text-muted-foreground">
+                Run this strategy on a forked-mainnet sandbox session — no wallet, no
+                signatures.
+              </p>
+            )}
             <TransactionButton
               onClick={() => {
-                if (armable.input !== null) {
-                  pinRun();
-                  void driver.arm(armable.input);
-                }
+                if (armable.input === null || liveCommitRefused()) return;
+                setHasArmed(true);
+                pinRun();
+                void driver.arm(armable.input);
               }}
-              gateReason={armable.reason ?? busyReason}
+              gateReason={liveGateReason ?? armable.reason ?? busyReason}
             >
-              Review &amp; execute in sandbox
+              {armLabel}
             </TransactionButton>
+            {overrideOffered ? (
+              /*
+               * SPEC §3.4's explicit override, "kept for exactly this purpose". It does not
+               * simulate anything itself and it promises nothing: it arms the store's
+               * one-shot flag, which ANY document mutation disarms, so the next press of the
+               * gated control runs the bundle the user insisted on and the chain answers.
+               * Neutral variant — an override is not the screen's terminal commit (T3a).
+               */
+              <TransactionButton variant="default" onClick={armOverride} gateReason={busyReason}>
+                Simulate anyway
+              </TransactionButton>
+            ) : null}
           </div>
         </PanelFade>
       </div>
@@ -313,12 +484,11 @@ export function ExecutionHost({
           nowMs={snap.nowMs}
           onExecute={() => void driver.execute()}
           onRearm={() => {
-            if (armable.input !== null) {
-              pinRun();
-              void driver.arm(armable.input);
-            }
+            if (armable.input === null || liveCommitRefused()) return;
+            pinRun();
+            void driver.arm(armable.input);
           }}
-          onRetryFault={() => void driver.retry()}
+          onRetryFault={retryFault}
         />
       </PanelFade>
     </aside>

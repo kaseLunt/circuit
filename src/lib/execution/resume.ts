@@ -225,6 +225,8 @@ export type WireRefusal =
       readonly tombstone: WireTombstone;
     }
   | { readonly kind: "session-busy" }
+  /** TTL crossed while an operation held the session: no final record yet, so retry (round-13). */
+  | { readonly kind: "expiring-in-flight" }
   | { readonly kind: "rate-limited"; readonly retryAfterMs: number }
   | { readonly kind: "tx-cap" }
   | { readonly kind: "at-capacity" }
@@ -672,6 +674,7 @@ export function refusalFactOf(wire: WireRefusal): ParseOutcome<SandboxRefusalFac
         return { kind: "reconcile-mismatch", detail: parseString(wire.detail, "refusal.detail") };
       case "unknown-session":
       case "session-busy":
+      case "expiring-in-flight":
       case "tx-cap":
       case "at-capacity":
       case "no-plan":

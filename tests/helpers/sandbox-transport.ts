@@ -16,12 +16,13 @@ import { buildPlan, type ChainSnapshot, type PlanSuccess } from "../../src/core/
 import { decodeShareGraph } from "../../src/lib/share/encode";
 import { stepRequirementsOf } from "../../src/lib/execution/machine";
 import { SANDBOX_OUTPUT_TOLERANCE, toleranceWeiFor } from "../../src/lib/execution/tolerance";
-import type { WireStepResult } from "../../src/lib/execution/resume";
+import type { WireSessionSummary, WireStepResult } from "../../src/lib/execution/resume";
 import type {
   SandboxTransport,
   WireCreateResponse,
   WireExecuteResponse,
   WirePlanResponse,
+  WireTransportRefusal,
   WireTransportSessionResponse,
 } from "../../src/lib/tx/transport";
 import { fixtureSnapshot } from "./chain-snapshot";
@@ -80,6 +81,59 @@ export function wireAttributed(plan: PlanSuccess, index: number): WireStepResult
   };
 }
 
+/**
+ * The session PHASE, in the wire's own shape, mirroring the registry's `SessionPhase`.
+ *
+ * The plan route refuses on the phase BEFORE it refuses on a moved fork (`planForSession` runs
+ * `phaseRefusal` first, then the `entries` check), so a fixture that tracked only `executed.length`
+ * answered `session-dirty` for a halted or failed session and hid a client that could not converge
+ * out of either (Codex round-8). The mapping below is the server's own:
+ *
+ *   attributed → active · halted → halted · failed → failed
+ *   attribution-unavailable → attribution-pending · persistence-failed → reconcile-required
+ *   dispatch-unresolved → reconcile-required · dispatch-vacated → active (`vacateDispatch`)
+ *
+ * LIMIT, stated rather than implied: the phase reaches the PLAN route only. `summaryOf` still
+ * reports `active`, because a faithful summary would also have to carry the pending-attribution
+ * `recovery` evidence and the non-settled entries that `executed` deliberately omits — the resume
+ * beats read that path, and nothing in this round exercises it.
+ */
+type ScriptedPhase = WireSessionSummary["phase"];
+
+/** `phaseRefusal` (execute-step.ts), verbatim: two phases plan, three refuse as themselves. */
+const phaseRefusalOf = (phase: ScriptedPhase): WireTransportRefusal | null => {
+  switch (phase.kind) {
+    case "active":
+    case "attribution-pending":
+      return null;
+    case "reconcile-required":
+      return { kind: "reconcile-required" };
+    case "halted":
+      return { kind: "halted", halt: phase.halt };
+    case "failed":
+      return { kind: "failed", failure: phase.failure };
+  }
+};
+
+/** The phase an executeStep outcome leaves behind, as the registry's `mark*` calls set it. */
+const phaseAfter = (result: WireStepResult): ScriptedPhase => {
+  switch (result.status) {
+    case "halted":
+      return { kind: "halted", halt: result.halt };
+    case "failed":
+      return { kind: "failed", failure: result.failure };
+    case "attribution-unavailable":
+      return { kind: "attribution-pending", stepIndex: result.stepIndex };
+    case "persistence-failed":
+      return { kind: "reconcile-required", pendingKind: "persistence" };
+    case "dispatch-unresolved":
+      return { kind: "reconcile-required", pendingKind: "dispatch" };
+    case "attributed":
+    case "dispatch-vacated":
+      return { kind: "active" };
+  }
+};
+
 export interface ScriptedCalls {
   readonly create: number;
   readonly plan: number;
@@ -97,6 +151,22 @@ export interface ScriptedSandbox {
   planned(): PlanSuccess | null;
   /** The wire results the "server" has recorded so far. */
   executed(): readonly WireStepResult[];
+  /**
+   * TTL expiry, as the registry performs it: the session is swept and every verb on that key is
+   * refused from its tombstone (`lookup` runs before anything else in the router, so this precedes
+   * the per-call scripting below). Only `create` clears it — a swept key is never served again, and
+   * a fresh session is the designed recovery. A test that bends `onSession` alone cannot model this
+   * and would let a dead key keep answering `plan` (Codex round-12).
+   */
+  expire(): void;
+  /**
+   * The TTL boundary WITH an operation still holding the session (round-13): new callers are
+   * refused `expiring-in-flight` and no tombstone exists yet, while the call that was already
+   * dispatched runs to completion and settles its evidence. The guard sits at call entry, so an
+   * operation dispatched before this point is unaffected — which is exactly the registry's own
+   * shape, where `lookup` gates entry and the mutex-holder is already past it.
+   */
+  expireInFlight(): void;
 }
 
 export interface ScriptOverrides {
@@ -131,6 +201,15 @@ export function scriptedSandbox(overrides: ScriptOverrides = {}): ScriptedSandbo
   };
   let planned: PlanSuccess | null = null;
   let executed: WireStepResult[] = [];
+  let phase: ScriptedPhase = { kind: "active" };
+  let swept = false;
+  let expiringInFlight = false;
+
+  const tombstone = (): WireTransportRefusal => ({
+    kind: "session-expired",
+    executedSteps: executed.length,
+    tombstone: { executedSteps: executed.length, executed, recovery: null },
+  });
 
   const summary = (): WireTransportSessionResponse => ({
     ok: true,
@@ -154,6 +233,14 @@ export function scriptedSandbox(overrides: ScriptOverrides = {}): ScriptedSandbo
       calls.create += 1;
       const bent = overrides.onCreate?.();
       if (bent !== undefined) return bent;
+      // A created session is a NEW fork: active, no recorded plan, no entries. The fixture holds
+      // one session's record, so it has to be re-based here or the gates above would outlive the
+      // fork they describe and refuse a genuinely fresh session (round-7/round-8).
+      planned = null;
+      executed = [];
+      phase = { kind: "active" };
+      swept = false;
+      expiringInFlight = false;
       return {
         ok: true,
         session: {
@@ -168,8 +255,19 @@ export function scriptedSandbox(overrides: ScriptOverrides = {}): ScriptedSandbo
     },
     plan: async (_sessionKey, document) => {
       calls.plan += 1;
+      if (swept) return { ok: false, refusal: tombstone() };
+      if (expiringInFlight) return { ok: false, refusal: { kind: "expiring-in-flight" } };
       const bent = overrides.onPlan?.();
       if (bent !== undefined) return bent;
+      // `planForSession`'s gates, in ITS order (round-7/round-8): the phase first — a halted or
+      // failed session is refused as halted or failed, never laundered into `session-dirty` — then
+      // the moved fork, then the non-active belt. A fixture that cannot produce these refusals
+      // cannot prove the client converges on them, and the driver's own reset-before-plan hygiene
+      // is only meaningful against a server that insists on it.
+      const blocked = phaseRefusalOf(phase);
+      if (blocked !== null) return { ok: false, refusal: blocked };
+      if (executed.length > 0) return { ok: false, refusal: { kind: "session-dirty" } };
+      if (phase.kind !== "active") return { ok: false, refusal: { kind: "session-dirty" } };
       const decoded = decodeShareGraph(document);
       if (!decoded.ok) return { ok: false, refusal: { kind: "document-refused", failure: decoded.failure } };
       const built = buildPlan(decoded.graph, snapshot);
@@ -187,6 +285,8 @@ export function scriptedSandbox(overrides: ScriptOverrides = {}): ScriptedSandbo
     },
     executeStep: async (_sessionKey, _planHash, stepIndex) => {
       calls.executeStep.push(stepIndex);
+      if (swept) return { ok: false, refusal: tombstone() };
+      if (expiringInFlight) return { ok: false, refusal: { kind: "expiring-in-flight" } };
       if (planned === null) return { ok: false, refusal: { kind: "no-plan" } };
       const record = (result: WireStepResult): void => {
         if (executed[stepIndex] !== undefined) return;
@@ -199,27 +299,40 @@ export function scriptedSandbox(overrides: ScriptOverrides = {}): ScriptedSandbo
           : { ok: true, result: wireAttributed(planned, stepIndex) };
       const bent = overrides.onExecuteStep?.(stepIndex, canonical, record);
       const response = bent ?? canonical;
-      if (response.ok) record(response.result);
+      if (response.ok) {
+        record(response.result);
+        // The phase the outcome leaves behind — the registry's `mark*` calls, mirrored, so a step
+        // that halts or reverts is visible to the PLAN route afterwards (round-8).
+        phase = phaseAfter(response.result);
+      }
       return response;
     },
     session: async () => {
       calls.session += 1;
+      if (swept) return { ok: false, refusal: tombstone() };
+      if (expiringInFlight) return { ok: false, refusal: { kind: "expiring-in-flight" } };
       const bent = overrides.onSession?.();
       if (bent !== undefined) return bent;
       return summary();
     },
     reconcile: async () => {
       calls.reconcile += 1;
+      if (swept) return { ok: false, refusal: tombstone() };
+      if (expiringInFlight) return { ok: false, refusal: { kind: "expiring-in-flight" } };
       const bent = overrides.onReconcile?.();
       if (bent !== undefined) return bent;
       return { ok: false, refusal: { kind: "nothing-to-reconcile" } };
     },
     reset: async () => {
       calls.reset += 1;
+      if (swept) return { ok: false, refusal: tombstone() };
+      if (expiringInFlight) return { ok: false, refusal: { kind: "expiring-in-flight" } };
       const bent = overrides.onReset?.();
       if (bent !== undefined) return bent;
+      // `registry.reset`: a restored base is active, plan-less and entry-free.
       planned = null;
       executed = [];
+      phase = { kind: "active" };
       return summary();
     },
     destroy: async () => {
@@ -232,6 +345,12 @@ export function scriptedSandbox(overrides: ScriptOverrides = {}): ScriptedSandbo
     calls,
     planned: () => planned,
     executed: () => executed,
+    expire: () => {
+      swept = true;
+    },
+    expireInFlight: () => {
+      expiringInFlight = true;
+    },
   };
 }
 

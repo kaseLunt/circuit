@@ -90,6 +90,7 @@ import {
   type LoadSource,
 } from "../../app/store/composer-store";
 import { useComposerStore, useComposerStoreApi } from "../../app/store/composer-provider";
+import type { BorrowLimitVerdict } from "../../core/borrow-limit";
 import { layoutGraph } from "../../lib/strategy/layout";
 import { getTemplate } from "../../lib/strategy/templates";
 import {
@@ -134,8 +135,14 @@ export const PASTE_OFFSET_PX = 40;
  * `unknown-block` is not in the treatment's list because it is not reachable by dragging
  * between two drawn blocks; it exists because the store's union has an arm for a stale id,
  * and a `Record` keyed on the union is what makes adding a code without copy a type error.
+ *
+ * `document-locked` is deliberately EXCLUDED: that refusal carries the run's own sentence
+ * (`RUN_LOCK_REASON`, minted where the lock is held), and a copy of it here would be a second
+ * definition of one sentence. `connectRejectionMessage` is the reader that honours both.
  */
-export const CONNECT_REJECTION_MESSAGES: Readonly<Record<ConnectRejection["code"], string>> = {
+export const CONNECT_REJECTION_MESSAGES: Readonly<
+  Record<Exclude<ConnectRejection["code"], "document-locked">, string>
+> = {
   "self-loop": "A block can't feed itself.",
   "duplicate-edge": "These blocks are already connected.",
   "would-create-cycle": "That connection would create a loop — strategies flow one way.",
@@ -144,6 +151,13 @@ export const CONNECT_REJECTION_MESSAGES: Readonly<Record<ConnectRejection["code"
   "edge-limit": "Edge limit reached for this strategy.",
   "unknown-block": "That block is no longer on the canvas.",
 };
+
+/** The sentence a refusal states, from the table or from the refusal itself (T26). */
+export function connectRejectionMessage(rejection: ConnectRejection): string {
+  return rejection.code === "document-locked"
+    ? rejection.reason
+    : CONNECT_REJECTION_MESSAGES[rejection.code];
+}
 
 /**
  * core/graph.ts's block union, mapped onto the component that draws it. `wrap` and
@@ -214,10 +228,17 @@ function isTypingTarget(target: EventTarget | null): boolean {
 /**
  * React Flow's drag-time predicate, built from the store's own refusal function. Exported
  * so a test can assert the two never disagree without driving a pointer.
+ *
+ * The run lock is part of the predicate rather than a check after the drop (T26, the palette's
+ * own rule): refusing a connection the user has already dragged across the canvas is a worse
+ * refusal than never letting the drag begin. The store refuses it too — that is the backstop,
+ * not the affordance.
  */
 export function makeIsValidConnection(
   doc: StrategyGraph,
+  writeLockReason: string | null,
 ): (candidate: Connection | Edge) => boolean {
+  if (writeLockReason !== null) return () => false;
   return (candidate) => connectRejection(doc, candidate.source, candidate.target) === null;
 }
 
@@ -383,6 +404,10 @@ export function allocationEdgesOf(
   docEdges: readonly CoreEdge[],
   labels: Readonly<Record<string, string>>,
   selectedEdgeIds: ReadonlySet<string>,
+  /** T26: the run's write-lock sentence, carried to the edge so its two write controls state
+   *  it. Passed through the view model rather than read from a context, so the edge's refusal
+   *  is provable without mounting React Flow. */
+  writeLockReason: string | null,
 ): AllocationEdge[] {
   return docEdges.map((e) => ({
     id: e.id,
@@ -393,6 +418,7 @@ export function allocationEdgesOf(
     data: {
       allocationBps: e.allocationBps,
       sourceOutgoingBps: outgoingBps(docEdges, e.source),
+      writeLockReason,
       // Unreachable: an edge's endpoints are document blocks, so `labels` is total over
       // them. The id is a worse name than the title but a truer one than a guess, and
       // dropping the edge would hide a connection that exists.
@@ -476,6 +502,9 @@ export function pasteClipboard(
     const id = api
       .getState()
       .addBlock(block.type, { x: at.x + PASTE_OFFSET_PX, y: at.y + PASTE_OFFSET_PX });
+    // A refused add ends the paste (the run lock refuses every add): half a paste is a
+    // document nobody asked for, and there is no id to hang the rest of the replay on.
+    if (id === null) break;
     idMap.set(block.id, id);
     for (const [key, value] of Object.entries(block.params)) {
       // Borrow allocation has its own action because it is debt-as-a-fraction-of-
@@ -499,7 +528,9 @@ export function pasteClipboard(
     if (created !== undefined) api.getState().setEdgeAllocationBps(created.id, edge.allocationBps);
   }
   const created = [...idMap.values()];
-  api.getState().setSelection(created);
+  // Selection follows what was pasted, so a paste that created nothing (a refused write, or a
+  // snapshot with no placed block) leaves the user's selection alone rather than clearing it.
+  if (created.length > 0) api.getState().setSelection(created);
   api.getState().endEdit();
   return created;
 }
@@ -507,6 +538,10 @@ export function pasteClipboard(
 /**
  * Removes the current selection as ONE edit gesture: deleting four blocks costs one
  * Ctrl+Z, not four. Returns the ids it removed.
+ *
+ * What the DOCUMENT says was removed, not what was asked for: a refused write (the run lock)
+ * must never be announced as a deletion, and reading the answer off the document is what makes
+ * that structural rather than a second copy of the lock rule.
  */
 export function deleteSelectedBlocks(api: ComposerStoreApi): readonly string[] {
   const ids = api.getState().selectedBlockIds;
@@ -514,7 +549,8 @@ export function deleteSelectedBlocks(api: ComposerStoreApi): readonly string[] {
   api.getState().beginEdit("delete blocks");
   for (const id of ids) api.getState().removeBlock(id);
   api.getState().endEdit();
-  return ids;
+  const remaining = new Set(api.getState().doc.blocks.map((b) => b.id));
+  return ids.filter((id) => !remaining.has(id));
 }
 
 /** What a load says out loud. `blank` is reachable only through `clear`, because the
@@ -625,7 +661,7 @@ export function ConnectionRejectionNotice({ rejection }: { rejection: ConnectRej
         )}
       >
         <Info aria-hidden="true" className="h-4 w-4 shrink-0" />
-        <span>{rejection === null ? "" : CONNECT_REJECTION_MESSAGES[rejection.code]}</span>
+        <span>{rejection === null ? "" : connectRejectionMessage(rejection)}</span>
       </div>
     </div>
   );
@@ -645,6 +681,14 @@ export interface StrategyCanvasProps {
   simulationPending: boolean;
   /** The block currently executing (P3). Null outside an execution. */
   executingBlockId?: string | null;
+  /**
+   * SPEC §3 step 4's client-side borrow verdict, derived by the host beside the simulation
+   * (`useBorrowLimit`). Passed in rather than computed here for the same reason the
+   * simulation is: the canvas observes nothing and derives nothing.
+   */
+  borrowLimit?: BorrowLimitVerdict | null;
+  /** T26: the run's write-lock sentence, or null. Reads are never locked. */
+  writeLockReason?: string | null;
   /**
    * Filled by the canvas with a resolver for "the middle of what the user is looking at",
    * in flow coordinates. The shell's keyboard-add path needs a position at the moment of
@@ -693,6 +737,8 @@ function CanvasInner({
   simulation,
   simulationPending,
   executingBlockId = null,
+  borrowLimit = null,
+  writeLockReason = null,
   dropPositionRef,
 }: StrategyCanvasProps) {
   const api = useComposerStoreApi();
@@ -754,9 +800,32 @@ function CanvasInner({
   const showRejection = useCallback(
     (refusal: ConnectRejection) => {
       setRejection(refusal);
-      announce(CONNECT_REJECTION_MESSAGES[refusal.code]);
+      announce(connectRejectionMessage(refusal));
     },
     [announce],
+  );
+
+  /**
+   * The canvas's ONE write dispatch (T26, Codex round-3 finding 2).
+   *
+   * Every route that would change the document goes through it: while a run holds the document
+   * it states the lock in the canvas's own live region and dispatches nothing, and the store's
+   * guard behind it refuses anyway — so a route that forgets this wrapper is harmless rather
+   * than destructive. `run` returns the sentence to announce, or null when it says nothing.
+   *
+   * Reads are deliberately NOT routed here: pan, zoom, selection, copy and every disclosure
+   * stay live while money moves (T26 — a frozen document is not a hidden one).
+   */
+  const write = useCallback(
+    (run: () => string | null) => {
+      if (writeLockReason !== null) {
+        announce(writeLockReason);
+        return;
+      }
+      const said = run();
+      if (said !== null) announce(said);
+    },
+    [announce, writeLockReason],
   );
 
   // Render-time state adjustment, not an effect: an effect body that calls setState is a
@@ -844,8 +913,8 @@ function CanvasInner({
   );
 
   const edges = useMemo(
-    () => allocationEdgesOf(docEdges, blockLabels, selectedEdgeIds),
-    [docEdges, blockLabels, selectedEdgeIds],
+    () => allocationEdgesOf(docEdges, blockLabels, selectedEdgeIds, writeLockReason),
+    [docEdges, blockLabels, selectedEdgeIds, writeLockReason],
   );
 
   /**
@@ -893,12 +962,23 @@ function CanvasInner({
       inputAmounts,
       borrowAllocations,
       executingBlockId,
+      borrowLimit,
+      writeLockReason,
       ...runtimeRiskFields(simulation),
       pending: simulationPending,
       pendingEdit,
       docRev: rev,
-      setBlockParam: (id, key, value) => api.getState().setBlockParam(id, key, value),
-      setBorrowAllocationBps: (id, bps) => api.getState().setBorrowAllocationBps(id, bps),
+      // T26: the lock is applied HERE, at the one place every block write goes through, so
+      // no control can forget it and every refusal arrives in the store's own ActionResult
+      // shape — which is what the typed-rejection strip already renders.
+      setBlockParam: (id, key, value) =>
+        writeLockReason === null
+          ? api.getState().setBlockParam(id, key, value)
+          : { ok: false, reason: writeLockReason },
+      setBorrowAllocationBps: (id, bps) =>
+        writeLockReason === null
+          ? api.getState().setBorrowAllocationBps(id, bps)
+          : { ok: false, reason: writeLockReason },
       beginEdit: (label) => api.getState().beginEdit(label),
       endEdit: () => api.getState().endEdit(),
     };
@@ -912,9 +992,14 @@ function CanvasInner({
     simulation,
     simulationPending,
     executingBlockId,
+    borrowLimit,
+    writeLockReason,
   ]);
 
-  const isValidConnection = useMemo(() => makeIsValidConnection(doc), [doc]);
+  const isValidConnection = useMemo(
+    () => makeIsValidConnection(doc, writeLockReason),
+    [doc, writeLockReason],
+  );
 
   const onNodesChange = useCallback(
     (changes: NodeChange<StrategyBlock>[]) => {
@@ -987,15 +1072,18 @@ function CanvasInner({
 
   const onConnect = useCallback(
     (connection: Connection) => {
-      const result = api.getState().connect(connection.source, connection.target);
-      if (result.ok) {
-        setRejection(null);
-        announce(`Connected ${connection.source} to ${connection.target}.`);
-        return;
-      }
-      showRejection(result.rejection);
+      write(() => {
+        const result = api.getState().connect(connection.source, connection.target);
+        if (result.ok) {
+          setRejection(null);
+          return `Connected ${connection.source} to ${connection.target}.`;
+        }
+        // The refusal announces itself, with the strip.
+        showRejection(result.rejection);
+        return null;
+      });
     },
-    [api, announce, showRejection],
+    [api, write, showRejection],
   );
 
   const onConnectEnd = useCallback(
@@ -1019,11 +1107,12 @@ function CanvasInner({
       // this canvas draws with the auto-wrap component.
       const raw = event.dataTransfer.getData("application/reactflow");
       if (!isCoreBlockType(raw)) return;
-      const position = screenToFlowPosition({ x: event.clientX, y: event.clientY });
-      api.getState().addBlock(raw, position);
-      announce(`Added ${raw} block.`);
+      write(() => {
+        const position = screenToFlowPosition({ x: event.clientX, y: event.clientY });
+        return api.getState().addBlock(raw, position) === null ? null : `Added ${raw} block.`;
+      });
     },
-    [api, screenToFlowPosition, announce],
+    [api, screenToFlowPosition, write],
   );
 
   const onPaneClick = useCallback(() => {
@@ -1040,10 +1129,12 @@ function CanvasInner({
   }, [api]);
 
   const handleDeleteSelected = useCallback(() => {
-    const removed = deleteSelectedBlocks(api);
-    if (removed.length === 0) return;
-    announce(`Removed ${removed.length} ${removed.length === 1 ? "block" : "blocks"}.`);
-  }, [api, announce]);
+    write(() => {
+      const removed = deleteSelectedBlocks(api);
+      if (removed.length === 0) return null;
+      return `Removed ${removed.length} ${removed.length === 1 ? "block" : "blocks"}.`;
+    });
+  }, [api, write]);
 
   const handleCopy = useCallback(() => {
     const state = api.getState();
@@ -1065,9 +1156,12 @@ function CanvasInner({
   const handlePaste = useCallback(() => {
     const snapshot = clipboard;
     if (snapshot === null) return;
-    const created = pasteClipboard(api, snapshot);
-    announce(`Pasted ${created.length} ${created.length === 1 ? "block" : "blocks"}.`);
-  }, [api, announce]);
+    write(() => {
+      const created = pasteClipboard(api, snapshot);
+      if (created.length === 0) return null;
+      return `Pasted ${created.length} ${created.length === 1 ? "block" : "blocks"}.`;
+    });
+  }, [api, write]);
 
   const handleDuplicate = useCallback(() => {
     handleCopy();
@@ -1089,12 +1183,18 @@ function CanvasInner({
 
       if (mod && key === "z" && !event.shiftKey) {
         event.preventDefault();
-        state.undo();
+        write(() => {
+          state.undo();
+          return null;
+        });
         return;
       }
       if (mod && (key === "y" || (key === "z" && event.shiftKey))) {
         event.preventDefault();
-        state.redo();
+        write(() => {
+          state.redo();
+          return null;
+        });
         return;
       }
       if (mod && key === "a") {
@@ -1132,7 +1232,7 @@ function CanvasInner({
         state.setSelection([]);
       }
     },
-    [api, handleCopy, handlePaste, handleDuplicate, handleDeleteSelected],
+    [api, write, handleCopy, handlePaste, handleDuplicate, handleDeleteSelected],
   );
 
   /**
@@ -1234,6 +1334,13 @@ function CanvasInner({
           onDragOver={onDragOver}
           onDrop={onDrop}
           onPaneClick={onPaneClick}
+          // T26: while a run holds the document the two POINTER writes are deactivated at the
+          // source — a drag that snaps back and a connection refused after the user crossed the
+          // canvas are worse refusals than a gesture that never starts (the palette's rule).
+          // Selection stays on: reads are never locked.
+          nodesDraggable={writeLockReason === null}
+          nodesConnectable={writeLockReason === null}
+          elementsSelectable
           defaultEdgeOptions={{ type: "allocation" }}
           minZoom={MIN_ZOOM}
           maxZoom={MAX_ZOOM}
@@ -1291,7 +1398,7 @@ function CanvasInner({
           </Panel>
         </ReactFlow>
 
-        {blocks.length === 0 ? <CanvasEmptyState /> : null}
+        {blocks.length === 0 ? <CanvasEmptyState writeLockReason={writeLockReason} /> : null}
 
         <SelectionActionBar
           count={selectedBlockIds.length}

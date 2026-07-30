@@ -18,6 +18,8 @@ import {
   approveSpenderAddressOf,
   executingBlockIdOf,
   plannedAmountOf,
+  runLocksDocument,
+  RUN_LOCK_REASON,
   stepRowStatusOf,
 } from "./step-status";
 
@@ -279,3 +281,39 @@ describe("executingBlockIdOf — the T26 frame appears during executing(k) and o
   });
 });
 
+describe("runLocksDocument — the T26 write lockdown", () => {
+  it("frees the document before a run and freezes it from the first dispatch", () => {
+    expect(runLocksDocument(createExecutionMachine({ mode: "sandbox" }))).toBe(false);
+    const ready = readyMachine();
+    // `ready` is not locked: §2.4's own rule is that a mutation here DISARMS the run.
+    expect(runLocksDocument(ready)).toBe(false);
+    const pending = ok(ready, { type: "execute", facts: NULL_FACTS });
+    expect(runLocksDocument(pending)).toBe(true);
+    const settled = ok(pending, { type: "step-result", result: attributedResult(0) });
+    // Still locked between steps: the plan under execution is the frozen one.
+    expect(runLocksDocument(settled)).toBe(true);
+  });
+
+  it("lifts the lock on a terminal state — editing is how the user starts over", () => {
+    let live = createExecutionMachine({ mode: "live", tolerance: SANDBOX_OUTPUT_TOLERANCE });
+    live = ok(live, { type: "simulate" });
+    live = ok(live, {
+      type: "plan-ready",
+      plan,
+      planHash: PLAN_HASH,
+      address: `0x${"aa".repeat(20)}` as Hex,
+    });
+    live = ok(live, { type: "execute", facts: { ...NULL_FACTS, nonce: 1n } });
+    expect(runLocksDocument(live)).toBe(true);
+    const rejected = ok(live, { type: "user-rejected" });
+    expect(rejected.phase.kind).toBe("failed-at");
+    expect(runLocksDocument(rejected)).toBe(false);
+    const halted = ok(live, { type: "wallet-changed" });
+    expect(halted.phase.kind).toBe("halted-wallet-changed");
+    expect(runLocksDocument(halted)).toBe(false);
+  });
+
+  it("states one sentence, and it names the mechanism rather than scolding", () => {
+    expect(RUN_LOCK_REASON).toBe("Execution in progress — the strategy is locked.");
+  });
+});

@@ -54,6 +54,7 @@ import type { Asset, StrategyGraph } from "./graph";
 import {
   buildPlan,
   effectiveLiquidationThresholdBps,
+  effectiveLtvBps,
   inCollateralBitmap,
   type ChainSnapshot,
   type EModeCategorySnapshot,
@@ -196,6 +197,16 @@ export interface SupplyLeg {
   readonly ltBps: number;
   /** Whichever LT observation that rule selected, plus the bitmap and index that decided it. */
   readonly ltInputs: readonly AnyProvenanced[];
+  /**
+   * Effective LTV under the SAME category (matrix §3, `ValidationLogic.getUserReserveLtv`).
+   * Carried beside `ltBps` because the two answer different questions and SPEC §3 step 4
+   * requires both to be quoted from the ACTIVE configuration: LTV is the ceiling Aave's own
+   * borrow validation compares against, LT is where the position liquidates. Quoting one
+   * where the other belongs is the correctness bug that step names.
+   */
+  readonly ltvBps: number;
+  /** Whichever LTV observation that rule selected, plus the bitmaps that decided it. */
+  readonly ltvInputs: readonly AnyProvenanced[];
   readonly priceBase: Observed<bigint>;
 }
 
@@ -362,6 +373,23 @@ function ltInputsOf(
   ];
 }
 
+/**
+ * The LTV observation `effectiveLtvBps` actually selected, plus the bitmaps and reserve index
+ * that decided it. Note the asymmetry with `ltInputsOf`: LTV depends on the LTV-ZERO bitmap
+ * and on `isIsolated` as well as on collateral membership, so a citation that listed only the
+ * collateral bitmap would show the wrong reason for a zeroed LTV.
+ */
+function ltvInputsOf(
+  reserve: ReserveSnapshot,
+  cat: EModeCategorySnapshot | null,
+): readonly AnyProvenanced[] {
+  if (cat === null) return [reserve.ltvBps];
+  if (inCollateralBitmap(reserve, cat)) {
+    return [cat.ltvBps, cat.collateralBitmap, cat.ltvZeroBitmap, reserve.reserveIndex];
+  }
+  return [reserve.ltvBps, cat.collateralBitmap, cat.isIsolated, reserve.reserveIndex];
+}
+
 function collateralEntriesOf(
   supplies: readonly SupplyLeg[],
 ): readonly CollateralEntry[] | null {
@@ -477,6 +505,8 @@ function ledgerFrom(plan: PlanSuccess, snapshot: ChainSnapshot): RiskLedger {
         baseProv: baseValueProv(amount, flow.inputAsset!, snapshot),
         ltBps: effectiveLiquidationThresholdBps(reserve, targetCategory),
         ltInputs: ltInputsOf(reserve, targetCategory),
+        ltvBps: effectiveLtvBps(reserve, targetCategory),
+        ltvInputs: ltvInputsOf(reserve, targetCategory),
         priceBase: reserve.priceBase,
       });
       checkpoints.push(checkpointOf(flow.blockId, "supply", supplies, debts));

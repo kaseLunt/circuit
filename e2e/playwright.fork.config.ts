@@ -50,6 +50,26 @@ export default defineConfig({
     stderr: "pipe",
     env: {
       SANDBOX_FORK_URL: process.env["SANDBOX_FORK_URL"] ?? "http://127.0.0.1:8547",
+      /*
+       * The live-gating fork beat (Codex D-011 F2/F4): the wallet router captures the
+       * connected address's readiness against OUR configured RPC — here the same pristine
+       * pinned-block upstream the session service forks from, so the capture is
+       * deterministic and the standing binds to the recorded block hash.
+       */
+      LIVE_CHAIN_RPC_URL:
+        process.env["LIVE_CHAIN_RPC_URL"] ??
+        process.env["SANDBOX_FORK_URL"] ??
+        "http://127.0.0.1:8547",
+      /*
+       * ONE mock account — a high-entropy constant with no mainnet history, so the pinned
+       * upstream reads it as a clean EOA (no code, no Aave footprint). Deliberately NOT the
+       * hermetic suite's 0x1111… vanity address, whose mainnet state nobody controls.
+       * `rpc` forces the REAL capture path even though a mock connector is configured: the
+       * mock supplies the session, the wallet router performs the capture — which is what
+       * makes this suite the authoritative proof of the F2 clearing path.
+       */
+      NEXT_PUBLIC_WALLET_MOCK_ACCOUNTS: "0x7f3a921c5be694fa8f3ba14e58cd06897e9dd47e",
+      NEXT_PUBLIC_WALLET_LIVE_SOURCE: "rpc",
     },
   },
 });

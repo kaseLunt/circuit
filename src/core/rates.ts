@@ -191,6 +191,20 @@ export function rayDivCeil(a: bigint, b: bigint): bigint {
   return p / b + (p % b === 0n ? 0n : 1n);
 }
 
+/**
+ * MathUtils.mulDivCeil — ceil(a·b/c). The rounding GenericLogic._getUserDebtInBaseCurrency
+ * applies when converting a vToken debt balance into oracle base currency
+ * (`MathUtils.mulDivCeil(userTotalDebt, assetPrice, assetUnit)`), upward so the protocol
+ * never under-accounts debt. Ported byte-exactly; `core/borrow-limit.ts` consumes it for
+ * the SPEC §3 step-4 comparison so the client can never accept a borrow the pool rejects.
+ */
+export function mulDivCeil(a: bigint, b: bigint, c: bigint): bigint {
+  requireUnsigned(a, b);
+  requireDivisor(c);
+  const p = a * b;
+  return p / c + (p % c === 0n ? 0n : 1n);
+}
+
 function requireOrderedTimestamps(lastUpdateTs: bigint, currentTs: bigint): void {
   if (currentTs < lastUpdateTs) {
     throw new RangeError("current timestamp precedes lastUpdateTimestamp");

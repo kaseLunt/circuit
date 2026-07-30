@@ -217,6 +217,111 @@ def evidence_fingerprint(snapshot: Snapshot, data: dict, path: str) -> str:
     return "sha256:" + digest.hexdigest()
 
 
+def transition_currency_errors(
+    before: Snapshot, after: Snapshot, now: dt.datetime
+) -> list[str]:
+    """The successor relaxation must not survive a terminal transition (Codex, W08).
+
+    Snapshot-level D-006 relaxation lets an active same-phase successor evolve an
+    achieved sibling's inputs; the bypass is the transition that never rests — work
+    flipping to achieved while the next task activates in the same commit, or the
+    active phase advancing directly. THIS is the moment drift would become permanently
+    historical, so the commit gates re-arm strict currency here for exactly the items
+    the transition touches, regardless of which task is active on either side:
+      - every work item that becomes achieved in this transition, and
+      - every achieved item of a phase the transition exits (active_phase moved on,
+        or project_state reached complete).
+    """
+    strict: dict[str, tuple[str, dict]] = {}
+
+    def work_records(snapshot: Snapshot) -> dict[str, tuple[str, dict, str, str]]:
+        records: dict[str, tuple[str, dict, str, str]] = {}
+        for path in snapshot.list("roadmap/work", ".md"):
+            data = parse_frontmatter(snapshot.read_text(path), path, required=True)
+            work_id = scalar(data, "id", path, required=True)
+            records[work_id] = (
+                path,
+                data,
+                scalar(data, "status", path, required=True),
+                scalar(data, "phase", path, required=True),
+            )
+        return records
+
+    def status_field(snapshot: Snapshot, key: str) -> str:
+        path = "roadmap/STATUS.md"
+        if not snapshot.exists(path):
+            return ""
+        data = parse_frontmatter(snapshot.read_text(path), path, required=True)
+        return scalar(data, key, path) or ""
+
+    before_work = work_records(before)
+    after_work = work_records(after)
+    errors: list[str] = []
+    for work_id, (path, data, status, _phase) in after_work.items():
+        old = before_work.get(work_id)
+        if status == "achieved" and (old is None or old[2] != "achieved"):
+            strict[work_id] = (path, data)
+
+    # ANY departure from achieved standing owes currency AT the departing commit —
+    # in every commit, not only the one that exits the phase (Codex round 5: checking
+    # exit commits alone let a drifted item be archived, rephased, or deleted one
+    # owner-acknowledged commit EARLIER, and the later exit's before snapshot then
+    # showed nothing to re-arm for). An achieved item may be reclassified only with
+    # current evidence, or with its drift explained first through a receipt revision.
+    for work_id, (_path, _data, status, phase) in before_work.items():
+        if status != "achieved":
+            continue
+        survivor = after_work.get(work_id)
+        if survivor is None:
+            errors.append(
+                f"terminal transition re-arms D-006 for {work_id}: achieved work cannot "
+                "disappear in a transition; its evidence debt is unresolved"
+            )
+            continue
+        if survivor[2] != "achieved" or survivor[3] != phase:
+            strict[work_id] = (survivor[0], survivor[1])
+
+    old_phase = status_field(before, "active_phase")
+    new_phase = status_field(after, "active_phase")
+    phase_exited = bool(old_phase) and old_phase != new_phase
+    completed = (
+        status_field(before, "project_state") != "complete"
+        and status_field(after, "project_state") == "complete"
+    )
+    if phase_exited or completed:
+        # Only the phase being CLOSED re-arms — the before snapshot's active_phase (on
+        # completion the pointer stays as the last phase, so old_phase names it). Phases
+        # that exited earlier already passed through their own strict transition and are
+        # immutable historical records (D-006); later-phase drift over shared inputs is
+        # legitimate there and must not block completion (Codex round 3).
+        # Selection is from the BEFORE snapshot (Codex round 4): reading the after
+        # snapshot's status/phase let the same commit reclassify a drifted achieved item
+        # — phase moved earlier, achieved flipped to archived — right out of the strict
+        # set. What the item claimed BEFORE the transition decides that it owes currency
+        # AT the transition; its after-snapshot metadata cannot resign the debt.
+        for work_id, (_path, _data, status, phase) in before_work.items():
+            if status != "achieved" or phase != old_phase:
+                continue
+            survivor = after_work.get(work_id)
+            # Absence is already an error from the departure rule above.
+            if survivor is not None:
+                strict[work_id] = (survivor[0], survivor[1])
+
+    for work_id, (path, data) in sorted(strict.items()):
+        try:
+            receipts = string_list(data, "evidence_receipts", path)
+            if not receipts:
+                raise ControlPlaneError(f"{path}: achieved work must name evidence_receipts")
+            for receipt in receipts:
+                validate_evidence_receipt(after, receipt, work_id, now, check_currency=True)
+            stored = scalar(data, "evidence_fingerprint", path)
+            if stored and stored != evidence_fingerprint(after, data, path):
+                raise ControlPlaneError(f"{path}: evidence stamp is stale at a terminal transition")
+        except ControlPlaneError as exc:
+            errors.append(f"terminal transition re-arms D-006 for {work_id}: {exc}")
+    return errors
+
+
 def find_work_record(snapshot: Snapshot, work_id: str) -> tuple[str, dict]:
     for candidate in snapshot.list("roadmap/work", ".md"):
         data = parse_frontmatter(snapshot.read_text(candidate), candidate, required=True)
@@ -773,11 +878,24 @@ def main() -> int:
                     # moved on), an achieved item is historical — its receipt stays valid
                     # as of its immutable tested_commit, and later phases legitimately
                     # evolve shared inputs (package.json, configs) without unachieving it.
+                    # W08 activation surfaced the same-phase version of that truth: while
+                    # a SUCCESSOR work item in the same phase is active (a split phase's
+                    # second item), evolving the shared inputs IS that item's charter —
+                    # per-commit currency would block every landing it makes. Drift under
+                    # an active successor is therefore serviced by the drift-receipt
+                    # discipline instead: when the phase comes to rest (active_task
+                    # returns to none) this check re-arms, so nothing achieves, releases,
+                    # or exits the phase with the drift unexplained.
                     # Recorded-vs-tested integrity is always checked regardless.
                     in_active_phase = (not active_phase) or (phase == active_phase)
+                    successor_active = active_task not in ("", "none") and active_task != object_id
                     for receipt in receipts:
                         validate_evidence_receipt(
-                            snapshot, receipt, object_id, now, check_currency=in_active_phase
+                            snapshot,
+                            receipt,
+                            object_id,
+                            now,
+                            check_currency=in_active_phase and not successor_active,
                         )
                     for invalidation_scope in invalidated:
                         if not any(
@@ -792,11 +910,13 @@ def main() -> int:
                     stored = scalar(data, "evidence_fingerprint", path)
                     if not stored:
                         errors.append(f"{path}: achieved without evidence_fingerprint; verify then run doctor.py --stamp {object_id}")
-                    elif invalidated_raw and in_active_phase:
+                    elif invalidated_raw and in_active_phase and not successor_active:
                         # Freshness (stamped fingerprint vs current inputs) is an
                         # active-phase guarantee (D-006), mirroring the receipt-currency
                         # scope: a completed phase's attainment is historical and is not
-                        # invalidated by later phases evolving shared inputs.
+                        # invalidated by later phases evolving shared inputs — and, same
+                        # relaxation, an active same-phase successor's charter is to
+                        # evolve them; the check re-arms with active_task: none.
                         current = evidence_fingerprint(snapshot, data, path)
                         if current != stored:
                             errors.append(f"{path}: evidence INVALIDATED ({stored} != {current})")

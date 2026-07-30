@@ -378,9 +378,21 @@ export interface SessionExpiredRefusal {
   readonly tombstone: SessionTombstone;
 }
 
+/** What a key that is not a live session resolves to: its tombstone, or nothing anyone remembers. */
+export type AbsentSessionRefusal =
+  | { readonly kind: "unknown-session" }
+  | SessionExpiredRefusal;
+
 export type LookupOutcome =
   | { readonly ok: true; readonly session: Session }
-  | { readonly ok: false; readonly refusal: { readonly kind: "unknown-session" } }
+  | { readonly ok: false; readonly refusal: AbsentSessionRefusal }
+  /**
+   * The TTL passed while an operation still held the session (round-13). Distinct from
+   * `SessionExpiredRefusal` because it carries NO tombstone: the running call can still append
+   * evidence, so there is no final record to hand over, and a client that adopted one would be
+   * adopting a provisional read as though it were the end of the story.
+   */
+  | { readonly ok: false; readonly refusal: { readonly kind: "expiring-in-flight" } }
   | { readonly ok: false; readonly refusal: SessionExpiredRefusal };
 
 export type BeginOutcome =
@@ -390,7 +402,9 @@ export type BeginOutcome =
       readonly refusal:
         | { readonly kind: "session-busy" }
         | { readonly kind: "rate-limited"; readonly retryAfterMs: number }
-        | { readonly kind: "tx-cap" };
+        | { readonly kind: "tx-cap" }
+        /** Revalidated at acquisition (round-14): the handle is expired, or no longer the map's. */
+        | AbsentSessionRefusal;
     };
 
 export type ResetOutcome = { readonly ok: true } | { readonly ok: false; readonly cause: unknown };
@@ -557,6 +571,13 @@ export function createSessionRegistry(
     }
   }
 
+  /** What a key that is no longer a live session IS: its tombstone, or nothing anyone remembers. */
+  function recordOf(key: string): AbsentSessionRefusal {
+    const tombstone = tombstones.get(key);
+    if (tombstone === undefined) return { kind: "unknown-session" };
+    return { kind: "session-expired", executedSteps: tombstone.executedSteps, tombstone };
+  }
+
   function isExpired(session: Session): boolean {
     // Enforcement reads the monotonic track ONLY (round-5): the wall-clock
     // `expiresAtMs` twin exists for display and never decides anything.
@@ -578,6 +599,44 @@ export function createSessionRegistry(
         await session.fork.destroy();
       }
     }
+  }
+
+  /**
+   * The acquisition gate, and the INVARIANT it establishes (Codex round-14):
+   *
+   *   once any caller has been handed a `session-expired` tombstone for a session, no `begin` can
+   *   succeed on that session again — so no evidence can be appended after its record was called
+   *   final. That is what makes round-13's immutability claim true rather than merely likely.
+   *
+   * `lookup` and acquisition are separate awaits, so at the TTL boundary a caller can hold a
+   * `Session` it obtained while the session was still live, and neither begin method re-read
+   * anything. It could then append a receipt AFTER another caller had adopted the tombstone and
+   * retired its key — an incomplete abandoned record, with no route left to correct it.
+   *
+   * Two checks, both re-read at the only authoritative moment:
+   *
+   *  - membership by IDENTITY, never by key string: a swept key that a later `create` minted again
+   *    would otherwise let a dead handle alias a live session;
+   *  - expiry on the MONOTONIC track, which is precisely what makes the invariant hold —
+   *    `expiresAtMono <= monoNow()` never becomes false again (round-5 moved enforcement here for
+   *    a different reason; this is the second thing it buys), so a session that has issued a
+   *    tombstone can never re-admit a caller.
+   *
+   * The refusal is the FINAL one, and truthfully so: `inFlight` is checked before this gate, so
+   * nothing is running, nothing can append, and the record it carries is complete.
+   * `expiring-in-flight` would be a lie at this instant — the caller is being refused ENTRY, so
+   * there is no in-flight operation for it to describe.
+   */
+  function admissionRefusal(session: Session): BeginOutcome | null {
+    if (sessions.get(session.key) !== session) {
+      return { ok: false, refusal: recordOf(session.key) };
+    }
+    if (!isExpired(session)) return null;
+    const tombstone = tombstoneOf(session);
+    return {
+      ok: false,
+      refusal: { kind: "session-expired", executedSteps: tombstone.executedSteps, tombstone },
+    };
   }
 
   return {
@@ -621,8 +680,20 @@ export function createSessionRegistry(
       await sweepExpired();
       const session = sessions.get(key);
       if (session !== undefined) {
-        // Expired but still busy (sweep deferred, finding 4): refuse with the live
-        // evidence rather than serving a session past its TTL.
+        // Expired but still busy (sweep deferred, finding 4): the fork survives its in-flight
+        // operation, and so does the RECORD — the running call can still append a settled receipt
+        // or recovery evidence. A `session-expired` payload is a TOMBSTONE, and a tombstone the
+        // client adopts is final: it retires the key on it, giving up its route to ask again
+        // (Codex round-13). So this window gets its own refusal, carrying no record at all,
+        // because there is no final record yet to carry.
+
+        // Expired and quiescent: the sweep above did not collect it (it crossed the boundary
+        // during those awaits), but nothing holds the mutex, and every subsequent lookup refuses,
+        // so no operation can start and no evidence can be added. The record is final in fact,
+        // and the next sweep entombs it.
+        if (isExpired(session) && session.inFlight) {
+          return { ok: false, refusal: { kind: "expiring-in-flight" } };
+        }
         if (isExpired(session)) {
           const tombstone = tombstoneOf(session);
           return {
@@ -632,14 +703,7 @@ export function createSessionRegistry(
         }
         return { ok: true, session };
       }
-      const tombstone = tombstones.get(key);
-      if (tombstone !== undefined) {
-        return {
-          ok: false,
-          refusal: { kind: "session-expired", executedSteps: tombstone.executedSteps, tombstone },
-        };
-      }
-      return { ok: false, refusal: { kind: "unknown-session" } };
+      return { ok: false, refusal: recordOf(key) };
     },
 
     sessionCount() {
@@ -661,6 +725,8 @@ export function createSessionRegistry(
       // At most one in-flight operation per session; a concurrent call (second tab) is a
       // designed refusal, never queued (§5.2).
       if (session.inFlight) return { ok: false, refusal: { kind: "session-busy" } };
+      const inadmissible = admissionRefusal(session);
+      if (inadmissible !== null) return inadmissible;
       if (session.txCount >= config.maxTxPerSession) {
         return { ok: false, refusal: { kind: "tx-cap" } };
       }
@@ -694,6 +760,10 @@ export function createSessionRegistry(
 
     beginExclusive(session) {
       if (session.inFlight) return { ok: false, refusal: { kind: "session-busy" } };
+      // Every non-dispatch mutating route enters here — plan, reconcile, reset, destroy — so the
+      // same gate closes all of them at once (round-14).
+      const inadmissible = admissionRefusal(session);
+      if (inadmissible !== null) return inadmissible;
       session.inFlight = true;
       return { ok: true };
     },

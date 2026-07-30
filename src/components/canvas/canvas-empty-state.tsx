@@ -17,7 +17,17 @@ import { Info, MousePointerClick } from "lucide-react";
 import { useComposerStoreApi } from "../../app/store/composer-provider";
 import { STRATEGY_TEMPLATES } from "../../lib/strategy/templates";
 
-export function CanvasEmptyState() {
+export function CanvasEmptyState({
+  /**
+   * T26: the run's write-lock sentence, or null. These cards are a document WRITE route like
+   * any other, so they state the refusal rather than relying on being unreachable during a run
+   * (`clear` is refused too, so the canvas cannot empty mid-run) — and the store refuses the
+   * load behind them regardless.
+   */
+  writeLockReason = null,
+}: {
+  readonly writeLockReason?: string | null;
+} = {}) {
   const api = useComposerStoreApi();
   const [failedId, setFailedId] = useState<string | null>(null);
 
@@ -62,8 +72,17 @@ export function CanvasEmptyState() {
                 aria-describedby={`template-summary-${card.id}`}
                 className="w-full rounded-lg px-4 pb-2 pt-4 text-left outline-none"
                 onClick={() => {
+                  // Intercepted, never `disabled`: the strip below states the lock's own
+                  // sentence instead of the generic load failure.
+                  if (writeLockReason !== null) {
+                    setFailedId(card.id);
+                    return;
+                  }
                   setFailedId(api.getState().loadTemplate(card.id) ? null : card.id);
                 }}
+                {...(writeLockReason === null
+                  ? {}
+                  : { "aria-disabled": true, title: writeLockReason })}
               >
                 <span className="flex items-baseline justify-between gap-2">
                   <span className="text-sm font-medium text-foreground">{card.name}</span>
@@ -90,7 +109,7 @@ export function CanvasEmptyState() {
           // risk, and a template that did not load is a mechanical failure, not one.
           <p className="mt-3 flex items-center justify-center gap-2 text-xs text-muted-foreground">
             <Info aria-hidden="true" className="h-4 w-4 shrink-0" />
-            That template could not be loaded.
+            {writeLockReason ?? "That template could not be loaded."}
           </p>
         )}
 

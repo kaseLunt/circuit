@@ -24,6 +24,7 @@ import {
   reduce,
   type ExecutionMachine,
 } from "../../lib/execution/machine";
+import { planHashOf } from "../../lib/execution/plan-hash";
 import { stepResultFactOf } from "../../lib/execution/resume";
 import type { ExecutionEvent } from "../../lib/execution/types";
 import { receiptMinter } from "../../lib/execution/attribution";
@@ -393,6 +394,58 @@ describe("ExecutionHost — the composer integration, end to end", () => {
     expect(screen.getByRole("button", { name: "Retry" })).not.toBeNull();
     // The refusal landed the machine back on idle — the simulation panel stays.
     expect(document.querySelector('aside[aria-label="Simulation"]')).not.toBeNull();
+  });
+
+  /**
+   * Codex round-5, the adjacent half: a fault card outlives the document it was raised against.
+   * An arming refusal lands the machine back on idle, so §2.4's disarm path returned early and
+   * the driver kept the arm input it would re-run — an edit followed by Retry opened a session,
+   * reset the fork and planned, for the plan the canvas had already replaced. The mutation
+   * retires the offer with the plan it belonged to; what remains is the §6 control, which reads
+   * the document now on screen.
+   */
+  it("retires a fault's Retry when the document changes under it (round-5)", async () => {
+    let atCapacity = true;
+    const { sandbox, store } = hostUnderTest({
+      onCreate: () => {
+        if (!atCapacity) return undefined;
+        return { ok: false, refusal: { kind: "at-capacity" } };
+      },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Review & execute in sandbox" }));
+    await screen.findByText("The sandbox is at capacity.");
+    expect(sandbox.calls.create).toBe(1);
+    const faulted = buildPlan(store.getState().doc, snapshot);
+    if (!faulted.ok) throw new Error("the flagship must plan");
+
+    // SPEC §3.3's own gesture: the borrow allocation moves 50% → 70%.
+    act(() => {
+      expect(store.getState().setBorrowAllocationBps("borrow", 7_000)).toEqual({ ok: true });
+    });
+    atCapacity = false;
+
+    // The card went with the plan it was about, so there is no Retry left to press — and the
+    // edit itself asked nothing of the wire.
+    await waitFor(() => {
+      expect(screen.queryByText("The sandbox is at capacity.")).toBeNull();
+    });
+    expect(screen.queryByRole("button", { name: "Retry" })).toBeNull();
+    expect(sandbox.calls.create).toBe(1);
+    expect(sandbox.calls.reset).toBe(0);
+    expect(sandbox.calls.plan).toBe(0);
+
+    // What IS offered arms the CURRENT document: the server plans from the token this press
+    // sends, and its plan is the one the edited canvas builds — not the plan that faulted.
+    fireEvent.click(screen.getByRole("button", { name: "Re-simulate" }));
+    await waitFor(() => {
+      expect(sandbox.calls.plan).toBe(1);
+    });
+    const current = buildPlan(store.getState().doc, snapshot);
+    if (!current.ok) throw new Error("the edited flagship must still plan");
+    const served = sandbox.planned();
+    if (served === null) throw new Error("the scripted server planned nothing");
+    expect(planHashOf(served.steps)).toBe(planHashOf(current.steps));
+    expect(planHashOf(served.steps)).not.toBe(planHashOf(faulted.steps));
   });
 });
 
@@ -982,8 +1035,13 @@ describe("restore is bound to the document generation (thread 019fa749 finding 2
       store.getState().clear();
     });
     release();
-    await waitFor(() => expect(storage.held()).toBeNull());
-    // Nothing was adopted: no execution column, no further dispatches, pointer retired.
+    // The adoption is refused in memory. The pointer STAYS (Codex round-11): the slot is one
+    // origin-wide key, an edit in this tab says nothing about whose pointer is in it, and the run
+    // this one names is still the server's — an undo could resume it. This beat asserted the slot
+    // emptied, which encoded the defect. What proves the refusal is the absence of the column.
+    await waitFor(() => expect(document.querySelector('aside[aria-label="Execution"]')).toBeNull());
+    expect(storage.held()).not.toBeNull();
+    // Nothing was adopted: no execution column and no further dispatches.
     expect(document.querySelector('aside[aria-label="Execution"]')).toBeNull();
     expect(document.querySelector('aside[aria-label="Simulation"]')).not.toBeNull();
     expect(sandbox.calls.executeStep.length).toBe(stepCalls);

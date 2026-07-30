@@ -93,6 +93,31 @@ export const coverageConfig = {
     // driver suite) and src/app/api/trpc/[trpc]/route.ts (route-handler binding of
     // covered modules; proven where honest — the router's own suite and the fork
     // gate).
+    // W08 wallet boundary: the live gate is the decision home (doctrine D10) — every
+    // refusal in SPEC §3 step 7 is decided here, so it carries the money-path bar below.
+    // Deliberately NOT enrolled: config.ts/seam.ts/wallet-provider.tsx (connector I/O and
+    // scenario thread-through, proven in live-gating.test.tsx and the e2e beats).
+    "src/lib/wallet/gate.ts",
+    // W08 remediation (Codex D-011 F2): the live-capture wire codec, the wallet router,
+    // and the composer's live-simulation decisions — each shipped and tested this round.
+    // Deliberately NOT enrolled: src/lib/live/live-transport.ts (tRPC client composition —
+    // I/O thread-through per D10, the src/lib/tx/transport.ts precedent) and
+    // src/lib/live/demo-capture.ts (scenario thread-through, the seam.ts precedent, proven
+    // in live-gating.test.tsx and readiness-source.test.ts).
+    "src/lib/live/snapshot-wire.ts",
+    "src/server/trpc/wallet-router.ts",
+    "src/components/composer/live-simulation.ts",
+    // W08 round-2 remediation (Codex 019fb049):
+    //  - finding 1: live-readiness.ts JOINS the manifest. It was excluded as "chain I/O end
+    //    to end", and that was true of the snapshot read — which is why THAT read is injected
+    //    and still proven by the wire round trip and the fork suite. What the file actually
+    //    decides is the capture's IDENTITY BRACKET (pin the hash, re-read it after both reads,
+    //    refuse a reorg), and a refusal decided by an uncovered branch is exactly the drift
+    //    coverage enrolment exists to refuse. Covered by live-readiness.test.ts.
+    //  - finding 2: the per-connector readiness router is a security DECISION — which source
+    //    may answer for which session — so it carries coverage weight like gate.ts does.
+    "src/server/chain/live-readiness.ts",
+    "src/lib/live/readiness-source.ts",
     "src/lib/tx/driver.ts",
     "src/lib/tx/provenance.ts",
     "src/components/tx/step-status.ts",
@@ -120,5 +145,8 @@ export const coverageConfig = {
     // `scripts/check-coverage-manifest.mjs` runs first (via `npm run test:coverage`)
     // and refuses the run if this glob stops resolving to its named files.
     "src/lib/execution/*.ts": { lines: 100, branches: 100, statements: 100 },
+    // W08: the wallet decision module holds the same bar — a live-mode refusal decided
+    // by an uncovered branch is exactly the drift the execution gate exists to refuse.
+    "src/lib/wallet/gate.ts": { lines: 100, branches: 100, statements: 100 },
   },
 };

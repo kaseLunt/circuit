@@ -4,6 +4,7 @@ import {
   topologicalOrder,
   validateGraph,
   type Block,
+  type BlockType,
   type Edge,
   type StrategyGraph,
 } from "../../core/graph";
@@ -31,9 +32,22 @@ import {
   selectGraph,
   selectRedoLabel,
   selectUndoLabel,
+  type BlockPosition,
   type ComposerStore,
   type ComposerStoreApi,
+  type DocumentActions,
 } from "./composer-store";
+
+/**
+ * `addBlock` answers null when the write was REFUSED — the T26 run lock is the only refusal
+ * there is. Every beat that needs the minted id adds to an unlocked store, so a null here is a
+ * broken test rather than a state worth branching on; the lock's own beats assert the null.
+ */
+function addedBlock(store: ComposerStoreApi, type: BlockType, at: BlockPosition): string {
+  const id = store.getState().addBlock(type, at);
+  if (id === null) throw new Error(`addBlock refused a ${type} block`);
+  return id;
+}
 
 /** Hostile payloads are minted here, not by `encodeShareGraph`: the encoder now refuses
  *  the documents this suite feeds the store, and an attacker does not use our encoder. */
@@ -178,7 +192,7 @@ describe("composer store — allocation edits", () => {
 
     // A second consumer at 100% over-allocates the source immediately — permitted state,
     // surfaced rather than silently redistributed.
-    const id = store.getState().addBlock("lend", { x: 0, y: 0 });
+    const id = addedBlock(store, "lend", { x: 0, y: 0 });
     expect(store.getState().connect("stake1", id)).toEqual({ ok: true });
     expect(store.getState().setEdgeAllocationBps(edgeTo(store.getState().doc, id).id, 10_000)).toEqual(
       { ok: true },
@@ -261,7 +275,7 @@ describe("composer store — one parameter whitelist, two write paths (R7)", () 
   it("mints only transportable structural defaults from addBlock", () => {
     const store = createComposerStore();
     for (const type of ["input", "stake", "wrap", "unwrap", "lend", "borrow"] as const) {
-      const id = store.getState().addBlock(type, { x: 0, y: 0 });
+      const id = addedBlock(store, type, { x: 0, y: 0 });
       const block = store.getState().doc.blocks.find((b) => b.id === id)!;
       for (const [key, value] of Object.entries(block.params)) {
         expect(isAllowedParamValue(type, key, value), `${type}.${key}`).toBe(true);
@@ -439,10 +453,10 @@ describe("composer store — connect, disconnect, remove", () => {
 
   it("infers structural params only — never a rate, an LTV or isConfigured", () => {
     const store = createComposerStore();
-    const input = store.getState().addBlock("input", { x: 0, y: 0 });
-    const stake = store.getState().addBlock("stake", { x: 1, y: 0 });
-    const wrap = store.getState().addBlock("wrap", { x: 2, y: 0 });
-    const lend = store.getState().addBlock("lend", { x: 3, y: 0 });
+    const input = addedBlock(store, "input", { x: 0, y: 0 });
+    const stake = addedBlock(store, "stake", { x: 1, y: 0 });
+    const wrap = addedBlock(store, "wrap", { x: 2, y: 0 });
+    const lend = addedBlock(store, "lend", { x: 3, y: 0 });
 
     expect(store.getState().setBlockParam(input, "amount", "10")).toEqual({ ok: true });
     expect(store.getState().setBlockParam(stake, "protocol", "etherfi")).toEqual({ ok: true });
@@ -457,7 +471,7 @@ describe("composer store — connect, disconnect, remove", () => {
 
     // A producer with no routable output (a supply position) and a pair the wrapper set
     // does not cover both infer nothing rather than guessing.
-    const orphanWrap = store.getState().addBlock("unwrap", { x: 4, y: 0 });
+    const orphanWrap = addedBlock(store, "unwrap", { x: 4, y: 0 });
     expect(store.getState().connect(lend, orphanWrap)).toEqual({ ok: true });
     expect(paramsOf(store.getState().doc, orphanWrap)).toEqual({});
   });
@@ -470,7 +484,7 @@ describe("composer store — connect, disconnect, remove", () => {
       ],
       edges: [{ id: "e:supply1", source: "in", target: "stake1", allocationBps: 10_000 }],
     });
-    const lend = store.getState().addBlock("lend", { x: 0, y: 0 });
+    const lend = addedBlock(store, "lend", { x: 0, y: 0 });
     expect(lend).toBe("supply1");
     expect(store.getState().connect("stake1", lend)).toEqual({ ok: true });
     expect(edgeTo(store.getState().doc, "supply1").id).toBe("e:supply1-2");
@@ -518,10 +532,10 @@ describe("composer store — connect, disconnect, remove", () => {
     const run = (): readonly string[] => {
       const store = createComposerStore();
       return [
-        store.getState().addBlock("stake", { x: 0, y: 0 }),
-        store.getState().addBlock("stake", { x: 0, y: 0 }),
-        store.getState().addBlock("lend", { x: 0, y: 0 }),
-        store.getState().addBlock("borrow", { x: 0, y: 0 }),
+        addedBlock(store, "stake", { x: 0, y: 0 }),
+        addedBlock(store, "stake", { x: 0, y: 0 }),
+        addedBlock(store, "lend", { x: 0, y: 0 }),
+        addedBlock(store, "borrow", { x: 0, y: 0 }),
       ];
     };
     expect(run()).toEqual(run());
@@ -632,8 +646,16 @@ describe("composer store — documents all pass core's gate (R2)", () => {
 
     // Byte-level tampering is rejected too, and an absent draft is silence, not an error.
     expect(viaDraft.getState().hydrateLocalDraft(`${token}!!`).ok).toBe(false);
-    expect(viaDraft.getState().hydrateLocalDraft(null)).toEqual({ ok: false, failure: null });
-    expect(viaDraft.getState().hydrateLocalDraft("")).toEqual({ ok: false, failure: null });
+    expect(viaDraft.getState().hydrateLocalDraft(null)).toEqual({
+      ok: false,
+      failure: null,
+      refusal: null,
+    });
+    expect(viaDraft.getState().hydrateLocalDraft("")).toEqual({
+      ok: false,
+      failure: null,
+      refusal: null,
+    });
   });
 
   it("loads every shipped template into a structurally valid, laid-out document", () => {
@@ -1193,9 +1215,9 @@ describe("param origin — the wrap pass preserves lineage, not just novelty", (
 
   it("inherits a CONFIGURED origin as configured — inheritance runs both ways", () => {
     const store = createComposerStore();
-    const input = store.getState().addBlock("input", { x: 0, y: 0 });
-    const stake = store.getState().addBlock("stake", { x: 1, y: 0 });
-    const lend = store.getState().addBlock("lend", { x: 2, y: 0 });
+    const input = addedBlock(store, "input", { x: 0, y: 0 });
+    const stake = addedBlock(store, "stake", { x: 1, y: 0 });
+    const lend = addedBlock(store, "lend", { x: 2, y: 0 });
     store.getState().setBlockParam(input, "amount", "10");
     store.getState().setBlockParam(stake, "protocol", "etherfi");
     store.getState().setBlockParam(lend, "asset", "weETH");
@@ -1273,5 +1295,201 @@ describe("param origin — the aliasing class stays closed at every id-minting d
     store.getState().setEdgeAllocationBps(edge.id, 8_000);
     store.getState().disconnect(edge.id);
     driveAndUnwind(store, "template");
+  });
+});
+
+/**
+ * T26's write lock, at the boundary that enforces it (Codex round-3 finding 2).
+ *
+ * The claim under test is not "the palette honours the lock" — that was the claim that failed
+ * review, because the template rows, Clear canvas and every canvas gesture each carried their
+ * own opinion about it. What is asserted here is the STRUCTURE: every document-mutating action
+ * refuses on its own, so a control that forgets the lock cannot change the document.
+ *
+ * The sentence is arbitrary on purpose. The store is handed one and never mints, edits or
+ * interprets it; that `RUN_LOCK_REASON` is the sentence the UI hands over is proven where the
+ * hand-over happens (`src/components/composer/composer.test.tsx`, `step-status.test.ts`).
+ */
+const HELD_BY_A_RUN = "a run holds the document";
+
+/**
+ * Every DOCUMENT write, as an attempt and the refusal it must answer with.
+ *
+ * Keyed on `DocumentActions`, so a new document action is a COMPILE ERROR here until this
+ * suite attempts it under the lock — the test-side half of the totality `lockGuarded` enforces
+ * in the store. A refusal nobody attempts is exactly the shape this finding was about.
+ */
+const LOCKED_WRITES: {
+  readonly [K in keyof DocumentActions]: (store: ComposerStoreApi) => void;
+} = {
+  addBlock: (s) => {
+    // Null, never a fabricated id: a caller handed an id would go on to configure it.
+    expect(s.getState().addBlock("stake", { x: 0, y: 0 })).toBeNull();
+  },
+  removeBlock: (s) => s.getState().removeBlock("borrow"),
+  setBlockParam: (s) => {
+    expect(s.getState().setBlockParam("in", "amount", "999")).toEqual({
+      ok: false,
+      reason: HELD_BY_A_RUN,
+    });
+  },
+  setBorrowAllocationBps: (s) => {
+    expect(s.getState().setBorrowAllocationBps("borrow", 1234)).toEqual({
+      ok: false,
+      reason: HELD_BY_A_RUN,
+    });
+  },
+  setEdgeAllocationBps: (s) => {
+    expect(s.getState().setEdgeAllocationBps(edgeTo(s.getState().doc, "wrap1").id, 4000)).toEqual({
+      ok: false,
+      reason: HELD_BY_A_RUN,
+    });
+  },
+  connect: (s) => {
+    // The lock is not a property of the graph, so the refusal carries the holder's own
+    // sentence rather than copy the canvas restates.
+    expect(s.getState().connect("supply2", "borrow")).toEqual({
+      ok: false,
+      rejection: { code: "document-locked", reason: HELD_BY_A_RUN },
+    });
+  },
+  disconnect: (s) => s.getState().disconnect(edgeTo(s.getState().doc, "wrap1").id),
+  insertRequiredWraps: (s) => {
+    expect(s.getState().insertRequiredWraps()).toEqual({ inserted: 0 });
+  },
+  beginEdit: (s) => s.getState().beginEdit("locked gesture"),
+  endEdit: (s) => s.getState().endEdit(),
+  loadTemplate: (s) => {
+    expect(s.getState().loadTemplate(FLAGSHIP_TEMPLATE_ID)).toBe(false);
+  },
+  loadFromShare: (s) => {
+    expect(s.getState().loadFromShare(tokenOf(flagshipGraph(20, 5000)))).toEqual({
+      ok: false,
+      failure: null,
+      refusal: HELD_BY_A_RUN,
+    });
+  },
+  hydrateLocalDraft: (s) => {
+    expect(s.getState().hydrateLocalDraft(tokenOf(flagshipGraph(20, 5000)))).toEqual({
+      ok: false,
+      failure: null,
+      refusal: HELD_BY_A_RUN,
+    });
+  },
+  clear: (s) => s.getState().clear(),
+  undo: (s) => s.getState().undo(),
+  redo: (s) => s.getState().redo(),
+  moveBlock: (s) => s.getState().moveBlock("borrow", { x: 999, y: 999 }),
+};
+
+/** The actions the lock leaves alone, named so the classification above is total. */
+const VIEW_ACTIONS: readonly string[] = ["setSelection", "armOverride", "setWriteLock"];
+
+describe("composer store — T26 write lock (one boundary, no control can forget)", () => {
+  it("refuses every document write, and the document is untouched afterwards", () => {
+    const store = seeded();
+    // Something in every stack, so a refused undo/redo has somewhere to go wrong.
+    expect(store.getState().setBorrowAllocationBps("borrow", 6000)).toEqual({ ok: true });
+    store.getState().undo();
+    store.getState().setSelection(["borrow"]);
+    store.getState().setWriteLock(HELD_BY_A_RUN);
+
+    const before = store.getState();
+    for (const attempt of Object.values(LOCKED_WRITES)) attempt(store);
+    const after = store.getState();
+
+    // Reference identity, not deep equality: a refused write must not even rebuild the doc.
+    expect(after.doc).toBe(before.doc);
+    expect(after.rev).toBe(before.rev);
+    expect(after.past).toBe(before.past);
+    expect(after.future).toBe(before.future);
+    expect(after.view).toBe(before.view);
+    expect(after.paramOrigins).toBe(before.paramOrigins);
+    expect(after.loadedFrom).toBe(before.loadedFrom);
+    expect(after.lastLoadProblem).toBe(before.lastLoadProblem);
+    // A refused `beginEdit` leaves no half-open gesture to suppress the next history entry.
+    expect(after.pendingEdit).toBeNull();
+    expect(after.writeLock).toBe(HELD_BY_A_RUN);
+  });
+
+  it("classifies EVERY action: a document write is guarded, anything else is named", () => {
+    const store = createComposerStore();
+    const dispatched = Object.entries(store.getState())
+      .filter(([, value]) => typeof value === "function")
+      .map(([key]) => key);
+    // A new action fails this until it is either attempted under the lock above or named a
+    // view action — the same decision `lockGuarded` forces on the store side.
+    expect(dispatched.sort()).toEqual([...Object.keys(LOCKED_WRITES), ...VIEW_ACTIONS].sort());
+  });
+
+  it("keeps reads and selection live — a frozen document is not a hidden one", () => {
+    const store = seeded();
+    store.getState().setWriteLock(HELD_BY_A_RUN);
+
+    store.getState().setSelection(["borrow", "supply1"]);
+    expect(store.getState().selectedBlockIds).toEqual(["borrow", "supply1"]);
+    store.getState().armOverride();
+    expect(store.getState().overrideGateArmed).toBe(true);
+
+    // Every provenanced reader still answers, over the frozen document.
+    const amount = readInputAmount(store.getState(), "in");
+    const allocation = readBorrowAllocationBps(store.getState(), "borrow");
+    expect(amount === null ? null : valueOf(amount)).toBe("10");
+    expect(allocation === null ? null : valueOf(allocation)).toBe(7000);
+    expect(readOutgoingAllocationBps(store.getState(), "stake1")).not.toBeNull();
+    expect(selectGraph(store.getState())).toBe(store.getState().doc);
+    expect(overAllocatedSourceIds(store.getState().doc)).toEqual([]);
+    expect(connectRejection(store.getState().doc, "in", "in")).toEqual({ code: "self-loop" });
+  });
+
+  it("lifts on release: the same writes land once the run reaches a terminal state", () => {
+    const store = seeded();
+    store.getState().setWriteLock(HELD_BY_A_RUN);
+    expect(store.getState().setBorrowAllocationBps("borrow", 5500).ok).toBe(false);
+
+    // What `runLocksDocument` reports at a terminal phase, handed over as null.
+    store.getState().setWriteLock(null);
+    expect(store.getState().writeLock).toBeNull();
+    expect(store.getState().setBorrowAllocationBps("borrow", 5500)).toEqual({ ok: true });
+    expect(paramsOf(store.getState().doc, "borrow")["allocationBps"]).toBe(5500);
+    expect(addedBlock(store, "lend", { x: 0, y: 0 })).toBe("supply3");
+    expect(store.getState().loadTemplate(FLAGSHIP_TEMPLATE_ID)).toBe(true);
+  });
+
+  it("closes an open gesture as the lock engages, so undo recording survives the run", () => {
+    const store = seeded();
+    store.getState().beginEdit("set borrow allocation");
+    expect(store.getState().setBorrowAllocationBps("borrow", 6000)).toEqual({ ok: true });
+    const depth = store.getState().past.length;
+
+    store.getState().setWriteLock(HELD_BY_A_RUN);
+    // The gesture is closed WITH its history entry: a `pendingEdit` left standing across a run
+    // silently stops the store pushing to `past` for the rest of the session.
+    expect(store.getState().pendingEdit).toBeNull();
+    expect(store.getState().past.length).toBe(depth + 1);
+    expect(selectUndoLabel(store.getState())).toBe("set borrow allocation");
+
+    store.getState().setWriteLock(null);
+    expect(store.getState().setBorrowAllocationBps("borrow", 6100)).toEqual({ ok: true });
+    expect(store.getState().past.length).toBe(depth + 2);
+    store.getState().undo();
+    expect(paramsOf(store.getState().doc, "borrow")["allocationBps"]).toBe(6000);
+  });
+
+  it("is idempotent, and a re-lock after a release refuses again", () => {
+    const store = seeded();
+    const initial = store.getState();
+    // Setting the lock it already holds is not a state change (zustand compares by reference).
+    store.getState().setWriteLock(null);
+    expect(store.getState()).toBe(initial);
+    store.getState().setWriteLock(HELD_BY_A_RUN);
+    store.getState().setWriteLock(HELD_BY_A_RUN);
+    expect(store.getState().writeLock).toBe(HELD_BY_A_RUN);
+    store.getState().setWriteLock(null);
+    store.getState().setWriteLock("held again");
+    expect(store.getState().setBlockParam("in", "amount", "3")).toEqual({
+      ok: false,
+      reason: "held again",
+    });
   });
 });

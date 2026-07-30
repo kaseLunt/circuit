@@ -7,6 +7,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import { Sidebar } from "./sidebar";
+import { RUN_LOCK_REASON } from "../tx/step-status";
 import { SimulationPanel } from "./simulation-panel";
 import { ComposerShell } from "./composer-shell";
 import {
@@ -451,7 +452,8 @@ describe("SimulationPanel — designed states", () => {
 
 describe("Sidebar — palette", () => {
   function renderSidebar() {
-    const onAddBlock = vi.fn();
+    // Every host in this file lands the add; the refusal arm is the run-lock beat below.
+    const onAddBlock = vi.fn(() => true);
     const onLoadTemplate = vi.fn(() => true);
     const onClear = vi.fn(() => true);
     const view = render(
@@ -550,7 +552,7 @@ describe("Sidebar — palette", () => {
     cleanup();
 
     const onClear = vi.fn(() => false);
-    render(<Sidebar onAddBlock={vi.fn()} onLoadTemplate={() => true} onClear={onClear} />);
+    render(<Sidebar onAddBlock={() => true} onLoadTemplate={() => true} onClear={onClear} />);
     fireEvent.click(screen.getByRole("button", { name: "Clear canvas" }));
     expect(screen.getByRole("status").textContent).toBe(
       "Canvas is already empty — nothing to clear.",
@@ -578,7 +580,7 @@ describe("Sidebar — templates", () => {
   it("shows name and prose only: no APY, no risk badge, no digit at all", () => {
     const onLoadTemplate = vi.fn(() => true);
     render(
-      <Sidebar onAddBlock={vi.fn()} onLoadTemplate={onLoadTemplate} onClear={() => true} />,
+      <Sidebar onAddBlock={() => true} onLoadTemplate={onLoadTemplate} onClear={() => true} />,
     );
     fireEvent.click(screen.getByRole("tab", { name: "Templates" }));
 
@@ -592,7 +594,7 @@ describe("Sidebar — templates", () => {
 
   it("reports the store's verdict rather than assuming a load happened", () => {
     render(
-      <Sidebar onAddBlock={vi.fn()} onLoadTemplate={() => false} onClear={() => true} />,
+      <Sidebar onAddBlock={() => true} onLoadTemplate={() => false} onClear={() => true} />,
     );
     fireEvent.click(screen.getByRole("tab", { name: "Templates" }));
     fireEvent.click(screen.getByRole("button", { name: /Leveraged Restake Loop/ }));
@@ -602,7 +604,7 @@ describe("Sidebar — templates", () => {
   });
 
   it("moves selection with the arrow keys", () => {
-    render(<Sidebar onAddBlock={vi.fn()} onLoadTemplate={() => true} onClear={() => true} />);
+    render(<Sidebar onAddBlock={() => true} onLoadTemplate={() => true} onClear={() => true} />);
     const blocks = screen.getByRole("tab", { name: "Blocks" });
     expect(blocks.getAttribute("aria-selected")).toBe("true");
     fireEvent.keyDown(blocks, { key: "ArrowRight" });
@@ -612,7 +614,7 @@ describe("Sidebar — templates", () => {
   });
 
   it("wraps on ArrowLeft and jumps to the ends with Home and End", () => {
-    render(<Sidebar onAddBlock={vi.fn()} onLoadTemplate={() => true} onClear={() => true} />);
+    render(<Sidebar onAddBlock={() => true} onLoadTemplate={() => true} onClear={() => true} />);
 
     fireEvent.keyDown(screen.getByRole("tab", { name: "Blocks" }), { key: "ArrowLeft" });
     expect(screen.getByRole("tab", { name: "Templates" }).getAttribute("aria-selected")).toBe(
@@ -733,5 +735,192 @@ describe("ComposerShell — store wiring", () => {
     } finally {
       reported.mockRestore();
     }
+  });
+});
+
+/**
+ * T26's write lockdown at the SIDEBAR and the shell (Codex round-3 finding 2).
+ *
+ * The round-2 shape passed `lockReason` to the sidebar and only the palette rows honoured it:
+ * the template rows and Clear canvas still dispatched. Two claims are asserted here, and they
+ * are deliberately separate:
+ *
+ *  1. THE AFFORDANCE — every write control states the refusal (`aria-disabled` plus the
+ *     sentence, never `disabled`, no veil and no dimming) and dispatches nothing.
+ *  2. THE BACKSTOP — with the STORE locked and the sidebar told nothing at all, every one of
+ *     those controls leaves the document exactly as it was. That is the finding's own test:
+ *     a control that forgets the lock must be harmless, not merely rare.
+ */
+describe("T26 — the sidebar and shell under the run lock", () => {
+  const TEMPLATE = /Leveraged Restake Loop/;
+
+  function renderLockedSidebar() {
+    // Every host in this file lands the add; the refusal arm is the run-lock beat below.
+    const onAddBlock = vi.fn(() => true);
+    const onLoadTemplate = vi.fn(() => true);
+    const onClear = vi.fn(() => true);
+    const view = render(
+      <Sidebar
+        onAddBlock={onAddBlock}
+        onLoadTemplate={onLoadTemplate}
+        onClear={onClear}
+        lockReason={RUN_LOCK_REASON}
+      />,
+    );
+    return { ...view, onAddBlock, onLoadTemplate, onClear };
+  }
+
+  /** The shell over a real store, with the lock held by the store and/or stated to the UI. */
+  function renderLockedShell(options: { readonly tellTheUi: boolean }) {
+    const store = createComposerStore();
+    expect(store.getState().loadTemplate(FLAGSHIP_TEMPLATE_ID)).toBe(true);
+    store.getState().setWriteLock(RUN_LOCK_REASON);
+    const view = render(
+      <ComposerStoreProvider store={store}>
+        <ComposerShell
+          canvas={<div data-testid="canvas-slot" />}
+          simulation={null}
+          simulationPending={false}
+          resolveDropPosition={() => ({ x: 320, y: 180 })}
+          {...(options.tellTheUi ? { lockReason: RUN_LOCK_REASON } : {})}
+        />
+      </ComposerStoreProvider>,
+    );
+    return { ...view, store };
+  }
+
+  it("states the refusal on every write control — palette, templates and Clear canvas", () => {
+    renderLockedSidebar();
+    fireEvent.click(screen.getByRole("tab", { name: "Templates" }));
+    const controls = [
+      screen.getByRole("button", { name: "Clear canvas" }),
+      screen.getByRole("button", { name: TEMPLATE }),
+    ];
+    fireEvent.click(screen.getByRole("tab", { name: "Blocks" }));
+    controls.push(screen.getByRole("button", { name: "Stake" }));
+
+    for (const control of controls) {
+      expect(control.getAttribute("aria-disabled")).toBe("true");
+      expect(control.getAttribute("title")).toBe(RUN_LOCK_REASON);
+      // Never `disabled`: a disabled control cannot be focused, so it cannot say why (T25/T33).
+      expect(control.hasAttribute("disabled")).toBe(false);
+      // No veil, no dimming, no blur — a frozen document is not a hidden one (T26). (The
+      // button base's `[&_svg]:pointer-events-none` is the icon rule, not a veil.)
+      expect(control.className).not.toMatch(/opacity-\d|\bblur\b|grayscale/);
+    }
+  });
+
+  it("dispatches nothing, and says the sentence out loud instead", () => {
+    const { onAddBlock, onLoadTemplate, onClear } = renderLockedSidebar();
+    const region = screen.getByRole("status");
+
+    fireEvent.click(screen.getByRole("button", { name: "Clear canvas" }));
+    expect(onClear).not.toHaveBeenCalled();
+    expect(region.textContent).toBe(RUN_LOCK_REASON);
+
+    fireEvent.click(screen.getByRole("tab", { name: "Templates" }));
+    fireEvent.click(screen.getByRole("button", { name: TEMPLATE }));
+    expect(onLoadTemplate).not.toHaveBeenCalled();
+    expect(region.textContent).toBe(RUN_LOCK_REASON);
+
+    fireEvent.click(screen.getByRole("tab", { name: "Blocks" }));
+    fireEvent.keyDown(screen.getByRole("button", { name: "Stake" }), { key: "Enter" });
+    fireEvent.click(screen.getByRole("button", { name: "Borrow" }));
+    expect(onAddBlock).not.toHaveBeenCalled();
+    expect(region.textContent).toBe(RUN_LOCK_REASON);
+  });
+
+  it("deactivates the palette drag at the source rather than refusing the drop", () => {
+    renderLockedSidebar();
+    const row = screen.getByRole("button", { name: "Stake" });
+    expect(row.getAttribute("draggable")).toBe("false");
+    const transferred: string[] = [];
+    fireEvent.dragStart(row, {
+      dataTransfer: { setData: (_k: string, v: string) => transferred.push(v) },
+    });
+    expect(transferred).toEqual([]);
+  });
+
+  it("keeps every read live: tabs, collapse and the template prose still work", () => {
+    renderLockedSidebar();
+    fireEvent.click(screen.getByRole("tab", { name: "Templates" }));
+    expect(screen.getByRole("tab", { name: "Templates" }).getAttribute("aria-selected")).toBe("true");
+    expect(screen.getByRole("button", { name: TEMPLATE }).textContent).not.toBe("");
+    const collapse = screen.getByRole("button", { name: "Collapse block palette" });
+    expect(collapse.getAttribute("aria-disabled")).toBeNull();
+    fireEvent.click(collapse);
+    expect(screen.getByRole("button", { name: "Expand block palette" })).not.toBeNull();
+  });
+
+  it("leaves the document untouched through the shell's own write routes", () => {
+    const { store } = renderLockedShell({ tellTheUi: true });
+    const before = store.getState();
+
+    fireEvent.keyDown(screen.getByRole("button", { name: "Stake" }), { key: "Enter" });
+    fireEvent.click(screen.getByRole("button", { name: "Clear canvas" }));
+    fireEvent.click(screen.getByRole("tab", { name: "Templates" }));
+    fireEvent.click(screen.getByRole("button", { name: /Restake and supply/ }));
+
+    const after = store.getState();
+    expect(after.doc).toBe(before.doc);
+    expect(after.rev).toBe(before.rev);
+    expect(after.view).toBe(before.view);
+    expect(after.loadedFrom).toBe(before.loadedFrom);
+  });
+
+  it("survives a control that forgets the lock — the store is the backstop", () => {
+    // The sidebar is told NOTHING: `lockReason` is absent, so every control dispatches, which
+    // is exactly the round-2 failure mode. The document must still be untouched.
+    const { store } = renderLockedShell({ tellTheUi: false });
+    const before = store.getState();
+    const sidebar = screen.getByRole("complementary", {
+      name: "Blocks, templates and canvas actions",
+    });
+    expect(screen.getByRole("button", { name: "Stake" }).getAttribute("aria-disabled")).toBeNull();
+
+    // Every announcement is honest about what HAPPENED, because each verdict is read off the
+    // document rather than off the request — an add that was refused is not reported as an add.
+    fireEvent.keyDown(screen.getByRole("button", { name: "Stake" }), { key: "Enter" });
+    expect(within(sidebar).getByRole("status").textContent).toBe(
+      "Stake block could not be added.",
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Clear canvas" }));
+    expect(within(sidebar).getByRole("status").textContent).toBe(
+      "Canvas is already empty — nothing to clear.",
+    );
+    fireEvent.click(screen.getByRole("tab", { name: "Templates" }));
+    fireEvent.click(screen.getByRole("button", { name: /Restake and supply/ }));
+    expect(within(sidebar).getByRole("status").textContent).toBe(
+      "Restake and supply could not be loaded.",
+    );
+
+    const after = store.getState();
+    expect(after.doc).toBe(before.doc);
+    expect(after.rev).toBe(before.rev);
+    expect(after.loadedFrom).toBe(before.loadedFrom);
+  });
+
+  it("lifts on release: the same controls land writes once the run settles", () => {
+    const { store } = renderLockedShell({ tellTheUi: true });
+    store.getState().setWriteLock(null);
+    cleanup();
+
+    const view = render(
+      <ComposerStoreProvider store={store}>
+        <ComposerShell
+          canvas={<div data-testid="canvas-slot" />}
+          simulation={null}
+          simulationPending={false}
+          resolveDropPosition={() => ({ x: 8, y: 9 })}
+        />
+      </ComposerStoreProvider>,
+    );
+    const blocks = store.getState().doc.blocks.length;
+    fireEvent.keyDown(within(view.container).getByRole("button", { name: "Stake" }), {
+      key: "Enter",
+    });
+    expect(store.getState().doc.blocks.length).toBe(blocks + 1);
+    fireEvent.click(within(view.container).getByRole("button", { name: "Clear canvas" }));
+    expect(store.getState().doc.blocks.length).toBe(0);
   });
 });

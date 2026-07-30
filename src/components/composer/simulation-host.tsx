@@ -29,6 +29,7 @@
  */
 
 import { useMemo, useState } from "react";
+import { borrowLimitVerdict, type BorrowLimitVerdict } from "../../core/borrow-limit";
 import type { ChainSnapshot } from "../../core/plan";
 import { simulate } from "../../core/risk";
 import type { SimulationResult } from "../../lib/strategy/types";
@@ -94,4 +95,27 @@ export function useSimulation(snapshotState: SnapshotState): SimulationView {
   const view = resolveSimulationView(next, held, snapshotState.status === "loading");
   if (view.simulation !== held) setHeld(view.simulation);
   return view;
+}
+
+/**
+ * SPEC §3 step 4's client-side verdict, derived beside the simulation over the SAME document
+ * revision and the SAME block-pinned snapshot.
+ *
+ * Kept out of `SimulationResult` on purpose. That type is the panel's answer to "what does
+ * this strategy earn and risk"; this is the composer's answer to "will the protocol accept
+ * it at all", and folding a gate into a projection is how a gate ends up being read as a
+ * number. Both are pure, both are memoized on the document reference, and neither derives
+ * anything the other derives — the LTV/LT pair here comes off `core/borrow-limit.ts`, which
+ * reads the risk ledger's own legs.
+ *
+ * Null means "no snapshot, so nothing to say" — the same absence `useSimulation` uses.
+ */
+export function useBorrowLimit(snapshotState: SnapshotState): BorrowLimitVerdict | null {
+  const doc = useComposerStore((state) => state.doc);
+  const snapshot = snapshotState.status === "ready" ? snapshotState.snapshot : null;
+  return useMemo(() => {
+    if (snapshot === null) return null;
+    if (doc.blocks.length === 0) return null;
+    return borrowLimitVerdict(doc, snapshot);
+  }, [doc, snapshot]);
 }

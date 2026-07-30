@@ -44,6 +44,56 @@ const EXPECTED = {
   "tests/lint/fixtures/server/leaks-public-env.tsx": [
     ["next-public-env-tsx", "no-restricted-syntax"],
   ],
+  // W08 wallet-seam routes (treatment §1.1/§1.2, doctrine D5): folded in from the
+  // interim tests/lint/w08-boundaries.test.ts gate once scripts/** joined the charter.
+  "tests/lint/fixtures/core/imports-wallet.ts": [
+    ["core-imports-wagmi", "no-restricted-imports"],
+    ["core-imports-wagmi-subpath", "no-restricted-imports"],
+    ["core-imports-wallet-file", "no-restricted-imports"],
+    ["core-imports-wallet-dir", "no-restricted-imports"],
+  ],
+  "tests/lint/fixtures/execution/imports-wallet.ts": [
+    ["execution-imports-wallet-file", "no-restricted-imports"],
+    ["execution-imports-wallet-dir", "no-restricted-imports"],
+  ],
+  "tests/lint/fixtures/server/imports-wallet.ts": [
+    ["server-imports-wagmi", "no-restricted-imports"],
+    ["server-imports-wagmi-subpath", "no-restricted-imports"],
+    ["server-imports-wallet-dir", "no-restricted-imports"],
+    ["server-imports-wallet-file", "no-restricted-imports"],
+  ],
+  "tests/lint/fixtures/wallet/impure.ts": [
+    ["wallet-viem-createClient", "no-restricted-imports"],
+    ["wallet-viem-createPublicClient", "no-restricted-imports"],
+    ["wallet-viem-createTestClient", "no-restricted-imports"],
+    ["wallet-viem-createTransport", "no-restricted-imports"],
+    ["wallet-mints-provenance", "no-restricted-imports"],
+    ["wallet-imports-server", "no-restricted-imports"],
+  ],
+  // Codex D-011 F5 routes: the repo-wide wagmi confinement (a) and the wallet boundary's
+  // value-imports-of-core-money ban (b). The (b) fixture also carries a LEGAL type-only
+  // import line that must NOT fire — the exact-multiset check makes its silence an
+  // assertion too.
+  "tests/lint/fixtures/app/imports-wagmi.ts": [
+    ["app-imports-wagmi", "no-restricted-imports"],
+    ["app-imports-wagmi-subpath", "no-restricted-imports"],
+    ["app-imports-wagmi-scoped", "no-restricted-imports"],
+  ],
+  "tests/lint/fixtures/wallet/imports-core-money.ts": [
+    ["wallet-imports-core-plan", "@typescript-eslint/no-restricted-imports"],
+    ["wallet-imports-core-risk", "@typescript-eslint/no-restricted-imports"],
+    ["wallet-imports-core-borrow-limit", "@typescript-eslint/no-restricted-imports"],
+    ["wallet-imports-core-rates", "@typescript-eslint/no-restricted-imports"],
+  ],
+  // Codex round-2 finding 3: the same ban on the wallet's RENDERING surface, which wagmi is
+  // legal in and which the F5(b) rule had left out. Same four routes, same legal type-only
+  // line whose SILENCE the exact-multiset check also asserts.
+  "tests/lint/fixtures/components-wallet/imports-core-money.ts": [
+    ["components-wallet-imports-core-plan", "@typescript-eslint/no-restricted-imports"],
+    ["components-wallet-imports-core-risk", "@typescript-eslint/no-restricted-imports"],
+    ["components-wallet-imports-core-borrow-limit", "@typescript-eslint/no-restricted-imports"],
+    ["components-wallet-imports-core-rates", "@typescript-eslint/no-restricted-imports"],
+  ],
   "tests/lint/fixtures/execution/impure.ts": [
     ["react", "no-restricted-imports"],
     ["react-dom", "no-restricted-imports"],

@@ -90,6 +90,8 @@ function runtime(overrides: Partial<BlockRuntime> = {}): BlockRuntime {
     blockValues: {},
     minHealthFactor: null,
     liquidationRatioWad: null,
+    borrowLimit: null,
+    writeLockReason: null,
     pending: false,
     pendingEdit: null,
     docRev: 1,

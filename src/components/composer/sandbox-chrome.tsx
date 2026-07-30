@@ -31,6 +31,13 @@ interface SandboxChromeProps {
    * document would make the chrome a store consumer for one button.
    */
   readonly actions?: ReactNode;
+  /**
+   * SPEC §3 step 7: the badge states what this session IS. Sandbox is the default no-wallet
+   * experience; connecting a wallet switches it to Live. Both are achromatic — Live is not a
+   * warning and Sandbox is not a degraded mode, and spending chroma on either would devalue
+   * the one colour the borrow block needs.
+   */
+  readonly mode?: "sandbox" | "live";
 }
 
 /**
@@ -44,17 +51,18 @@ function citation(ready: Extract<SnapshotState, { status: "ready" }>): string {
   )}`;
 }
 
-export function SandboxChrome({ snapshot, actions }: SandboxChromeProps) {
+export function SandboxChrome({ snapshot, actions, mode = "sandbox" }: SandboxChromeProps) {
   return (
     <header className="flex h-9 shrink-0 items-center gap-3 border-b border-border bg-card px-4">
       <span className="text-sm font-medium text-foreground">Circuit</span>
       <span
+        data-mode={mode}
         className={cn(
           "rounded-sm border border-border px-1.5 py-0.5",
           "text-label uppercase tracking-wider text-muted-foreground",
         )}
       >
-        Sandbox
+        {mode === "live" ? "Live" : "Sandbox"}
       </span>
 
       {snapshot.status === "unavailable" ? (
