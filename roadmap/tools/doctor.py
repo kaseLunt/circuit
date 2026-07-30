@@ -269,8 +269,13 @@ def transition_currency_errors(
         and status_field(after, "project_state") == "complete"
     )
     if phase_exited or completed:
+        # Only the phase being CLOSED re-arms — the before snapshot's active_phase (on
+        # completion the pointer stays as the last phase, so old_phase names it). Phases
+        # that exited earlier already passed through their own strict transition and are
+        # immutable historical records (D-006); later-phase drift over shared inputs is
+        # legitimate there and must not block completion (Codex round 3).
         for work_id, (path, data, status, phase) in after_work.items():
-            if status == "achieved" and (phase == old_phase or completed):
+            if status == "achieved" and phase == old_phase:
                 strict[work_id] = (path, data)
 
     errors: list[str] = []
