@@ -64,6 +64,7 @@ function simulation(overrides: Partial<SimulationResult> = {}): SimulationResult
       "debtWei * 1e4 * WAD / (collWei * ltBps)",
       [supplyRate],
     ),
+    liquidationPair: { collateral: "weETH", debt: "WETH" },
     leverageWad: derived((WAD * 333n) / 100n, "exposure / equity", [supplyRate]),
     yieldSources: [
       {
@@ -383,7 +384,7 @@ describe("SimulationPanel — designed states", () => {
     expect(screen.queryByRole("tooltip")).toBeNull();
     const trail = section.textContent ?? "";
     // The full depth is present: the ratio's own formula AND the amounts underneath it.
-    expect(trail).toContain("debtWei × 1e4 × WAD / (collateralWei × ltBps)");
+    expect(trail).toContain("debtWei × unitColl × 1e4 × WAD / (collateralWei × unitDebt × ltBps)");
     expect(trail).toContain("Oracle.getAssetPrice(weETH)");
     expect(trail).not.toContain("more derivation");
   });

@@ -13,17 +13,21 @@ import {
   CANONICAL_STEPS,
   EXPECTED_BORROW_WEI,
   FORK_PROVEN_BORROW_BPS,
+  FORK_PROVEN_CARRY_BPS,
+  carryGraph,
   flagshipGraph,
 } from "../../../tests/helpers/graphs";
 import { createComposerStore } from "../../app/store/composer-store";
 import { FULL_ALLOCATION_BPS } from "./types";
 import {
+  CARRY_TEMPLATE_ID,
   FLAGSHIP_TEMPLATE_ID,
   STRATEGY_TEMPLATES,
   getTemplate,
   leveragedRestakeLoop,
   restake,
   restakeAndSupply,
+  weethUsdcCarry,
   type StrategyTemplate,
 } from "./templates";
 
@@ -116,6 +120,37 @@ describe("flagship template is the SPEC §2 expanded DAG", () => {
     // Not "close enough": the document the user is holding after one drag IS the graph the
     // fork suite proved, so every number W03 pinned is one slider move from the screen.
     expect(store.getState().doc).toEqual(flagshipGraph());
+  });
+
+  /**
+   * The carry's identity gate, and it is STRICTER than the flagship's.
+   *
+   * The flagship ships one slider move away from its fork-proven point because the demo
+   * script needs the composer to open safe. The carry has no such beat — it is supposed to
+   * arrive in the amber band — so the shipped default and the executed-on-a-fork default are
+   * the SAME number, and "in one slider move" becomes "on arrival, untouched". If either
+   * value ever moves alone, this fails rather than letting the shipped template and the
+   * proven evidence drift into two different strategies.
+   */
+  it("ships the fork-proven carry graph with no slider move at all", () => {
+    const store = createComposerStore();
+    expect(store.getState().loadTemplate(CARRY_TEMPLATE_ID)).toBe(true);
+    expect(store.getState().doc).toEqual(carryGraph());
+
+    const borrowOf = (g: StrategyGraph) =>
+      g.blocks.find((b) => b.type === "borrow")!.params["allocationBps"];
+    expect(borrowOf(weethUsdcCarry())).toBe(FORK_PROVEN_CARRY_BPS);
+    expect(getTemplate(CARRY_TEMPLATE_ID)!.graph()).toEqual(weethUsdcCarry());
+  });
+
+  it("pins the carry's block ids — the same TransactionStep-id contract, one leg shorter", () => {
+    expect(weethUsdcCarry().blocks.map((b) => b.id)).toEqual([
+      "in",
+      "stake1",
+      "wrap1",
+      "supply1",
+      "borrow",
+    ]);
   });
 
   it("pins the block ids every TransactionStep id is derived from", () => {
@@ -248,22 +283,30 @@ describe("every template in the roster can be explained", () => {
       }
       return result.steps.length;
     });
-    expect(counts).toEqual([1, 5, 13]);
+    // restake · restake+supply · the 13-step flagship · the 6-step carry (no set-emode).
+    expect(counts).toEqual([1, 5, 13, 6]);
   });
 
-  it("only the leveraged template touches debt or e-mode", () => {
+  it("separates debt from e-mode: two templates borrow, only the correlated one enters a category", () => {
     const restakeOnly = buildPlan(restake(), snapshot);
     const supplyOnly = buildPlan(restakeAndSupply(), snapshot);
     const levered = planOf(getTemplate(FLAGSHIP_TEMPLATE_ID)!);
+    const carry = planOf(getTemplate(CARRY_TEMPLATE_ID)!);
     expectOk(restakeOnly);
     expectOk(supplyOnly);
     expectOk(levered);
+    expectOk(carry);
     expect(restakeOnly.targetEModeCategoryId).toBeNull();
     expect(supplyOnly.targetEModeCategoryId).toBeNull();
     expect(levered.targetEModeCategoryId).toBe(1);
+    // The carry borrows and still stands at the reserve regime — because no recorded category
+    // admits its borrow, not because the template asked for anything.
+    expect(carry.targetEModeCategoryId).toBeNull();
     expect(restakeOnly.steps.some((s) => s.functionName === "borrow")).toBe(false);
     expect(supplyOnly.steps.some((s) => s.functionName === "borrow")).toBe(false);
     expect(levered.steps.some((s) => s.functionName === "borrow")).toBe(true);
+    expect(carry.steps.some((s) => s.functionName === "borrow")).toBe(true);
+    expect(carry.steps.some((s) => s.functionName === "setUserEMode")).toBe(false);
     expect(supplyOnly.steps.map((s) => s.functionName)).toEqual([
       "deposit",
       "approve",

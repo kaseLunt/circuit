@@ -6,6 +6,7 @@ import { formatBpsAsPercent, formatHealthFactor, formatWadAsPercent, formatWadRa
 import { HF_WARN_WAD, hfWadValue, riskState, type HealthFactor } from "../../../core/health-factor";
 import { valueOf } from "../../../core/provenance";
 import { rateKindLabel } from "../../../core/risk";
+import type { BorrowCeiling } from "../../../core/borrow-limit";
 import { FULL_ALLOCATION_BPS, type BorrowBlockData } from "../../../lib/strategy/types";
 import { AssetChip } from "../../shared/asset-chip";
 import { SourcedValue, slotClassName, type SlotRamp } from "../../shared/sourced-value";
@@ -85,6 +86,28 @@ function regimeLabel(categoryId: number | null): string {
     : `E-mode category ${categoryId}`;
 }
 
+/**
+ * The regime as a STATED FACT, not an absence (W09).
+ *
+ * A user who loads the loop and adds an uncorrelated borrow has silently moved the whole
+ * position from the e-mode category's thresholds to the reserve's — because the borrow set
+ * itself forecloses the category. Every number on screen moves honestly with it, and until
+ * now nothing SAID so: the regime only appeared once the position was already over the limit,
+ * which is the one moment it is too late to be news.
+ *
+ * Both figures are read off the ceiling, which read them off the plan's own selection. There
+ * is no second source for "which regime" anywhere in the product.
+ */
+function regimeSentence(ceiling: BorrowCeiling): string {
+  return ceiling.categoryId === null
+    ? `No e-mode category governs this position, so the reserve's own thresholds apply: ${formatBpsAsPercent(
+        ceiling.ltvBps,
+      )} borrowable, liquidation at ${formatBpsAsPercent(ceiling.ltBps)}.`
+    : `${regimeLabel(ceiling.categoryId)} governs this position: ${formatBpsAsPercent(
+        ceiling.ltvBps,
+      )} borrowable, liquidation at ${formatBpsAsPercent(ceiling.ltBps)}.`;
+}
+
 /** The prose a settled-but-empty risk read gets. Never a dash, never a zero. */
 const LIQUIDATION_UNAVAILABLE = "Liquidation level unavailable. The risk read did not resolve.";
 
@@ -130,8 +153,21 @@ export function BorrowBlock({ id, data, selected }: NodePropsFor<BorrowBlockData
 
   const rate = blockValue === null ? null : blockValue.rate;
   const kindLabel = rateKindLabel(rate === null ? "apy" : rate.kind);
-  const collateralAsset = blockValue === null ? null : blockValue.inputAsset;
-  const pair = collateralAsset === null ? "collateral/debt" : `${collateralAsset}/${data.asset}`;
+  /**
+   * The pair the ratio actually divides, from the simulation that minted the ratio.
+   *
+   * NOT `blockValue.inputAsset`: a borrow flow carries none — the edge into a borrow is a
+   * collateral dependency, not a token flow — so that read was always null in the running app
+   * and every position, correlated or not, rendered as "collateral/debt". With two templates
+   * that erased the entire contrast: weETH/WETH and weETH/USDC printed the same sentence.
+   * The generic wording survives only as the genuinely-unknown case, where the ratio is
+   * unavailable too and the sentence is about an absence.
+   */
+  const liquidationPair = runtime.liquidationPair;
+  const pair =
+    liquidationPair === null
+      ? "collateral/debt"
+      : `${liquidationPair.collateral}/${liquidationPair.debt}`;
 
   const allocation = runtime.borrowAllocations[id] ?? null;
   const allocationText =
@@ -151,6 +187,14 @@ export function BorrowBlock({ id, data, selected }: NodePropsFor<BorrowBlockData
   const limit = runtime.borrowLimit;
   const overLimit =
     limit !== null && limit.status === "over-limit" && limit.ceiling.blockId === id
+      ? limit.ceiling
+      : null;
+  // The ceiling exists on BOTH settled verdicts, and the regime is worth saying on both —
+  // it is a fact about the position, not a diagnosis of a mistake.
+  const ceiling =
+    limit !== null &&
+    (limit.status === "within" || limit.status === "over-limit") &&
+    limit.ceiling.blockId === id
       ? limit.ceiling
       : null;
 
@@ -276,6 +320,10 @@ export function BorrowBlock({ id, data, selected }: NodePropsFor<BorrowBlockData
           />
           .
         </p>
+      )}
+
+      {ceiling === null ? null : (
+        <p className="text-xs text-muted-foreground">{regimeSentence(ceiling)}</p>
       )}
 
       <div className="flex items-baseline gap-2">
