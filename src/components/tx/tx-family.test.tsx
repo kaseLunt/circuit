@@ -1035,8 +1035,13 @@ describe("restore is bound to the document generation (thread 019fa749 finding 2
       store.getState().clear();
     });
     release();
-    await waitFor(() => expect(storage.held()).toBeNull());
-    // Nothing was adopted: no execution column, no further dispatches, pointer retired.
+    // The adoption is refused in memory. The pointer STAYS (Codex round-11): the slot is one
+    // origin-wide key, an edit in this tab says nothing about whose pointer is in it, and the run
+    // this one names is still the server's — an undo could resume it. This beat asserted the slot
+    // emptied, which encoded the defect. What proves the refusal is the absence of the column.
+    await waitFor(() => expect(document.querySelector('aside[aria-label="Execution"]')).toBeNull());
+    expect(storage.held()).not.toBeNull();
+    // Nothing was adopted: no execution column and no further dispatches.
     expect(document.querySelector('aside[aria-label="Execution"]')).toBeNull();
     expect(document.querySelector('aside[aria-label="Simulation"]')).not.toBeNull();
     expect(sandbox.calls.executeStep.length).toBe(stepCalls);

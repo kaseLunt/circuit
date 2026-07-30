@@ -49,12 +49,43 @@ function localToken(): string {
 const plan = localPlan();
 const token = localToken();
 const armInput = { plan, token };
+
+/** Plan B: the same strategy at a different borrow allocation — same steps, different money. */
+const graphB = flagshipGraph("10", 5_000);
+const planB: PlanSuccess = (() => {
+  const built = buildPlan(graphB, snapshot);
+  if (!built.ok) throw new Error("plan B failed to build");
+  return built;
+})();
+const tokenB: string = (() => {
+  const encoded = encodeShareGraph(graphB);
+  if (!encoded.ok) throw new Error("document B failed to encode");
+  return encoded.token;
+})();
+const armInputB = { plan: planB, token: tokenB };
 const FINGERPRINT = planHashOf(plan.steps);
 
 /** First flagship step whose output is attributed from Transfer logs — halt fixture site. */
 const transferStepIndex = plan.steps.findIndex(
   (step) => stepRequirementsOf(plan, step).output === "transfer-event",
 );
+
+/**
+ * The round-11 pointer contract, asserted by name.
+ *
+ * A retirement is IN MEMORY. The pointer is one origin-wide key every tab shares, so no decision
+ * path may empty it: proving THIS driver's key dead, or its plan stale, says nothing about whose
+ * pointer is in the slot now, and read-then-clear is not atomic. The beats using this helper each
+ * used to assert the slot emptied, which encoded the defect — the value being emptied could be a
+ * second tab's live pointer for a run mid-execution.
+ *
+ * Leaving it is safe by construction: adoption is gated on this driver's own retained fingerprint
+ * (round-9/round-10), so a stale value cannot be adopted, and the next `plan-ready` overwrites the
+ * slot with a live pointer.
+ */
+const expectPointerLeftInert = (held: string | null): void => {
+  expect(held).not.toBeNull();
+};
 
 function driverWith(
   sandbox = scriptedSandbox(),
@@ -294,7 +325,7 @@ describe("execute", () => {
     expect(sandbox.calls.executeStep.length).toBe(failedAt + 1);
   });
 
-  it("treats session expiry mid-run as abandoned and clears the pointer (T24)", async () => {
+  it("treats session expiry mid-run as abandoned and retires its binding (T24)", async () => {
     const sandbox = scriptedSandbox({
       onExecuteStep: (index) =>
         index === 4
@@ -313,7 +344,7 @@ describe("execute", () => {
     await driver.arm(armInput);
     await driver.execute();
     expect(driver.snapshot().machine.phase).toMatchObject({ kind: "abandoned", executedSteps: 4 });
-    expect(storage.held()).toBeNull();
+    expectPointerLeftInert(storage.held());
   });
 
   it("surfaces session-busy as a retryable refusal without losing the run", async () => {
@@ -444,7 +475,7 @@ describe("restore and lifecycle", () => {
     expect(snap.session?.baseBlockHash).toBeDefined();
   });
 
-  it("clears a pointer whose session the server no longer knows (owner-destroy silence)", async () => {
+  it("lands on a fresh session when the server no longer knows the key (owner-destroy silence)", async () => {
     const storage = memoryStorage();
     storage.write(
       encodePointer({
@@ -459,10 +490,12 @@ describe("restore and lifecycle", () => {
     const driver = new SandboxDriver({ transport: sandbox.transport, storage, now: () => 0 });
     await driver.restore(armInput);
     expect(driver.snapshot().machine.phase.kind).toBe("idle");
-    expect(storage.held()).toBeNull();
+    // One dead lookup, an in-memory retire, and the fresh-arm state — no loop and no error surface.
+    expect(sandbox.calls.session).toBe(1);
+    expectPointerLeftInert(storage.held());
   });
 
-  it("discards a pointer whose plan hash no longer matches the local document", async () => {
+  it("refuses a pointer whose plan hash no longer matches the local document", async () => {
     const storage = memoryStorage();
     storage.write(
       encodePointer({
@@ -478,15 +511,27 @@ describe("restore and lifecycle", () => {
     const driver = new SandboxDriver({ transport: sandbox.transport, storage, now: () => 0 });
     await driver.restore(armInput);
     expect(driver.snapshot().machine.phase.kind).toBe("idle");
-    expect(storage.held()).toBeNull();
+    // The FINGERPRINT vouches here (the document is unchanged); it is the pointer's plan HASH that
+    // the server's record contradicts, so the refusal comes from `resumePlan` after the lookup.
+    expect(sandbox.calls.session).toBe(1);
+    // Nothing is written back either way: read-then-clear is not atomic on a shared key, so the
+    // value read is not proof of the value there (round-11).
+    expectPointerLeftInert(storage.held());
   });
 
-  it("document mutation at ready disarms the run and retires the pointer (§2.4)", async () => {
-    const { driver, storage } = driverWith();
+  it("document mutation at ready disarms the run and retires its binding (§2.4)", async () => {
+    const { driver, storage, sandbox } = driverWith();
     await driver.arm(armInput);
+    const armed = storage.held();
     driver.documentMutated();
     expect(driver.snapshot().machine.phase.kind).toBe("idle");
-    expect(storage.held()).toBeNull();
+    // The BINDING retires, not the shared slot — another tab mid-run needs its own pointer to
+    // survive an edit made over here (round-11).
+    expect(storage.held()).toBe(armed);
+    // And the slot is corrected the one way it may be: the next arm overwrites it.
+    await driver.arm(armInput);
+    expect(sandbox.calls.plan).toBe(2);
+    expectPointerLeftInert(storage.held());
   });
 
   it("document mutation anywhere else is a no-op", async () => {
@@ -634,7 +679,7 @@ describe("reconcile paths (D3/D6)", () => {
     expect(sandbox.calls.executeStep.filter((index) => index === 3).length).toBe(1);
   });
 
-  it("session expiry during reconciliation abandons with the pointer cleared", async () => {
+  it("session expiry during reconciliation abandons with its binding retired", async () => {
     const sandbox = scriptedSandbox({
       onExecuteStep: (index) => (index === 2 ? { ok: true, result: unavailableAt(2) } : undefined),
       onReconcile: () => ({
@@ -651,7 +696,7 @@ describe("reconcile paths (D3/D6)", () => {
     await driver.arm(armInput);
     await driver.execute();
     expect(driver.snapshot().machine.phase).toMatchObject({ kind: "abandoned", executedSteps: 2 });
-    expect(storage.held()).toBeNull();
+    expectPointerLeftInert(storage.held());
   });
 
   it("a busy reconcile faults retryable and the retry finishes the run", async () => {
@@ -1072,13 +1117,16 @@ describe("restoration binds to the money-bearing fingerprint (hard-gate finding 
       now: () => 0,
     });
     await second.restore({ plan: planB, token: encodedB.token });
-    // The pointer is retired BEFORE any lookup: session A is never adopted under plan
-    // B's predictions, and nothing executes.
+    // Refused BEFORE any lookup: session A is never adopted under plan B's predictions, and
+    // nothing executes.
     expect(second.snapshot().machine.phase.kind).toBe("idle");
     expect(second.snapshot().machine.plan).toBeNull();
     expect(first.sandbox.calls.session).toBe(sessionCallsBefore);
     expect(first.sandbox.calls.executeStep.length).toBe(stepCallsBefore);
-    expect(first.storage.held()).toBeNull();
+    // And A's pointer SURVIVES the refusal, which is the round-11 half of the same story: this
+    // driver holds plan B, the pointer belongs to A's still-live run, and deleting it here is how
+    // a second tab's resumability used to disappear.
+    expectPointerLeftInert(first.storage.held());
   });
 
   it("still restores when the document's plan recomputes to the armed fingerprint", async () => {
@@ -1289,7 +1337,7 @@ describe("the wire-mismatch gate is durable across reload (thread 019fa749 findi
 });
 
 describe("restore is bound to the document generation (thread 019fa749 finding 2)", () => {
-  it("an edit while the lookup is in flight adopts nothing and retires the pointer", async () => {
+  it("an edit while the lookup is in flight adopts nothing", async () => {
     const first = driverWith();
     await first.driver.arm(armInput);
     await first.driver.execute();
@@ -1318,7 +1366,9 @@ describe("restore is bound to the document generation (thread 019fa749 finding 2
     expect(snap.machine.phase.kind).toBe("idle");
     expect(snap.machine.plan).toBeNull();
     expect(snap.fault).toBeNull();
-    expect(first.storage.held()).toBeNull();
+    // The run the pointer names is still the server's, and an undo could still resume it: nothing
+    // about a document edit here entitles this driver to empty the shared slot (round-11).
+    expectPointerLeftInert(first.storage.held());
     expect(first.sandbox.calls.executeStep.length).toBe(stepCalls);
   });
 });
@@ -1725,13 +1775,17 @@ describe("a refusal is classified by what it proves (round-8)", () => {
       stage: "plan",
       refusal: { kind: "unknown-session" },
     });
-    // A key the registry will not serve again is not worth resetting and not worth remembering.
+    // A key the registry will not serve again is not worth resetting. Nothing has been written to
+    // the slot in this beat — the run never reached `plan-ready` — and the retirement adds no write
+    // of its own, because a retirement is in-memory (round-11).
     expect(storage.held()).toBeNull();
 
     await driver.retry();
     expect(driver.snapshot().machine.phase.kind).toBe("ready");
     expect(sandbox.calls.create).toBe(2);
     expect(sandbox.calls.reset).toBe(0);
+    // The one write there is: the arm that succeeded, naming the session it actually opened.
+    expectPointerLeftInert(storage.held());
   });
 
   it("keeps a live key when the reset is refused BUSY, and converges when the mutex frees", async () => {
@@ -1792,20 +1846,6 @@ describe("a refusal is classified by what it proves (round-8)", () => {
  * adopted, and rendered, under plan B. The check now lives at the pairing itself.
  */
 describe("a retained hash binds only to the plan the pointer named (round-9)", () => {
-  /** Plan B: the same strategy at a different borrow allocation — same steps, different money. */
-  const graphB = flagshipGraph("10", 5_000);
-  const planB: PlanSuccess = (() => {
-    const built = buildPlan(graphB, snapshot);
-    if (!built.ok) throw new Error("plan B failed to build");
-    return built;
-  })();
-  const tokenB: string = (() => {
-    const encoded = encodeShareGraph(graphB);
-    if (!encoded.ok) throw new Error("document B failed to encode");
-    return encoded.token;
-  })();
-  const armInputB = { plan: planB, token: tokenB };
-
   /** A first-step revert, and a reset stage that answers out of contract exactly once. */
   function failedRunThenBrokenReset() {
     const base = wireAttributed(plan, 0);
@@ -1881,19 +1921,21 @@ describe("a retained hash binds only to the plan the pointer named (round-9)", (
     // binding is what refuses the adoption; the pointer is not the thing that had to go.
     expect(storage.held()).not.toBeNull();
 
-    // Where a stale pointer of our own DOES retire: the next mount, under `restore`, which owns the
-    // read and the refusal together and is entitled to clear what it just read.
+    // A remount refuses it too, and still writes nothing back (round-11 replaced round-9's clear
+    // here): the stale value is inert, not dangerous.
     const remounted = new SandboxDriver({ transport: sandbox.transport, storage, now: () => 5_000 });
     await remounted.restore(armInputB);
     expect(remounted.snapshot().machine.phase.kind).toBe("idle");
-    expect(storage.held()).toBeNull();
+    expectPointerLeftInert(storage.held());
 
-    // What remains on offer is a fresh arm of the document on the canvas, and it is B that arms.
+    // What remains on offer is a fresh arm of the document on the canvas, and it is B that arms —
+    // which is also the one operation that corrects the slot, by overwriting it.
     await driver.arm(armInputB);
     expect(driver.snapshot().machine.phase.kind).toBe("ready");
     const served = sandbox.planned();
     if (served === null) throw new Error("the scripted server planned nothing");
     expect(planHashOf(served.steps)).toBe(planHashOf(planB.steps));
+    expect(parsePointer(storage.held())?.fingerprint).toBe(planHashOf(planB.steps));
   });
 
   /**
@@ -2030,5 +2072,102 @@ describe("a retained hash binds only to the plan the pointer named (round-9)", (
     expect(storage.held()).not.toBeNull();
     expect(driver.snapshot().machine.phase.kind).not.toBe("idle");
     expect(driver.snapshot().fault).toBeNull();
+  });
+});
+
+
+/**
+ * Codex round-11 — THE SLOT IS SHARED, SO NO DECISION PATH EMPTIES IT.
+ *
+ * Production runs one origin-wide localStorage key. Every clear in this driver used to fire on a
+ * decision about THIS driver's own state — its machine was `ready`, its key was dead, the pointer it
+ * had just read did not vouch for its document — and none of those facts say anything about whose
+ * pointer is in the slot at the moment of the clear. Two tabs is ordinary use, no timing race
+ * required: tab A editing its canvas deleted tab B's pointer, and a mid-run tab B that then reloaded
+ * could no longer restore a run its server still held.
+ *
+ * The contract is now write-on-arm-only: `plan-ready` writes, nothing clears, and a stale value is
+ * inert because adoption is gated on the retained fingerprint. Both beats run TWO drivers over ONE
+ * storage, which is the only way to state the property at all.
+ */
+describe("the pointer slot is shared, so no decision path empties it (round-11)", () => {
+  /** Two tabs, two sessions, one origin: separate servers, one storage. */
+  function twoTabs() {
+    const storage = memoryStorage();
+    const serverB = scriptedSandbox();
+    const tabB = new SandboxDriver({ transport: serverB.transport, storage, now: () => 5_000 });
+    return { storage, serverB, tabB };
+  }
+
+  /** Tab B arms its own document and runs it, taking the slot with a pointer that is really B's. */
+  async function tabBTakesTheSlot(tabB: SandboxDriver, storage: { held(): string | null }) {
+    await tabB.arm(armInputB);
+    await tabB.execute();
+    expect(tabB.snapshot().machine.phase.kind).toBe("complete");
+    const pointerB = storage.held();
+    expect(parsePointer(pointerB)?.fingerprint).toBe(planHashOf(planB.steps));
+    return pointerB;
+  }
+
+  it("tab A's document edit leaves tab B's pointer, and B still restores its run", async () => {
+    const { storage, serverB, tabB } = twoTabs();
+    const serverA = scriptedSandbox();
+    const tabA = new SandboxDriver({ transport: serverA.transport, storage, now: () => 5_000 });
+
+    // Tab A arms and holds at ready; the slot is A's for the moment.
+    await tabA.arm(armInput);
+    expect(tabA.snapshot().machine.phase.kind).toBe("ready");
+    expect(parsePointer(storage.held())?.fingerprint).toBe(planHashOf(plan.steps));
+
+    const pointerB = await tabBTakesTheSlot(tabB, storage);
+
+    // The edit that used to delete it. A disarms — in memory, and only in memory.
+    tabA.documentMutated();
+    expect(tabA.snapshot().machine.phase.kind).toBe("idle");
+    expect(storage.held()).toBe(pointerB);
+
+    // And the property a user would feel: B reloads, and the run its server holds is still there.
+    const tabBReloaded = new SandboxDriver({
+      transport: serverB.transport,
+      storage,
+      now: () => 5_000,
+    });
+    await tabBReloaded.restore(armInputB);
+    expect(tabBReloaded.snapshot().machine.phase.kind).toBe("complete");
+    expect(tabBReloaded.snapshot().machine.record?.settled.length).toBe(planB.steps.length);
+    expect(tabBReloaded.snapshot().fault).toBeNull();
+  });
+
+  it("a dead-key answer landing in tab A leaves tab B's pointer, and B still restores", async () => {
+    const { storage, serverB, tabB } = twoTabs();
+    // A's plan call is held open, so the answer that kills A's key arrives AFTER B owns the slot.
+    const serverA = heldSandbox("plan", {
+      onPlan: () => ({ ok: false, refusal: { kind: "unknown-session" } }),
+    });
+    const tabA = new SandboxDriver({ transport: serverA.transport, storage, now: () => 5_000 });
+    const arming = tabA.arm(armInput);
+    await serverA.asked;
+
+    const pointerB = await tabBTakesTheSlot(tabB, storage);
+
+    serverA.release();
+    await arming;
+
+    // A's key is dead and A has retired it — in memory. The slot never belonged to that decision.
+    expect(tabA.snapshot().fault).toMatchObject({
+      kind: "refusal",
+      stage: "plan",
+      refusal: { kind: "unknown-session" },
+    });
+    expect(storage.held()).toBe(pointerB);
+
+    const tabBReloaded = new SandboxDriver({
+      transport: serverB.transport,
+      storage,
+      now: () => 5_000,
+    });
+    await tabBReloaded.restore(armInputB);
+    expect(tabBReloaded.snapshot().machine.phase.kind).toBe("complete");
+    expect(tabBReloaded.snapshot().fault).toBeNull();
   });
 });

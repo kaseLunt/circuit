@@ -125,6 +125,11 @@ export interface DriverSnapshot {
   readonly nowMs: number;
 }
 
+/**
+ * The pointer slot. `clear` exists for owner-initiated forgetting (and is exercised by
+ * `localPointerStorage`'s own tests); the DRIVER never calls it — see the narrowed field on
+ * `SandboxDriver`, which is what keeps that true.
+ */
 export interface PointerStorage {
   read(): string | null;
   write(value: string): void;
@@ -319,7 +324,14 @@ const isPlanStageRefusal = (
 
 export class SandboxDriver {
   private readonly transport: SandboxTransport;
-  private readonly storage: PointerStorage;
+  /**
+   * The pointer is OVERWRITE-ON-ARM-ONLY (Codex round-11), and the narrowed type is the
+   * enforcement rather than a convention: `clear` is unreachable from inside the driver, so no
+   * future decision path can empty an origin-wide slot it cannot prove it owns. Every retirement
+   * is in-memory; a stale value is inert by construction, because adoption is gated on the
+   * retained fingerprint and the next `plan-ready` writes over it.
+   */
+  private readonly storage: Pick<PointerStorage, "read" | "write">;
   private readonly now: () => number;
   private readonly listeners = new Set<() => void>();
 
@@ -535,8 +547,10 @@ export class SandboxDriver {
   }
 
   /**
-   * Forget a key the registry will not serve again. The next attempt creates a fresh session; the
-   * pointer goes with it, because a pointer naming a dead key can resume nothing.
+   * Forget a key the registry will not serve again. IN MEMORY only: proving THIS driver's key dead
+   * proves nothing about what the shared slot now holds (Codex round-11). Retiring the retained
+   * triple is what stops adoption — `rehydrate`'s fallback gate reads that triple and refuses once
+   * it is null — and the next `plan-ready` overwrites the slot with a live pointer.
    */
   private retireSession(): void {
     this.sessionKey = null;
@@ -544,7 +558,6 @@ export class SandboxDriver {
     this.forkDirty = false;
     this.retainedPlanHash = null;
     this.retainedFingerprint = null;
-    this.storage.clear();
   }
 
   /**
@@ -829,9 +842,10 @@ export class SandboxDriver {
     }
     const refusal = parsed.value;
     if (refusal.kind === "session-expired") {
+      // The binding retires; the shared slot is not ours to empty (round-11). The run lands on
+      // `abandoned` from the refusal's own evidence, which reads nothing from storage.
       this.retainedPlanHash = null;
       this.retainedFingerprint = null;
-      this.storage.clear();
     }
     const result = reduce(this.machine, { type: "step-refused", refusal });
     this.machine = result.machine;
@@ -918,9 +932,9 @@ export class SandboxDriver {
     }
     const refusal = parsed.value;
     if (refusal.kind === "session-expired") {
+      // Binding only, as above (round-11).
       this.retainedPlanHash = null;
       this.retainedFingerprint = null;
-      this.storage.clear();
       // `session-lost` is legal from every reconcile-gated phase (SESSION_LOSABLE).
       this.dispatch({ type: "session-lost", executedSteps: refusal.executedSteps });
       return "stop";
@@ -1031,12 +1045,13 @@ export class SandboxDriver {
         outcome.refusal.refusal === "unknown-session"
       ) {
         // Owner-destroy silence is deliberate (D8): the key is simply unknown; the
-        // designed story is a fresh session, not an error.
+        // designed story is a fresh session, not an error. The slot keeps whatever it holds
+        // (round-11) — a dead pointer of ours costs one lookup at the next mount and is then
+        // overwritten by the arm that follows.
         this.sessionKey = null;
         this.session = null;
         this.retainedPlanHash = null;
         this.retainedFingerprint = null;
-        this.storage.clear();
         this.machine = createExecutionMachine({ mode: "sandbox" });
         this.plannedAtMs = null;
         this.notify();
@@ -1050,7 +1065,6 @@ export class SandboxDriver {
         // the recompute gate, and evidence of that is never swallowed — it faults.
         this.retainedPlanHash = null;
         this.retainedFingerprint = null;
-        this.storage.clear();
         this.notify();
         return false;
       }
@@ -1071,7 +1085,6 @@ export class SandboxDriver {
       this.session = null;
       this.retainedPlanHash = null;
       this.retainedFingerprint = null;
-      this.storage.clear();
       this.notify();
       return false;
     }
@@ -1115,7 +1128,10 @@ export class SandboxDriver {
       // definition. A mismatch retires the pointer silently (the stale-pointer ruling):
       // the run it names belongs to a document no longer on the canvas.
       if (!fingerprintBinds(pointer.fingerprint, input.plan)) {
-        this.storage.clear();
+        // Nothing is adopted, and nothing is written back: read-then-clear is not atomic on an
+        // origin-wide key, so this driver cannot prove the value it just read is still the value
+        // there — or was ever its own (round-11). An unvouched-for pointer is inert; the next arm
+        // overwrites it.
         return;
       }
       this.sessionKey = pointer.sessionKey;
@@ -1133,7 +1149,6 @@ export class SandboxDriver {
         this.retainedPlanHash = null;
         this.retainedFingerprint = null;
         this.plannedAtMs = null;
-        this.storage.clear();
         this.notify();
         resumed = false;
       }
@@ -1170,11 +1185,12 @@ export class SandboxDriver {
     if (this.machine.phase.kind === "ready") {
       this.dispatch({ type: "document-mutated" });
       this.plannedAtMs = null;
-      // The session fork is untouched (nothing dispatched from ready), so the key is kept
-      // for reuse; only the resumable-run pointer retires with the plan it named.
+      // The session fork is untouched (nothing dispatched from ready), so the key is kept for
+      // reuse; the run's BINDING retires with the plan it named. Not the shared slot: this
+      // driver's in-memory `ready` state says nothing about whose pointer is in it, and another
+      // tab mid-run needs its own pointer to survive an edit made over here (round-11).
       this.retainedPlanHash = null;
       this.retainedFingerprint = null;
-      this.storage.clear();
       this.notify();
       return;
     }
