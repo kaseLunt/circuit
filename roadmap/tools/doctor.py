@@ -268,17 +268,30 @@ def transition_currency_errors(
         status_field(before, "project_state") != "complete"
         and status_field(after, "project_state") == "complete"
     )
+    errors: list[str] = []
     if phase_exited or completed:
         # Only the phase being CLOSED re-arms — the before snapshot's active_phase (on
         # completion the pointer stays as the last phase, so old_phase names it). Phases
         # that exited earlier already passed through their own strict transition and are
         # immutable historical records (D-006); later-phase drift over shared inputs is
         # legitimate there and must not block completion (Codex round 3).
-        for work_id, (path, data, status, phase) in after_work.items():
-            if status == "achieved" and phase == old_phase:
-                strict[work_id] = (path, data)
+        # Selection is from the BEFORE snapshot (Codex round 4): reading the after
+        # snapshot's status/phase let the same commit reclassify a drifted achieved item
+        # — phase moved earlier, achieved flipped to archived — right out of the strict
+        # set. What the item claimed BEFORE the transition decides that it owes currency
+        # AT the transition; its after-snapshot metadata cannot resign the debt.
+        for work_id, (_path, _data, status, phase) in before_work.items():
+            if status != "achieved" or phase != old_phase:
+                continue
+            survivor = after_work.get(work_id)
+            if survivor is None:
+                errors.append(
+                    f"terminal transition re-arms D-006 for {work_id}: the achieved work "
+                    "object of the exiting phase is absent from the transition's result"
+                )
+                continue
+            strict[work_id] = (survivor[0], survivor[1])
 
-    errors: list[str] = []
     for work_id, (path, data) in sorted(strict.items()):
         try:
             receipts = string_list(data, "evidence_receipts", path)

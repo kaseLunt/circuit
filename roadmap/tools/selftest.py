@@ -1202,19 +1202,23 @@ def test_completion_scopes_re_arm(root: Path) -> None:
     # Negative control: the EXITING phase's receipt is stale (post-receipt drift) — the
     # same completion must block on W1, proving the re-arm still has teeth where it aims.
     write(repo / "src" / "allowed.txt", "drift after the exiting phase receipt\n")
-    commit_all(repo, "synthetic exiting-phase drift")
-    write(
-        repo / "roadmap" / "ROADMAP.md",
-        read(repo / "roadmap" / "ROADMAP.md").replace(
-            "| P1 | Later | Test | **In progress** |", "| P1 | Later | Test | Done |"
-        ),
-    )
-    write(
-        repo / "roadmap" / "STATUS.md",
-        read(repo / "roadmap" / "STATUS.md").replace(
-            "project_state: active", "project_state: complete"
-        ),
-    )
+    evasion_base = commit_all(repo, "synthetic exiting-phase drift")
+
+    def stage_completion() -> None:
+        write(
+            repo / "roadmap" / "ROADMAP.md",
+            read(repo / "roadmap" / "ROADMAP.md").replace(
+                "| P1 | Later | Test | **In progress** |", "| P1 | Later | Test | Done |"
+            ),
+        )
+        write(
+            repo / "roadmap" / "STATUS.md",
+            read(repo / "roadmap" / "STATUS.md").replace(
+                "project_state: active", "project_state: complete"
+            ),
+        )
+
+    stage_completion()
     must(git(repo, "add", "roadmap"), "stage stale completion")
     stale = tool(repo, "scope_gate.py", env={"CONTROL_PLANE_OWNER_REVIEWED": "1"})
     check(
@@ -1223,6 +1227,44 @@ def test_completion_scopes_re_arm(root: Path) -> None:
         and "terminal transition" in output(stale)
         and "W1" in output(stale),
         output(stale),
+    )
+    reset(repo, evasion_base)
+
+    # EVASION 1 (Codex round 4): reclassify the drifted item's PHASE in the completion
+    # commit — selection from the before snapshot must still demand its currency.
+    stage_completion()
+    write(
+        repo / "roadmap" / "work" / "W1.md",
+        read(repo / "roadmap" / "work" / "W1.md").replace("phase: P1", "phase: P0"),
+    )
+    must(git(repo, "add", "roadmap"), "stage phase-reclassify evasion")
+    rephased = tool(repo, "scope_gate.py", env={"CONTROL_PLANE_OWNER_REVIEWED": "1"})
+    check(
+        "completion:phase-reclassify-still-strict",
+        rephased.returncode == 1
+        and "terminal transition" in output(rephased)
+        and "W1" in output(rephased),
+        output(rephased),
+    )
+    reset(repo, evasion_base)
+
+    # EVASION 2 (Codex round 4): flip the drifted item to archived in the same commit —
+    # what it claimed BEFORE the transition decides that it owes currency AT it.
+    stage_completion()
+    write(
+        repo / "roadmap" / "work" / "W1.md",
+        read(repo / "roadmap" / "work" / "W1.md").replace(
+            "status: achieved", "status: archived"
+        ),
+    )
+    must(git(repo, "add", "roadmap"), "stage archive evasion")
+    archived = tool(repo, "scope_gate.py", env={"CONTROL_PLANE_OWNER_REVIEWED": "1"})
+    check(
+        "completion:archive-still-strict",
+        archived.returncode == 1
+        and "terminal transition" in output(archived)
+        and "W1" in output(archived),
+        output(archived),
     )
 
 
