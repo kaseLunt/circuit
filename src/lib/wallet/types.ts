@@ -29,6 +29,27 @@ export interface WalletSession {
 }
 
 /**
+ * WHO a readiness reading is for: the address it is about, and the connector the session
+ * arrived by. `WalletSession` satisfies it structurally, which is the only way one is ever
+ * built — a target is never assembled from parts.
+ *
+ * `connectorId` rides along for exactly ONE purpose: choosing which readiness SOURCE may
+ * answer (`src/lib/live/readiness-source.ts`). Read against treatment §1.2's last row — "no
+ * gate, no money-math and no execution state branches on the connector id" — that row still
+ * holds: this selects the TRANSPORT a reading arrives BY, not a money-math branch and not a
+ * verdict. Nothing downstream sees the id; it decides which source is even allowed to speak.
+ *
+ * The invariant it protects: FABRICATED READINGS MAY ONLY EVER ATTACH TO FABRICATED WALLETS.
+ * The demo scenario table exists so the hermetic build can walk SPEC §3 step 7 with no chain;
+ * a real wallet reaching it would clear the Live gate on invented cleanliness, which is worse
+ * than any refusal. So the id is carried to the one decision that keeps them apart.
+ */
+export interface ReadingTarget {
+  readonly address: Address;
+  readonly connectorId: string;
+}
+
+/**
  * `eth_getCode(address)` at connect, as a three-valued reading rather than a boolean.
  *
  * "Unknown" is a first-class state because a missing source renders an explicit unavailable

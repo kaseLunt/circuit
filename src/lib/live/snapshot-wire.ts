@@ -327,9 +327,29 @@ export interface LiveCapture {
   readonly footprint: WalletFootprintReading;
 }
 
+/**
+ * WHY a readiness call produced no reading — typed, so a refusal is a designed state rather
+ * than a string that happened to arrive (the wallet router's own doctrine, applied to the
+ * client half). Every arm renders its `reason` and the gate refuses; the kind exists so a
+ * test can assert WHICH absence it is proving.
+ */
+export type LiveReadinessRefusalKind =
+  /** The wire did not parse — a field is missing or mis-shaped (this module's refusals). */
+  | "malformed-wire"
+  /** The transport itself failed: no response, or one that is not an object. */
+  | "call-failed"
+  /** The router answered its own typed refusal (no live RPC configured, capture refused). */
+  | "refused-upstream"
+  /** The demo source has no scenario for this address, so it declines to invent one. */
+  | "not-in-demo-scenario";
+
 export type ParsedLiveReadiness =
   | { readonly ok: true; readonly capture: LiveCapture }
-  | { readonly ok: false; readonly reason: string };
+  | {
+      readonly ok: false;
+      readonly kind: LiveReadinessRefusalKind;
+      readonly reason: string;
+    };
 
 /**
  * Strict-parse a readiness payload and rebuild the block-pinned `ChainSnapshot`.
@@ -448,7 +468,9 @@ export function parseLiveReadiness(value: unknown): ParsedLiveReadiness {
       },
     };
   } catch (error) {
-    if (error instanceof WireRefusalError) return { ok: false, reason: error.message };
+    if (error instanceof WireRefusalError) {
+      return { ok: false, kind: "malformed-wire", reason: error.message };
+    }
     throw error;
   }
 }

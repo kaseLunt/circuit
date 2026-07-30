@@ -72,6 +72,7 @@ import {
 import { configuredDemoSeam } from "../../lib/wallet/seam";
 import { demoLiveCaptureSource } from "../../lib/live/demo-capture";
 import { liveSeam, trpcLiveCaptureSource } from "../../lib/live/live-transport";
+import { routedCaptureSource, routedSeam } from "../../lib/live/readiness-source";
 import { useLiveSimulation, type LiveSimulationView } from "./live-simulation";
 import { ConnectSurface, type ComposerMode } from "../wallet/connect-surface";
 import { executingBlockIdOf, runLocksDocument, RUN_LOCK_REASON } from "../tx/step-status";
@@ -140,7 +141,7 @@ export function useLiveGate(
 function ComposerBody({ snapshot }: { readonly snapshot: SnapshotState }) {
   const { simulation, simulationPending } = useSimulation(snapshot);
   const wallet = useWalletBoundary();
-  const sessionAddress = wallet.session === null ? null : wallet.session.address;
+  const session = wallet.session;
   const liveSim = useLiveSimulation(liveCaptureSource, wallet.monotonicNow);
   const live = useLiveGate(snapshot, liveSim);
   // SPEC §3 step 4's verdict, derived once beside the simulation and handed to BOTH the
@@ -191,9 +192,7 @@ function ComposerBody({ snapshot }: { readonly snapshot: SnapshotState }) {
           mode={live.mode}
           liveRefusal={live.refusal}
           liveSimulationPhase={liveSim.phase}
-          onLiveSimulate={
-            sessionAddress === null ? null : () => liveSim.simulate(sessionAddress)
-          }
+          onLiveSimulate={session === null ? null : () => liveSim.simulate(session)}
           driver={driver}
         />
       }
@@ -279,33 +278,49 @@ function ComposerFrame({
  * The live capture source and the connect seam this build uses — ONE composition rule for
  * both, so the readings and the snapshot can never come from different worlds:
  *
- *  - A demo/CI build (mock accounts configured) reads the scenario table and the
- *    committed-reads-log demo capture — hermetic, no chain, no secrets.
- *  - A production build composes the REAL wallet-router procedure (Codex D-011 F2):
- *    `eth_getCode` + the §2 footprint + the block-pinned capture, all through our
- *    configured RPC. With no `LIVE_CHAIN_RPC_URL` in the deployment, the router answers
- *    its stated refusal, the seam reads as unavailable, and the gate REFUSES — SPEC §5's
- *    explicit absence, never a permissive default.
- *  - `NEXT_PUBLIC_WALLET_LIVE_SOURCE=rpc` forces the real procedure even with mock
- *    accounts configured — the fork e2e rig's posture, where the mock connector supplies
- *    the SESSION and the wallet router performs the CAPTURE against the pinned fork
- *    upstream, which is what makes that suite the authoritative proof of this path.
+ *  - The RPC arm is the REAL wallet-router procedure (Codex D-011 F2): `eth_getCode` + the §2
+ *    footprint + the block-pinned capture, all through our configured RPC. With no
+ *    `LIVE_CHAIN_RPC_URL` in the deployment, the router answers its stated refusal, the seam
+ *    reads as unavailable, and the gate REFUSES — SPEC §5's explicit absence, never a
+ *    permissive default. It is always composed, because it is the DEFAULT arm.
+ *  - The demo arm exists only in a build that configured mock accounts, and only when the
+ *    build has not forced RPC: the scenario table plus the committed-reads-log capture —
+ *    hermetic, no chain, no secrets.
+ *  - `NEXT_PUBLIC_WALLET_LIVE_SOURCE=rpc` drops the demo arm entirely — the fork e2e rig's
+ *    posture, where the mock connector supplies the SESSION and the wallet router performs
+ *    the CAPTURE against the pinned fork upstream, which is what makes that suite the
+ *    authoritative proof of this path.
+ *
+ * WHICH ARM ANSWERS IS PER SESSION, NOT PER BUILD (Codex round-2 finding 2). A mock-enabled
+ * build still exposes the `injected` connector — deliberately: a developer running the demo
+ * build must be able to connect a real wallet and see the honest refusal rather than have the
+ * control hidden from them. So `routedCaptureSource`/`routedSeam` send every non-mock session
+ * to the RPC arm regardless of any public flag, and the demo arm answers for mock-connector
+ * sessions alone. See `src/lib/live/readiness-source.ts` for why that is not the connector
+ * branch treatment §1.2 forbids: it selects the transport a reading arrives by, and the
+ * invariant it protects is that fabricated readings may only ever attach to fabricated
+ * wallets.
  */
 const hasMockAccounts = MOCK_ACCOUNTS.length > 0;
 const forceRpcCapture = process.env.NEXT_PUBLIC_WALLET_LIVE_SOURCE === "rpc";
-const liveCaptureSource =
-  hasMockAccounts && !forceRpcCapture
-    ? demoLiveCaptureSource({
-        codeBearing: MOCK_CODE_BEARING_ACCOUNTS,
-        occupied: MOCK_OCCUPIED_ACCOUNTS,
-      })
-    : trpcLiveCaptureSource();
-const demoSeamOrDefault = forceRpcCapture
-  ? liveSeam(liveCaptureSource)
-  : (configuredDemoSeam(
-      { codeBearing: MOCK_CODE_BEARING_ACCOUNTS, occupied: MOCK_OCCUPIED_ACCOUNTS },
-      hasMockAccounts,
-    ) ?? liveSeam(liveCaptureSource));
+const demoScenarios = {
+  accounts: MOCK_ACCOUNTS,
+  codeBearing: MOCK_CODE_BEARING_ACCOUNTS,
+  occupied: MOCK_OCCUPIED_ACCOUNTS,
+};
+const rpcCaptureSource = trpcLiveCaptureSource();
+// ONE condition for both demo arms, computed once: a capture arm and a readings arm that
+// could disagree about whether the demo source exists would pair one world's footprint with
+// another world's snapshot — the failure the "one composition rule" above exists to prevent.
+const demoArmed = hasMockAccounts && !forceRpcCapture;
+const liveCaptureSource = routedCaptureSource({
+  demo: demoArmed ? demoLiveCaptureSource(demoScenarios) : null,
+  rpc: rpcCaptureSource,
+});
+const walletSeam = routedSeam({
+  demo: configuredDemoSeam(demoScenarios, demoArmed),
+  rpc: liveSeam(rpcCaptureSource),
+});
 
 export function SandboxComposer() {
   const [store, setStore] = useState(flagshipStore);
@@ -323,7 +338,7 @@ export function SandboxComposer() {
   }, []);
 
   return (
-    <WalletProvider seam={demoSeamOrDefault}>
+    <WalletProvider seam={walletSeam}>
       <ComposerStoreProvider store={store}>
         <ComposerFrame snapshot={snapshot} arrival={arrival} />
       </ComposerStoreProvider>

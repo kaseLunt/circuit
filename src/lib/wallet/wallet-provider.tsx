@@ -153,42 +153,51 @@ function BoundaryBridge({
   );
   const session = connection.kind === "connected" ? connection.session : null;
   const address = session === null ? null : session.address;
+  // The connector rides along to the seam because WHICH source may answer is a fact about the
+  // session's transport (src/lib/live/readiness-source.ts) — it is not read as a gate input
+  // here or anywhere below.
+  const connectorId = session === null ? null : session.connectorId;
+  const identity = session === null ? null : `${session.address}@${session.connectorId}`;
 
   const [readings, setReadings] = useState<WalletSeamReadings>(() =>
     unavailableReadings(SEAM_PENDING_REASON),
   );
-  // The address the current readings belong to, tracked as RENDER-TIME state adjustment (the
+  // The IDENTITY the current readings belong to, tracked as RENDER-TIME state adjustment (the
   // pattern this codebase uses instead of a setState in an effect body). The readings reset
-  // to the explicit unknown state in the same render the address changes, so no frame ever
+  // to the explicit unknown state in the same render the identity changes, so no frame ever
   // pairs one wallet's footprint with another's address — the split-position mistake the
   // whole seam exists to refuse. The effect below only adopts what the async read returns.
-  const [readFor, setReadFor] = useState<string | null>(address);
-  if (readFor !== address) {
-    setReadFor(address);
+  //
+  // Address AND connector, because the two together are what a reading is about: the same
+  // address arriving by a different transport is answered by a different source, so carrying
+  // the old reading across would be exactly the mismatch this reset exists to prevent.
+  const [readFor, setReadFor] = useState<string | null>(identity);
+  if (readFor !== identity) {
+    setReadFor(identity);
     setReadings(unavailableReadings(SEAM_PENDING_REASON));
   }
   // A reading that resolves for a wallet that has since changed is DISCARDED. `live` covers
-  // unmount and re-run; the address comparison covers the case where a stale promise settles
+  // unmount and re-run; the identity comparison covers the case where a stale promise settles
   // after the identity moved on.
   const liveRead = useRef<string | null>(null);
   useEffect(() => {
-    liveRead.current = address;
-    if (address === null) return;
+    liveRead.current = identity;
+    if (address === null || connectorId === null) return;
     let current = true;
     seam
-      .read(address)
+      .read({ address, connectorId })
       .then((next) => {
-        if (current && liveRead.current === address) setReadings(next);
+        if (current && liveRead.current === identity) setReadings(next);
       })
       .catch((cause: unknown) => {
-        if (!current || liveRead.current !== address) return;
+        if (!current || liveRead.current !== identity) return;
         const detail = cause instanceof Error ? cause.message : String(cause);
         setReadings(unavailableReadings(`the wallet's chain readings failed: ${detail}`));
       });
     return () => {
       current = false;
     };
-  }, [address, seam]);
+  }, [address, connectorId, identity, seam]);
 
   const choices = useMemo(
     () => connectors.map((connector) => ({ id: connector.id, name: connector.name })),

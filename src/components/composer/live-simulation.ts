@@ -24,6 +24,7 @@ import { planHashOf } from "../../lib/execution/plan-hash";
 import type { LiveCaptureSource } from "../../lib/live/live-transport";
 import type { LiveCapture } from "../../lib/live/snapshot-wire";
 import type { LiveSimulationStanding, LiveSnapshotIdentity } from "../../lib/wallet/gate";
+import type { ReadingTarget } from "../../lib/wallet/types";
 import { useComposerStore } from "../../app/store/composer-provider";
 
 export type LiveStandingOutcome =
@@ -93,7 +94,12 @@ export interface LiveSimulationView {
   readonly standing: LiveSimulationStanding | null;
   readonly currentPlanHash: Hex | null;
   readonly currentSnapshot: LiveSnapshotIdentity | null;
-  simulate(address: Address): void;
+  /**
+   * The whole session target, not just its address: the capture source routes on the
+   * connector (`src/lib/live/readiness-source.ts`), so a simulation is always run by the
+   * source that is allowed to answer for the wallet in hand.
+   */
+  simulate(target: ReadingTarget): void;
 }
 
 export function useLiveSimulation(
@@ -122,19 +128,24 @@ export function useLiveSimulation(
   const flight = useRef(0);
 
   const simulate = useCallback(
-    (address: Address) => {
+    (target: ReadingTarget) => {
       const ticket = flight.current + 1;
       flight.current = ticket;
       setPhase({ kind: "capturing" });
       void source
-        .capture(address)
+        .capture(target)
         .then((outcome) => {
           if (flight.current !== ticket) return;
           if (!outcome.ok) {
             setPhase({ kind: "refused", reason: outcome.reason });
             return;
           }
-          const minted = liveStandingOf(docRef.current, outcome.capture, address, monotonicNow());
+          const minted = liveStandingOf(
+            docRef.current,
+            outcome.capture,
+            target.address,
+            monotonicNow(),
+          );
           if (!minted.ok) {
             setPhase({ kind: "refused", reason: minted.reason });
             return;

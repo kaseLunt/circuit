@@ -17,10 +17,14 @@ import { createConfig, http, type CreateConnectorFn } from "wagmi";
 import { mainnet } from "wagmi/chains";
 import { injected, mock } from "wagmi/connectors";
 import { getAddress, isAddress, type Address, type Transport } from "viem";
+import { mockConnectorIdAt } from "./connectors";
 
-/** wagmi's own connector ids, named here so the chrome and the tests share one spelling. */
-export const INJECTED_CONNECTOR_ID = "injected";
-export const MOCK_CONNECTOR_ID = "mock";
+/**
+ * The id vocabulary lives in `./connectors.ts` — wagmi-free, so a module that only needs to
+ * ask whether a session came from a fabricated wallet does not import the connector stack to
+ * find out. Re-exported here because this file is where a reader looks for it.
+ */
+export { INJECTED_CONNECTOR_ID, MOCK_CONNECTOR_ID, isMockConnectorId } from "./connectors";
 
 /**
  * Demo/CI accounts for the mock connector, comma-separated, checksummed or lowercase.
@@ -86,7 +90,7 @@ function mockConnectorFor(account: Address, index: number): CreateConnectorFn {
   if (index === 0) return base;
   return (config) => ({
     ...base(config),
-    id: `${MOCK_CONNECTOR_ID}-${index + 1}`,
+    id: mockConnectorIdAt(index),
     name: `Mock Wallet ${index + 1}`,
   });
 }

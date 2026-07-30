@@ -125,9 +125,13 @@ describe("wireLiveCaptureOf → parseLiveReadiness round trip", () => {
 });
 
 describe("parseLiveReadiness — malformed wire refuses with the path named", () => {
-  it("refuses a non-object payload", () => {
+  it("refuses a non-object payload, naming the kind of absence as well as the reason", () => {
     const parsed = parseLiveReadiness("nope");
-    expect(parsed).toEqual({ ok: false, reason: "live capture wire field readiness is not an object" });
+    expect(parsed).toEqual({
+      ok: false,
+      kind: "malformed-wire",
+      reason: "live capture wire field readiness is not an object",
+    });
   });
 
   it("refuses an unknown code status", () => {

@@ -17,14 +17,20 @@
  *    different moments' chain state.
  */
 import { createTRPCClient, httpLink } from "@trpc/client";
-import type { Address } from "viem";
 import type { WalletRouter } from "../../server/trpc/wallet-router";
 import { unavailableReadings, type WalletSeamSource } from "../wallet/seam";
+import type { ReadingTarget } from "../wallet/types";
 import { parseLiveReadiness, type ParsedLiveReadiness } from "./snapshot-wire";
 
-/** One readiness call: the seam readings and the block-pinned capture, or a stated refusal. */
+/**
+ * One readiness call: the seam readings and the block-pinned capture, or a stated refusal.
+ *
+ * The argument is a `ReadingTarget` rather than a bare address because WHICH source is
+ * allowed to answer is a fact about the session's connector, decided once in
+ * `./readiness-source.ts`. This source ignores the id — it reads the chain either way.
+ */
 export interface LiveCaptureSource {
-  capture(address: Address): Promise<ParsedLiveReadiness>;
+  capture(target: ReadingTarget): Promise<ParsedLiveReadiness>;
 }
 
 export const WALLET_TRPC_ENDPOINT = "/api/wallet";
@@ -33,24 +39,30 @@ export const WALLET_TRPC_ENDPOINT = "/api/wallet";
 export function trpcLiveCaptureSource(url: string = WALLET_TRPC_ENDPOINT): LiveCaptureSource {
   const client = createTRPCClient<WalletRouter>({ links: [httpLink({ url })] });
   return {
-    async capture(address) {
+    async capture(target) {
       let response: unknown;
       try {
-        response = await client.readiness.query({ address });
+        response = await client.readiness.query({ address: target.address });
       } catch (error) {
         return {
           ok: false,
+          kind: "call-failed",
           reason: `the live readiness call failed: ${error instanceof Error ? error.message : String(error)}`,
         };
       }
       if (typeof response !== "object" || response === null) {
-        return { ok: false, reason: "the live readiness response is not an object" };
+        return {
+          ok: false,
+          kind: "call-failed",
+          reason: "the live readiness response is not an object",
+        };
       }
       const envelope = response as { ok?: unknown; readiness?: unknown; refusal?: unknown };
       if (envelope.ok !== true) {
         const refusal = envelope.refusal as { reason?: unknown } | undefined;
         return {
           ok: false,
+          kind: "refused-upstream",
           reason:
             typeof refusal?.reason === "string"
               ? refusal.reason
@@ -69,8 +81,8 @@ export function trpcLiveCaptureSource(url: string = WALLET_TRPC_ENDPOINT): LiveC
  */
 export function liveSeam(source: LiveCaptureSource): WalletSeamSource {
   return {
-    async read(address) {
-      const outcome = await source.capture(address);
+    async read(target) {
+      const outcome = await source.capture(target);
       if (!outcome.ok) return unavailableReadings(outcome.reason);
       return { code: outcome.capture.code, footprint: outcome.capture.footprint };
     },
