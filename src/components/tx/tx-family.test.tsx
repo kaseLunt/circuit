@@ -8,11 +8,12 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { Wallet } from "lucide-react";
 import type { Hex } from "viem";
+import type { StrategyGraph } from "../../core/graph";
 import { buildPlan, type PlanSuccess } from "../../core/plan";
 import { riskLedger, simulate } from "../../core/risk";
 import { formatUnits, formatWadAsPercent } from "../../core/format";
 import { encodeShareGraph } from "../../lib/share/encode";
-import { flagshipGraph } from "../../../tests/helpers/graphs";
+import { carryGraph, flagshipGraph, mixedLoopAndCarryGraph } from "../../../tests/helpers/graphs";
 import { fixtureSnapshot } from "../../../tests/helpers/chain-snapshot";
 import {
   memoryStorage,
@@ -26,6 +27,7 @@ import {
 } from "../../lib/execution/machine";
 import { planHashOf } from "../../lib/execution/plan-hash";
 import { stepResultFactOf } from "../../lib/execution/resume";
+import type { SimulationResult } from "../../lib/strategy/types";
 import type { ExecutionEvent } from "../../lib/execution/types";
 import { receiptMinter } from "../../lib/execution/attribution";
 import { SANDBOX_OUTPUT_TOLERANCE } from "../../lib/execution/tolerance";
@@ -344,6 +346,76 @@ describe("ExecutionFlow — the container and its narrator", () => {
     expect(screen.getByText(/forked-mainnet demo/)).not.toBeNull();
     // The receipt's evidence slots are disclosure-mode too (gif-capture defect).
     expect(container.querySelectorAll("button[aria-expanded]").length).toBeGreaterThan(0);
+    // The liquidation line names the pair the level is a level OF (Codex W09 finding 2).
+    expect(container.textContent).toContain("Liquidates if weETH/WETH falls to");
+  });
+});
+
+/**
+ * Codex W09 round-1 finding 2, on the review surface. The receipt printed a generic
+ * "collateral/debt oracle ratio" sentence, so a weETH/USDC carry's receipt and a weETH/WETH
+ * loop's receipt were the same sentence with a different number in it — on the one surface a
+ * user reads AFTER committing.
+ *
+ * Every run below goes through the real driver over the scripted wire, so the receipt under
+ * test is one the machine actually produced, and the simulation beside it is the one
+ * `core/risk.ts` derives for the SAME document.
+ */
+describe("the receipt's liquidation pair (Codex W09 finding 2)", () => {
+  async function completedReceipt(
+    plannedGraph: StrategyGraph,
+  ): Promise<{ container: HTMLElement; simulation: SimulationResult }> {
+    const built = buildPlan(plannedGraph, snapshot);
+    if (!built.ok) throw new Error("fixture graph failed to plan");
+    const encoded = encodeShareGraph(plannedGraph);
+    if (!encoded.ok) throw new Error("fixture graph failed to encode");
+    const driver = new SandboxDriver({
+      transport: scriptedSandbox().transport,
+      storage: memoryStorage(),
+      now: () => 1_000,
+    });
+    await driver.arm({ plan: built, token: encoded.token });
+    await driver.execute();
+    const simulation = simulate(plannedGraph, snapshot, {});
+    const { container } = render(
+      <ExecutionFlow
+        {...flowProps}
+        plan={built}
+        simulation={simulation}
+        snapshot={driver.snapshot()}
+      />,
+    );
+    return { container, simulation };
+  }
+
+  it("names the carry's own pair, never a generic collateral/debt", async () => {
+    const { container, simulation } = await completedReceipt(carryGraph());
+    expect(simulation.liquidationPair).toEqual({ collateral: "weETH", debt: "USDC" });
+    expect(screen.getByText("Execution complete")).not.toBeNull();
+    expect(container.textContent).toContain("Liquidates if weETH/USDC falls to");
+    expect(container.textContent).not.toContain("collateral/debt");
+  });
+
+  it("names the loop's pair on the same line, so the two receipts cannot read alike", async () => {
+    const { container, simulation } = await completedReceipt(graph);
+    expect(simulation.liquidationPair).toEqual({ collateral: "weETH", debt: "WETH" });
+    expect(container.textContent).toContain("Liquidates if weETH/WETH falls to");
+    expect(container.textContent).not.toContain("weETH/USDC");
+    expect(container.textContent).not.toContain("collateral/debt");
+  });
+
+  /**
+   * The null-together invariant, rendered. The mixed loop-and-carry document is the real
+   * fixture for it: two borrows forfeit the single-pair ratio, so `core/risk.ts` mints
+   * neither the ratio nor the pair, and the receipt must name no pair at all rather than
+   * print the generic wording beside a figure it does not have.
+   */
+  it("names no pair when the ratio is unavailable — the two are null together", async () => {
+    const { container, simulation } = await completedReceipt(mixedLoopAndCarryGraph());
+    expect(simulation.liquidationRatioWad).toBeNull();
+    expect(simulation.liquidationPair).toBeNull();
+    expect(container.textContent).toContain("Liquidation level unavailable");
+    expect(container.textContent).not.toContain("Liquidates if");
   });
 });
 

@@ -13,11 +13,14 @@ import {
   PINNED_BLOCK,
 } from "../../tests/helpers/protocol-reads";
 import {
+  CANONICAL_CARRY_STEPS,
   CANONICAL_STEPS,
   EXPECTED_BORROW_WEI,
   WAD_WEI,
+  carryGraph,
   chainOf,
   flagshipGraph,
+  mixedLoopAndCarryGraph,
 } from "../../tests/helpers/graphs";
 import { FIXTURE_USER as USER, canonicalStepAddresses, fixtureSnapshot } from "../../tests/helpers/chain-snapshot";
 
@@ -115,6 +118,9 @@ describe("buildPlan — flagship 13-step canonical fixture (SPEC §2)", () => {
     expect(trail).toContain("Oracle.getAssetPrice(weETH)");
     expect(trail).toContain("Oracle.getAssetPrice(WETH)");
     expect(trail).toContain("entered by user");
+    // The same two divisor citations the carry demands — uniform, not six-decimal-special.
+    expect(trail).toContain("weETH.getReserveConfigurationData.decimals");
+    expect(trail).toContain("WETH.getReserveConfigurationData.decimals");
   });
 
   it("orders every approval after its producer and binds it to the attributed output", () => {
@@ -661,11 +667,44 @@ describe("validation matrix (SPEC §5.7 — the recorded v3.7 constraint set)", 
     expectConstraint(buildPlan(flagshipGraph(), s), "reserve-inactive", "supply1");
   });
 
-  it("borrowing-disabled reserve rejects the borrow", () => {
+  /**
+   * The reserve-level flag governs AT CATEGORY 0 — and only there.
+   *
+   * `ValidationLogic.validateBorrow` checks `borrowingEnabled` inside the else-branch of the
+   * e-mode test: with a category active the borrowable BITMAP replaces it entirely
+   * (ValidationLogic.sol:121-131). The carry plans at the reserve regime (no category admits
+   * a USDC borrow against weETH collateral), so it is the document that exercises this arm.
+   */
+  it("borrowing-disabled reserve rejects the borrow at the reserve regime", () => {
+    const s = fixtureSnapshot((raw) => {
+      raw.USDC.borrowingEnabled = false;
+    });
+    const plan = buildPlan(carryGraph(), s);
+    expectConstraint(plan, "borrowing-disabled", "borrow");
+  });
+
+  /**
+   * …and the same flag does NOT govern inside a category, which is the divergence this
+   * branch split removed. The flagship enters category 1, whose borrowable bitmap admits
+   * WETH; the chain would accept that borrow with the reserve flag off, so refusing it would
+   * make the compiler stricter than the protocol it claims to model. The bitmap arm still
+   * bites — asserted beside it, so "the check moved" cannot be read as "the check went away".
+   */
+  it("leaves the reserve borrowing flag to the bitmap once a category governs", () => {
     const s = fixtureSnapshot((raw) => {
       raw.WETH.borrowingEnabled = false;
     });
-    expectConstraint(buildPlan(flagshipGraph(), s), "borrowing-disabled", "borrow");
+    const plan = buildPlan(flagshipGraph(), s);
+    if (!plan.ok) throw new Error(`plan refused: ${JSON.stringify(plan.errors, bigintJson)}`);
+    expect(plan.targetEModeCategoryId).toBe(1);
+
+    const bitmapless = fixtureSnapshot((raw) => {
+      raw.WETH.borrowingEnabled = false;
+      raw.eModes[0]!.borrowableBitmap = 0n;
+    });
+    // With nothing borrowable in the category, no category admits the plan, so selection
+    // falls back to the reserve regime — where the flag governs again, exactly as on-chain.
+    expectConstraint(buildPlan(flagshipGraph(), bitmapless), "borrowing-disabled", "borrow");
   });
 
   it("paused borrow reserve rejects the borrow", () => {
@@ -753,5 +792,212 @@ describe("input amount parsing — exact, or an explicit error", () => {
     expectFail(result);
     const hits = constraintErrors(result.errors).filter((e) => e.constraint === "input-amount");
     expect(hits).toHaveLength(1);
+  });
+});
+
+// ————————————————————————— W09: the USDC carry leg —————————————————————————
+
+/**
+ * The carry is the same compiler, a different document — and every assertion below exists to
+ * prove that sentence. There is no USDC branch in e-mode selection, no USDC branch in the
+ * constraint matrix, and no USDC branch in step emission; what changes is which reserve the
+ * generic machinery resolves, and the regime that falls out of it.
+ */
+describe("buildPlan — the W09 carry (supply weETH, borrow USDC)", () => {
+  const snapshot = fixtureSnapshot();
+  const addresses = canonicalStepAddresses();
+
+  it("emits exactly the six enumerated steps, at the reserve regime, with no e-mode step", () => {
+    const result = buildPlan(carryGraph(), snapshot);
+    expectOk(result);
+    expect(result.steps).toHaveLength(6);
+    // The regime is a RESULT, not a setting: no recorded category admits weETH collateral
+    // against a USDC borrow, so selection returns none and every LTV/LT quote downstream
+    // re-derives from that one fact.
+    expect(result.targetEModeCategoryId).toBeNull();
+    for (const row of CANONICAL_CARRY_STEPS) {
+      const step = result.steps[row.index - 1]!;
+      expect(step.index, row.id).toBe(row.index);
+      expect(step.id, row.id).toBe(row.id);
+      expect(step.blockId, row.id).toBe(row.blockId);
+      expect(step.to, row.id).toBe(addresses[row.to]);
+      expect(step.functionName, row.id).toBe(row.functionName);
+      expect(step.valueSpec, row.id).toBe(row.valueSpec);
+      expect(selectorOfStep(step), row.id).toBe(toFunctionSelector(row.signature));
+      const amount = step.amount;
+      if (row.amount.kind === "literal") {
+        if (amount.kind !== "literal") throw new Error(`${row.id}: expected literal amount`);
+        expect(amount.amount.kind).toBe("entered");
+        expect(amount.amount.value).toBe(row.amount.wei);
+      } else if (row.amount.kind === "step-output") {
+        if (amount.kind !== "step-output") throw new Error(`${row.id}: expected step-output`);
+        expect(amount.producerStepId, row.id).toBe(row.amount.producer);
+        expect(amount.attribution, row.id).toBe(row.amount.attribution);
+        expect(amount.allocationBps, row.id).toBe(10_000);
+      } else {
+        expect(amount.kind, row.id).toBe(row.amount.kind);
+      }
+    }
+  });
+
+  /**
+   * THE ALLOWANCE ABSENCE. USDC only ever flows pool → actor, so the carry grants no USDC
+   * allowance and the borrow is terminal. Asserted as an absence over the whole step list —
+   * against the USDC address the snapshot reports, never a typed one — because "there are six
+   * steps" would not have caught a seventh that approved the wrong token.
+   */
+  it("contains no approve targeting USDC — in any document this repo can build", () => {
+    const usdc = snapshot.reserves.USDC.underlying;
+    // Held over EVERY shape, not just the carry: the mixed document borrows USDC too, and a
+    // claim scoped to one template would not have covered it.
+    for (const graph of [carryGraph(), flagshipGraph(), mixedLoopAndCarryGraph()]) {
+      const result = buildPlan(graph, snapshot);
+      expectOk(result);
+      expect(
+        result.steps.some((s) => s.functionName === "approve" && s.to === usdc),
+        "a USDC approve appeared in a plan",
+      ).toBe(false);
+    }
+    // …and in the carry, every approve targets a token the plan actually SPENDS.
+    const carry = buildPlan(carryGraph(), snapshot);
+    expectOk(carry);
+    const approveTargets = carry.steps.filter((s) => s.functionName === "approve").map((s) => s.to);
+    expect(approveTargets).toEqual([addresses.eETH, addresses.weETH]);
+  });
+
+  it("decodes the borrow's calldata to the USDC reserve, variable mode, on behalf of the actor", () => {
+    const result = buildPlan(carryGraph(), snapshot);
+    expectOk(result);
+    const borrow = stepById(result.steps, "borrow:borrow");
+    if (borrow.amount.kind !== "derived") throw new Error("borrow amount must be derived");
+    const decoded = decodeFunctionData({ abi: borrow.abi, data: encodeStep(borrow).data });
+    expect(decoded.args).toEqual([
+      snapshot.reserves.USDC.underlying,
+      borrow.amount.amount.value,
+      2n,
+      0,
+      USER,
+    ]);
+    // The supply names the actor too — one `onBehalfOf` contract across both legs.
+    const supply = stepById(result.steps, "supply1:supply");
+    const supplyDecoded = decodeFunctionData({
+      abi: supply.abi,
+      data: encodeStep(supply, 777n).data,
+    });
+    expect(supplyDecoded.args).toEqual([addresses.weETH, 777n, USER, 0]);
+  });
+
+  it("derives the borrow at the USDC reserve's own decimals, citing the reads behind it", () => {
+    const result = buildPlan(carryGraph(), snapshot);
+    expectOk(result);
+    const borrow = stepById(result.steps, "borrow:borrow");
+    if (borrow.amount.kind !== "derived") throw new Error("borrow amount must be derived");
+    const trail = provenanceTrailText(borrow.amount.amount).join("\n");
+    expect(trail).toContain("Oracle.getAssetPrice(USDC)");
+    expect(trail).toContain("Oracle.getAssetPrice(weETH)");
+    // Codex W09 round-3 finding 4: BOTH divisors are cited. This figure divides the collateral
+    // by weETH's 1e18 and multiplies back by USDC's 1e6 — a trail naming neither would leave a
+    // quantity that can move by twelve orders of magnitude looking fully sourced.
+    expect(trail).toContain("USDC.getReserveConfigurationData.decimals");
+    expect(trail).toContain("weETH.getReserveConfigurationData.decimals");
+    expect([...observedBlocks(borrow.amount.amount)]).toEqual([PINNED_BLOCK]);
+    // Six decimals, so the amount is ~1e10 rather than ~1e22: a wei-scaled USDC figure would
+    // be twelve orders too large and would blow through the borrow cap rather than execute.
+    expect(borrow.amount.amount.value).toBeGreaterThan(10n ** 9n);
+    expect(borrow.amount.amount.value).toBeLessThan(10n ** 11n);
+  });
+
+  /**
+   * The four refusal/selection pins, walked as one table so none can be dropped quietly. The
+   * compiler refuses a standing category it cannot borrow under; it plans without a category
+   * for a fresh wallet; and the flagship's own selection is UNMOVED by USDC joining the
+   * snapshot, which is the regression this table exists to hold.
+   */
+  it("resolves the four wallet x document cases exactly as the protocol would", () => {
+    const fresh = fixtureSnapshot();
+    const parked = fixtureSnapshot((raw) => {
+      raw.user.eModeCategoryId = raw.eModes[0]!.id;
+    });
+
+    // 1. Parked in category 1 + carry: designed refusal, naming the category AND its label.
+    const refused = buildPlan(carryGraph(), parked);
+    expectFail(refused);
+    const hits = constraintErrors(refused.errors).filter(
+      (e) => e.constraint === "emode-active-category-rejects-plan",
+    );
+    expect(hits).toHaveLength(1);
+    expect(hits[0]!.blockId).toBe("borrow");
+    expect(hits[0]!.detail).toContain(String(parked.eModeCategories[0]!.id));
+    expect(hits[0]!.detail).toContain(parked.eModeCategories[0]!.label.value);
+
+    // 2. Fresh wallet + carry: plans, no category, and NO set-emode step anywhere.
+    const carry = buildPlan(carryGraph(), fresh);
+    expectOk(carry);
+    expect(carry.targetEModeCategoryId).toBeNull();
+    expect(carry.steps.some((s) => s.id.endsWith(":set-emode"))).toBe(false);
+
+    // 3. Fresh wallet + flagship: unchanged by the reserve-set extension.
+    const flagship = buildPlan(flagshipGraph(), fresh);
+    expectOk(flagship);
+    expect(flagship.targetEModeCategoryId).toBe(1);
+    expect(flagship.steps[3]!.id).toBe("supply1:set-emode");
+
+    // 4. Parked in category 1 + flagship: runs under the standing category, emitting nothing.
+    const standing = buildPlan(flagshipGraph(), parked);
+    expectOk(standing);
+    expect(standing.targetEModeCategoryId).toBe(1);
+    expect(standing.steps.some((s) => s.functionName === "setUserEMode")).toBe(false);
+  });
+
+  /**
+   * THE MID-PLAN REGIME BAN. `setUserEMode(0)` is, case by case, impossible above LT, an
+   * LTV-bypass in the (LTV, LT] window, or pointless below LTV — and three landed modules
+   * (the risk ledger's single-category walk, the borrow ceiling's single `categoryId`, the
+   * checkpoint HF cross-check) assume it cannot happen. Held as an invariant over every
+   * document this repo can build, not as a comment.
+   */
+  it("never emits more than one set-emode step, and never one targeting category 0", () => {
+    const documents: readonly StrategyGraph[] = [
+      flagshipGraph(),
+      carryGraph(),
+      mixedLoopAndCarryGraph(),
+    ];
+    for (const graph of documents) {
+      const result = buildPlan(graph, snapshot);
+      expectOk(result);
+      const emodeSteps = result.steps.filter((s) => s.functionName === "setUserEMode");
+      expect(emodeSteps.length).toBeLessThanOrEqual(1);
+      for (const step of emodeSteps) {
+        const arg = step.args[0];
+        if (arg === undefined || arg.kind !== "value") throw new Error("set-emode arg missing");
+        expect(arg.value).not.toBe(0);
+        // ...and the category it names is one the snapshot describes.
+        expect(snapshot.eModeCategories.some((c) => c.id === arg.value)).toBe(true);
+      }
+    }
+  });
+
+  /**
+   * THE MIXED DOCUMENT, owner-ratified 2026-07-30: planned, not refused.
+   *
+   * Order A (eMode then USDC) dies on `NotBorrowableInEMode`; Order B (USDC then eMode) dies
+   * on `InvalidDebtInEmode`; Order C — no eMode at all — is protocol-legal, and the landed
+   * selection already produces exactly that. Refusing it would refuse a plan the chain
+   * accepts; planning it at the category regime would quote thresholds the position does not
+   * stand under.
+   */
+  it("plans a loop+carry document at the reserve regime rather than refusing it", () => {
+    const result = buildPlan(mixedLoopAndCarryGraph(), snapshot);
+    expectOk(result);
+    expect(result.targetEModeCategoryId).toBeNull();
+    expect(result.steps.some((s) => s.functionName === "setUserEMode")).toBe(false);
+    const borrows = result.steps.filter((s) => s.functionName === "borrow");
+    expect(borrows.map((s) => s.id)).toEqual(["borrow:borrow", "carry:borrow"]);
+    // Two borrows, two reserves, and the second one is USDC — the borrow set is what
+    // forecloses the category, so both legs must actually be there.
+    const decodedAssets = borrows.map(
+      (s) => decodeFunctionData({ abi: s.abi, data: encodeStep(s).data }).args![0],
+    );
+    expect(decodedAssets).toEqual([addresses.WETH, snapshot.reserves.USDC.underlying]);
   });
 });

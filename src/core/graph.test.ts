@@ -124,6 +124,23 @@ describe("validateGraph — semantic validation (§5.6)", () => {
     expect(r.errors.some((e) => e.includes("lend protocol must be aave-v3"))).toBe(true);
     expect(r.errors.some((e) => e.includes("unsupported lend asset"))).toBe(true);
   });
+  /**
+   * W09's asymmetry, stated in both directions at the gate that decides it. USDC is
+   * BORROWABLE (matrix §4: `borrowingEnabled` true) and NOT lendable in this product —
+   * supplying it is out of scope and no fork evidence covers it, so the structural gate
+   * refuses that leg rather than letting an unproven collateral asset onto the canvas.
+   */
+  it("accepts a USDC borrow and refuses a USDC lend — the two sets are not the same set", () => {
+    const borrow = validateGraph(
+      withParams("borrow", { protocol: "aave-v3", asset: "USDC", allocationBps: 6000 }),
+    );
+    expect(borrow.errors.some((e) => e.includes("borrow asset"))).toBe(false);
+
+    const lend = validateGraph(withParams("supply1", { protocol: "aave-v3", asset: "USDC" }));
+    expect(lend.ok).toBe(false);
+    expect(lend.errors.some((e) => e.includes("unsupported lend asset"))).toBe(true);
+  });
+
   it("rejects a collateral-only borrow asset and bad allocationBps", () => {
     const r1 = validateGraph(withParams("borrow", { protocol: "aave-v3", asset: "weETH", allocationBps: 7000 }));
     expect(r1.errors.some((e) => e.includes("collateral-only borrow asset"))).toBe(true);

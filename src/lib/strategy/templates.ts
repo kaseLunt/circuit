@@ -87,8 +87,32 @@ const DEFAULT_INPUT_ETH = "10";
  */
 const DEFAULT_BORROW_ALLOCATION_BPS = 5000;
 
+/**
+ * `Configured`, the carry's `b` — and CHOSEN, inside a window the protocol reads define
+ * rather than inherited from the loop.
+ *
+ * The carry exists to demonstrate the risk engine, which means it must rest where the risk
+ * engine has something to say: the amber band, `HF < HF_WARN_WAD` (1.50). For a
+ * single-pair position HF ≈ LT/b, so amber requires `b > LT/1.5`, while Aave's own LTV line
+ * requires `b` at or under the reserve ceiling. At the pinned block's non-eMode weETH regime
+ * — LT 8000, LTV 7750, both READ, neither typed — that window is roughly (5334, 7750) bps.
+ *
+ * 6000 sits inside it (HF ≈ 8000/6000 ≈ 1.33), owner-ratified 2026-07-30. It is deliberately
+ * clear of both edges: near the floor the band would flip to green on a small favourable
+ * price move, and near the ceiling the composer would open a slider-nudge away from a refusal.
+ *
+ * Unlike DEFAULT_BORROW_ALLOCATION_BPS, this number is ALSO the fork-proven point
+ * (`FORK_PROVEN_CARRY_BPS`, tests/helpers/graphs.ts): the carry has no step-3 drag to open
+ * safe for, so the shipped default and the executed-on-a-fork default are the same value, and
+ * templates.test.ts pins that they have not drifted apart.
+ */
+const DEFAULT_CARRY_ALLOCATION_BPS = 6000;
+
 /** The template SPEC §3 step 1 opens the composer with. */
 export const FLAGSHIP_TEMPLATE_ID = "leveraged-restake-loop";
+
+/** The uncorrelated counterweight beside the flagship (W09). */
+export const CARRY_TEMPLATE_ID = "weeth-usdc-carry";
 
 /**
  * Chain the given block ids in order, each edge carrying the full output.
@@ -170,6 +194,38 @@ export function leveragedRestakeLoop(
   ]);
 }
 
+/**
+ * The USDC carry — the flagship's counterweight, and the reason the risk engine is worth
+ * having.
+ *
+ * Structurally it is the loop's front half with an UNCORRELATED borrow at the end and nothing
+ * after it: supply weETH, borrow USDC, stop. There is no unwrap-and-restake tail because there
+ * is nothing to recycle — USDC is not on the way back to weETH without a swap (P5).
+ *
+ * NO e-mode step, and that is a consequence rather than a setting. `buildPlan` scans the
+ * recorded categories for one that admits this document's collateral AND borrow; category 1's
+ * borrowable bitmap holds WETH alone, so none admits, `targetEModeCategoryId` resolves to
+ * null, and every LTV/LT quote in the plan, the ledger and the borrow ceiling re-derives at
+ * the reserve regime from that one selection. The template asserts none of this — it is prose
+ * and structure, and the regime is read off the plan.
+ */
+export function weethUsdcCarry(
+  amountEth: string = DEFAULT_INPUT_ETH,
+  borrowAllocationBps: number = DEFAULT_CARRY_ALLOCATION_BPS,
+): StrategyGraph {
+  return chainOf([
+    { id: "in", type: "input", params: { asset: "ETH", amount: amountEth } },
+    { id: "stake1", type: "stake", params: { protocol: "etherfi" } },
+    { id: "wrap1", type: "wrap", params: { from: "eETH", to: "weETH" } },
+    { id: "supply1", type: "lend", params: { protocol: "aave-v3", asset: "weETH" } },
+    {
+      id: "borrow",
+      type: "borrow",
+      params: { protocol: "aave-v3", asset: "USDC", allocationBps: borrowAllocationBps },
+    },
+  ]);
+}
+
 export const STRATEGY_TEMPLATES: readonly StrategyTemplate[] = [
   {
     id: "restake",
@@ -189,6 +245,13 @@ export const STRATEGY_TEMPLATES: readonly StrategyTemplate[] = [
     summary:
       "One closed iteration: supply weETH, borrow WETH against it, unwrap to ETH and stake again.",
     graph: () => leveragedRestakeLoop(),
+  },
+  {
+    id: CARRY_TEMPLATE_ID,
+    name: "weETH carry",
+    summary:
+      "Supply weETH and borrow USDC against it. The debt is uncorrelated with the collateral, so the position turns on the weETH/USDC oracle ratio rather than on a staking spread.",
+    graph: () => weethUsdcCarry(),
   },
 ];
 

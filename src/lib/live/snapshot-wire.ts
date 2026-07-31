@@ -75,6 +75,7 @@ export interface WireLiveCapture {
   readonly pool: string;
   readonly weETH: WireReserve;
   readonly WETH: WireReserve;
+  readonly USDC: WireReserve;
   readonly eModes: readonly WireEMode[];
   readonly etherfi: WireEtherfi;
   readonly user: {
@@ -202,6 +203,7 @@ export function wireLiveCaptureOf(snapshot: ChainSnapshot, blockHash: Hex): Wire
     pool: snapshot.pool,
     weETH: wireReserveOf(rawReserveOf(snapshot.reserves.weETH)),
     WETH: wireReserveOf(rawReserveOf(snapshot.reserves.WETH)),
+    USDC: wireReserveOf(rawReserveOf(snapshot.reserves.USDC)),
     eModes: snapshot.eModeCategories.map((category) => ({
       id: category.id,
       label: category.label.value,
@@ -423,6 +425,7 @@ export function parseLiveReadiness(value: unknown): ParsedLiveReadiness {
       pool: addr(captureRec["pool"], "capture.pool"),
       weETH: parseReserve(captureRec["weETH"], "capture.weETH"),
       WETH: parseReserve(captureRec["WETH"], "capture.WETH"),
+      USDC: parseReserve(captureRec["USDC"], "capture.USDC"),
       eModes: eModesValue.map((entry, index) => parseEMode(entry, `capture.eModes[${index}]`)),
       etherfi: {
         liquidityPool: addr(etherfiRec["liquidityPool"], "capture.etherfi.liquidityPool"),

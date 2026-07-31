@@ -6,8 +6,16 @@ import { formatBpsAsPercent, formatHealthFactor, formatWadAsPercent, formatWadRa
 import { HF_WARN_WAD, hfWadValue, riskState, type HealthFactor } from "../../../core/health-factor";
 import { valueOf } from "../../../core/provenance";
 import { rateKindLabel } from "../../../core/risk";
+import type { BorrowCeiling } from "../../../core/borrow-limit";
 import { FULL_ALLOCATION_BPS, type BorrowBlockData } from "../../../lib/strategy/types";
 import { AssetChip } from "../../shared/asset-chip";
+import {
+  debtDirectionNote,
+  liquidationPairLabel,
+  liquidationPrefix,
+  liquidationRatioLabel,
+  liquidationSentence,
+} from "../../shared/liquidation-copy";
 import { SourcedValue, slotClassName, type SlotRamp } from "../../shared/sourced-value";
 import {
   BaseBlock,
@@ -85,22 +93,26 @@ function regimeLabel(categoryId: number | null): string {
     : `E-mode category ${categoryId}`;
 }
 
-/** The prose a settled-but-empty risk read gets. Never a dash, never a zero. */
-const LIQUIDATION_UNAVAILABLE = "Liquidation level unavailable. The risk read did not resolve.";
-
 /**
- * The ONE authored liquidation sentence, in the two forms it has to take: the words the
- * visible row wraps around the `SourcedValue` that renders the ratio, and the whole string
- * the slider announces. Both come from here, so the pointer path and the keyboard path
- * cannot say different things — the defect two independent authorings guarantee.
+ * The regime as a STATED FACT, not an absence (W09).
+ *
+ * A user who loads the loop and adds an uncorrelated borrow has silently moved the whole
+ * position from the e-mode category's thresholds to the reserve's — because the borrow set
+ * itself forecloses the category. Every number on screen moves honestly with it, and until
+ * now nothing SAID so: the regime only appeared once the position was already over the limit,
+ * which is the one moment it is too late to be news.
+ *
+ * Both figures are read off the ceiling, which read them off the plan's own selection. There
+ * is no second source for "which regime" anywhere in the product.
  */
-function liquidationPrefix(pair: string): string {
-  return `Liquidates if ${pair} falls to `;
-}
-
-function liquidationSentence(pair: string, ratio: string | null, pending: boolean): string {
-  if (ratio !== null) return `${liquidationPrefix(pair)}${ratio}.`;
-  return pending ? `Liquidation level for ${pair} loading.` : LIQUIDATION_UNAVAILABLE;
+function regimeSentence(ceiling: BorrowCeiling): string {
+  return ceiling.categoryId === null
+    ? `No e-mode category governs this position, so the reserve's own thresholds apply: ${formatBpsAsPercent(
+        ceiling.ltvBps,
+      )} borrowable, liquidation at ${formatBpsAsPercent(ceiling.ltBps)}.`
+    : `${regimeLabel(ceiling.categoryId)} governs this position: ${formatBpsAsPercent(
+        ceiling.ltvBps,
+      )} borrowable, liquidation at ${formatBpsAsPercent(ceiling.ltBps)}.`;
 }
 
 /**
@@ -130,8 +142,15 @@ export function BorrowBlock({ id, data, selected }: NodePropsFor<BorrowBlockData
 
   const rate = blockValue === null ? null : blockValue.rate;
   const kindLabel = rateKindLabel(rate === null ? "apy" : rate.kind);
-  const collateralAsset = blockValue === null ? null : blockValue.inputAsset;
-  const pair = collateralAsset === null ? "collateral/debt" : `${collateralAsset}/${data.asset}`;
+  /**
+   * The pair the ratio actually divides, from the simulation that minted the ratio.
+   *
+   * NOT `blockValue.inputAsset`: a borrow flow carries none — the edge into a borrow is a
+   * collateral dependency, not a token flow — so that read was always null in the running app
+   * and every position, correlated or not, rendered as "collateral/debt". With two templates
+   * that erased the entire contrast: weETH/WETH and weETH/USDC printed the same sentence.
+   */
+  const pair = liquidationPairLabel(runtime.liquidationPair);
 
   const allocation = runtime.borrowAllocations[id] ?? null;
   const allocationText =
@@ -151,6 +170,14 @@ export function BorrowBlock({ id, data, selected }: NodePropsFor<BorrowBlockData
   const limit = runtime.borrowLimit;
   const overLimit =
     limit !== null && limit.status === "over-limit" && limit.ceiling.blockId === id
+      ? limit.ceiling
+      : null;
+  // The ceiling exists on BOTH settled verdicts, and the regime is worth saying on both —
+  // it is a fact about the position, not a diagnosis of a mistake.
+  const ceiling =
+    limit !== null &&
+    (limit.status === "within" || limit.status === "over-limit") &&
+    limit.ceiling.blockId === id
       ? limit.ceiling
       : null;
 
@@ -181,6 +208,26 @@ export function BorrowBlock({ id, data, selected }: NodePropsFor<BorrowBlockData
             : !data.isConfigured
               ? "Choose how much of the collateral value to borrow."
               : undefined;
+
+  /**
+   * Treatment §2.5's risk-direction note, and it renders HERE and nowhere else.
+   *
+   * §2.5 scopes it to "the contrast surface (§4)", and §4 is the carry template's canvas
+   * shape — the block is the one surface that already states regime facts (the `no e-mode`
+   * line directly beneath this). The simulation panel carries headline figures for one
+   * document and the execution receipt is a settled record whose taste ruling is stillness;
+   * neither states a regime today, and neither is where the two templates are compared. So
+   * the copy lives in the shared home with the rest of the liquidation sentence — one author
+   * for all of it — and the block is its only caller.
+   *
+   * The regime is the gate, read off the ceiling that the sentence below quotes: no governing
+   * category is the protocol's own statement that these two reserves are not a correlated
+   * pair.
+   */
+  const directionNote = debtDirectionNote(
+    runtime.liquidationPair,
+    ceiling === null ? null : ceiling.categoryId,
+  );
 
   const ratio = runtime.liquidationRatioWad;
   const sentence = liquidationSentence(
@@ -267,7 +314,7 @@ export function BorrowBlock({ id, data, selected }: NodePropsFor<BorrowBlockData
           <SourcedValue
             value={ratio}
             pending={runtime.pending}
-            label={`Liquidation ratio, ${pair}`}
+            label={liquidationRatioLabel(pair)}
             chars={RATIO_SLOT_CHARS}
             format={formatWadRatio}
             unavailableReason="unavailable"
@@ -276,6 +323,14 @@ export function BorrowBlock({ id, data, selected }: NodePropsFor<BorrowBlockData
           />
           .
         </p>
+      )}
+
+      {directionNote === null ? null : (
+        <p className="text-xs text-muted-foreground">{directionNote}</p>
+      )}
+
+      {ceiling === null ? null : (
+        <p className="text-xs text-muted-foreground">{regimeSentence(ceiling)}</p>
       )}
 
       <div className="flex items-baseline gap-2">

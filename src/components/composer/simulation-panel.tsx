@@ -34,10 +34,16 @@ import {
   formatWadRatio,
 } from "../../core/format";
 import { HF_WARN_WAD, hfWadValue, riskState, type HealthFactor } from "../../core/health-factor";
-import { valueOf } from "../../core/provenance";
+import { valueOf, type Provenanced } from "../../core/provenance";
 import { rateKindLabel } from "../../core/risk";
 import type { SimulationResult } from "../../lib/strategy/types";
 import { InlineError } from "../shared/error-boundary";
+import {
+  liquidationPairLabel,
+  liquidationPrefix,
+  liquidationRatioLabel,
+  liquidationSentence,
+} from "../shared/liquidation-copy";
 import { SourcedValue, slotClassName, type SlotRamp } from "../shared/sourced-value";
 import { SkeletonValue } from "../ui/skeleton";
 
@@ -101,6 +107,9 @@ function Row({ label, children }: RowProps) {
 /** "12.34" — five characters, the widest form `formatHealthFactor` produces for a live HF. */
 const HF_SLOT_CHARS = 5;
 
+/** "1587.3241" — the panel's ratio slot, wide enough for an uncorrelated pair's level. */
+const RATIO_SLOT_CHARS = 7;
+
 /**
  * A composition, not a formatter: `formatHealthFactor` owns every digit, the sentinel and
  * the rounding, and `hfWadValue` owns the unwrapping. It is restated here rather than shared
@@ -109,6 +118,54 @@ const HF_SLOT_CHARS = 5;
  */
 function formatMinHealthFactor(hf: HealthFactor): string {
   return formatHealthFactor(hfWadValue(hf));
+}
+
+/**
+ * The panel's liquidation line, naming the pair the level is a level OF.
+ *
+ * The ratio used to render beside the words "the collateral/debt oracle ratio", which made a
+ * weETH/USDC carry read exactly like a weETH/WETH loop everywhere outside the canvas — the
+ * figure alone cannot carry the difference, because 0.9123 is a different fact about each
+ * pair. Pair and ratio come from one derivation in `core/risk.ts` and are null together, so
+ * the settled-absence branch names no pair at all. Every word is
+ * `shared/liquidation-copy.ts`'s, which is also the canvas block's and the receipt's.
+ */
+function LiquidationLine({
+  ratio,
+  pair,
+  pending,
+}: {
+  readonly ratio: Provenanced<bigint> | null;
+  readonly pair: string;
+  readonly pending: boolean;
+}) {
+  if (ratio === null && !pending) {
+    return (
+      <p className="mt-1 text-xs text-muted-foreground">
+        {liquidationSentence(pair, null, pending)}
+      </p>
+    );
+  }
+  return (
+    // Normal inline flow rather than a flex row: a flex container blockifies its items, which
+    // would break the figure out of the sentence. In the flow the figure stays in the line and
+    // its disclosure expands beneath it, the same as every other panel slot.
+    <p className="mt-1 text-xs text-muted-foreground">
+      {liquidationPrefix(pair)}
+      <SourcedValue
+        value={ratio}
+        pending={pending}
+        label={liquidationRatioLabel(pair)}
+        chars={RATIO_SLOT_CHARS}
+        format={formatWadRatio}
+        unavailableReason="ratio unavailable"
+        inline
+        provenance="disclosure"
+        className={slotClassName(ratio !== null, pending, CONTEXT_RAMP)}
+      />
+      .
+    </p>
+  );
 }
 
 /** Prose for a health factor outside the healthy branch — never a dash, never "∞". */
@@ -196,6 +253,12 @@ export function SimulationPanel({ result, pending }: SimulationPanelProps) {
   const initialAmountWei = result === null ? null : result.initialAmountWei;
   const gasCostBase = result === null ? null : result.gasCostBase;
   const liquidationRatioWad = result === null ? null : result.liquidationRatioWad;
+  /**
+   * WHICH two reserves that level is a level OF. Carried beside the ratio from the same
+   * derivation that minted it — never re-read off a block — so the panel draws the carry/loop
+   * distinction the canvas already draws instead of printing one generic sentence for both.
+   */
+  const pair = liquidationPairLabel(result === null ? null : result.liquidationPair);
 
   const netApyId = `${baseId}-net-apy`;
   const riskId = `${baseId}-risk`;
@@ -310,26 +373,9 @@ export function SimulationPanel({ result, pending }: SimulationPanelProps) {
               </>
             )}
 
-            {/* Normal inline flow rather than a flex row below: a flex container blockifies
-                its items, which would break the figure out of the sentence. In the flow the
-                figure stays in the line and its disclosure expands beneath the sentence, the
-                same as every other panel slot. */}
-            {hfValue !== null && hfValue.status === "healthy" ? (
-              <p className="mt-1 text-xs text-muted-foreground">
-                Liquidates when the collateral/debt oracle ratio reaches{" "}
-                <SourcedValue
-                  value={liquidationRatioWad}
-                  pending={pending}
-                  label="Liquidation ratio"
-                  chars={7}
-                  format={formatWadRatio}
-                  unavailableReason="ratio unavailable"
-                  inline
-                  provenance="disclosure"
-                  className={slotClassName(liquidationRatioWad !== null, pending, CONTEXT_RAMP)}
-                />
-              </p>
-            ) : null}
+            {hfValue === null || hfValue.status !== "healthy" ? null : (
+              <LiquidationLine ratio={liquidationRatioWad} pair={pair} pending={pending} />
+            )}
 
             {result === null ? null : (
               <Row label="Health factor after execution">

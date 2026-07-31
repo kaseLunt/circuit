@@ -25,7 +25,7 @@
  */
 import type { Address } from "viem";
 import { observationMinter } from "../../core/provenance";
-import type { ChainSnapshot, UserSnapshot } from "../../core/plan";
+import type { ChainSnapshot, ReserveKey, UserSnapshot } from "../../core/plan";
 import type { RateStrategyBps } from "../../core/rates";
 import {
   PINNED_BLOCK,
@@ -92,6 +92,8 @@ export interface RecordedProtocol {
   pool: Address;
   weETH: RawReserve;
   WETH: RawReserve;
+  /** W09: the carry leg's borrow reserve, six decimals, replayed like any other. */
+  USDC: RawReserve;
   eModes: RawEMode[];
   etherfi: {
     liquidityPool: Address;
@@ -128,7 +130,7 @@ function rateStrategyRead(label: string): RateStrategyBps {
   };
 }
 
-function rawReserve(sym: "WETH" | "weETH"): RawReserve {
+function rawReserve(sym: ReserveKey): RawReserve {
   const cfg = `${sym}.getReserveConfigurationData`;
   const toks = tupleRead(`${sym}.getReserveTokensAddresses`);
   const rd = `${sym}.getReserveData`;
@@ -186,6 +188,7 @@ export function recordedProtocol(): RecordedProtocol {
     pool: addressOf(readsMeta.pool, "pool"),
     weETH: rawReserve("weETH"),
     WETH: rawReserve("WETH"),
+    USDC: rawReserve("USDC"),
     eModes: [
       {
         id: 1,
@@ -241,7 +244,7 @@ export function snapshotFrom(
   pin: SnapshotPin = LOG_PIN,
 ): ChainSnapshot {
   const mint = observationMinter(pin.block, Number(pin.timestamp));
-  const reserve = (sym: "WETH" | "weETH", r: RawReserve) => ({
+  const reserve = (sym: ReserveKey, r: RawReserve) => ({
     underlying: r.underlying,
     aToken: r.aToken,
     variableDebtToken: r.variableDebtToken,
@@ -292,7 +295,11 @@ export function snapshotFrom(
     block: pin.block,
     blockTimestamp: pin.timestamp,
     pool: raw.pool,
-    reserves: { weETH: reserve("weETH", raw.weETH), WETH: reserve("WETH", raw.WETH) },
+    reserves: {
+      weETH: reserve("weETH", raw.weETH),
+      WETH: reserve("WETH", raw.WETH),
+      USDC: reserve("USDC", raw.USDC),
+    },
     eModeCategories: raw.eModes.map((m) => ({
       id: m.id,
       label: mint.observe(m.label, `eMode${m.id}.label`),

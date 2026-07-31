@@ -87,7 +87,7 @@ const REPIN = process.argv.includes("--repin");
 const VERIFY_ROOTS = process.argv.includes("--verify-roots");
 
 /**
- * Address roots. Only these four are not on-chain reads; every other address in the fixture is
+ * Address roots. Only these five are not on-chain reads; every other address in the fixture is
  * derived from them at the pinned block. They are loaded from docs/address-roots.json, which
  * records the upstream address-book file, its commit, and its sha256 — so the provenance is a
  * committed artifact rather than a literal typed into this script. `--verify-roots` re-fetches
@@ -100,7 +100,9 @@ const A = {
   WETH: getAddress(rootsDoc.roots.WETH.address),
   weETH: getAddress(rootsDoc.roots.weETH.address),
   wstETH: getAddress(rootsDoc.roots.wstETH.address),
-  // eETH, ETHERFI_LP and stETH are DERIVED on-chain below, never pinned.
+  // eETH, ETHERFI_LP and stETH are DERIVED on-chain below, never pinned. USDC is a fifth ROOT
+  // (W09) and is loaded from the same artifact, but at its own section so the appended reads
+  // leave every pre-existing entry's position untouched — hence `A.USDC` is set there.
 };
 
 async function verifyRootsAgainstUpstream() {
@@ -319,15 +321,16 @@ const reservesList = await read("Pool.getReservesList", { address: POOL, abi: ab
 // authority on which address is "the WETH reserve here", so this is an independent confirmation
 // of the address-book pin rather than a restatement of it.
 for (const [sym, asset] of Object.entries({ WETH: A.WETH, weETH: A.weETH, wstETH: A.wstETH })) {
-  const member = Array.isArray(reservesList)
-    && reservesList.some((a) => getAddress(String(a)) === getAddress(asset));
-  if (!member) {
-    fail(`FATAL: ${sym} ${asset} is not in Pool.getReservesList at block ${B}`);
-    process.exit(1);
-  }
+  assertListed(sym, asset);
 }
 
-for (const [sym, asset] of Object.entries({ WETH: A.WETH, weETH: A.weETH })) {
+/**
+ * One reserve's read set, in a fixed order. Factored out so a reserve joining the fixture
+ * (W09: USDC) reads through the SAME sequence the two flagship reserves do — a reserve-specific
+ * read list would be exactly the special-casing the constraint set exists to refuse — and so the
+ * new section can be APPENDED without disturbing any pre-existing entry's position or bytes.
+ */
+async function reserveReads(sym, asset) {
   await read(`${sym}.getReserveConfigurationData`, { address: DATA, abi: abis.data, functionName: "getReserveConfigurationData", args: [asset], blockNumber: B });
   await read(`${sym}.getReserveCaps`, { address: DATA, abi: abis.data, functionName: "getReserveCaps", args: [asset], blockNumber: B });
   await read(`${sym}.getPaused`, { address: DATA, abi: abis.data, functionName: "getPaused", args: [asset], blockNumber: B });
@@ -348,6 +351,29 @@ for (const [sym, asset] of Object.entries({ WETH: A.WETH, weETH: A.weETH })) {
   await read(`${sym}.strategy.getInterestRateDataBps`, { address: strat, abi: abis.strategy, functionName: "getInterestRateDataBps", args: [asset], blockNumber: B });
 }
 
+/** One asset's oracle read set: the source address, the price, and the source's own identity. */
+async function oracleReads(sym, asset) {
+  const src = await read(`Oracle.getSourceOfAsset(${sym})`, { address: ORACLE, abi: abis.oracle, functionName: "getSourceOfAsset", args: [asset], blockNumber: B });
+  await read(`Oracle.getAssetPrice(${sym})`, { address: ORACLE, abi: abis.oracle, functionName: "getAssetPrice", args: [asset], blockNumber: B });
+  await read(`OracleSource(${sym}).description`, { address: src, abi: abis.feed, functionName: "description", blockNumber: B });
+  await read(`OracleSource(${sym}).decimals`, { address: src, abi: abis.feed, functionName: "decimals", blockNumber: B });
+  await read(`OracleSource(${sym}).latestAnswer`, { address: src, abi: abis.feed, functionName: "latestAnswer", blockNumber: B });
+}
+
+/** Membership in the market's own reserve list — the market is the authority on "the X reserve here". */
+function assertListed(sym, asset) {
+  const member =
+    Array.isArray(reservesList) && reservesList.some((a) => getAddress(String(a)) === getAddress(asset));
+  if (!member) {
+    fail(`FATAL: ${sym} ${asset} is not in Pool.getReservesList at block ${B}`);
+    process.exit(1);
+  }
+}
+
+for (const [sym, asset] of Object.entries({ WETH: A.WETH, weETH: A.weETH })) {
+  await reserveReads(sym, asset);
+}
+
 // ---- e-mode category 1 ------------------------------------------------------
 await read("eMode1.label", { address: POOL, abi: abis.pool, functionName: "getEModeCategoryLabel", args: [1], blockNumber: B });
 await read("eMode1.collateralConfig", { address: POOL, abi: abis.pool, functionName: "getEModeCategoryCollateralConfig", args: [1], blockNumber: B });
@@ -359,11 +385,7 @@ await read("eMode1.ltvZeroBitmap (v3.7)", { address: POOL, abi: abis.pool, funct
 // ---- oracle -----------------------------------------------------------------
 await read("Oracle.BASE_CURRENCY_UNIT", { address: ORACLE, abi: abis.oracle, functionName: "BASE_CURRENCY_UNIT", blockNumber: B });
 for (const [sym, asset] of Object.entries({ WETH: A.WETH, weETH: A.weETH })) {
-  const src = await read(`Oracle.getSourceOfAsset(${sym})`, { address: ORACLE, abi: abis.oracle, functionName: "getSourceOfAsset", args: [asset], blockNumber: B });
-  await read(`Oracle.getAssetPrice(${sym})`, { address: ORACLE, abi: abis.oracle, functionName: "getAssetPrice", args: [asset], blockNumber: B });
-  await read(`OracleSource(${sym}).description`, { address: src, abi: abis.feed, functionName: "description", blockNumber: B });
-  await read(`OracleSource(${sym}).decimals`, { address: src, abi: abis.feed, functionName: "decimals", blockNumber: B });
-  await read(`OracleSource(${sym}).latestAnswer`, { address: src, abi: abis.feed, functionName: "latestAnswer", blockNumber: B });
+  await oracleReads(sym, asset);
 }
 
 // ---- EtherFi ----------------------------------------------------------------
@@ -392,6 +414,26 @@ await read("LP.sharesForAmount(1e18)", { address: A.ETHERFI_LP, abi: abis.lp, fu
 
 // ---- Lido (P1 scope: reference only) ----------------------------------------
 await read("wstETH.stEthPerToken", { address: A.wstETH, abi: abis.wsteth, functionName: "stEthPerToken", blockNumber: B });
+
+// ---- USDC — the W09 carry leg's borrow reserve -------------------------------
+// APPENDED, deliberately, rather than folded into the loops above: the committed log is
+// hash-verified evidence, and appending keeps every pre-existing entry at its own index with
+// its own bytes, so the regeneration diff IS the claim ("purely additive", the §9.3 discipline
+// proven when the deficit read was added). The reads themselves are the SAME two helper
+// sequences the flagship reserves go through — no USDC-specific read list.
+A.USDC = getAddress(rootsDoc.roots.USDC.address);
+assertListed("USDC", A.USDC);
+assertSymbol(
+  await read("USDC.symbol", { address: A.USDC, abi: abis.erc20, functionName: "symbol", blockNumber: B }),
+  "USDC",
+);
+// Read, never assumed: six decimals is the whole reason the risk path needed generalizing,
+// so the figure that drives `assetUnit` is an observation like every other.
+await read("USDC.decimals", { address: A.USDC, abi: abis.erc20, functionName: "decimals", blockNumber: B });
+await reserveReads("USDC", A.USDC);
+// The feed is a CAPO-style capped adapter, not a peg. `description` is recorded so the risk
+// copy quotes the source's own name instead of asserting a dollar.
+await oracleReads("USDC", A.USDC);
 
 // ---- write ------------------------------------------------------------------
 const out = {

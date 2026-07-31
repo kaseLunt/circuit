@@ -27,14 +27,13 @@
  *    fork, the dispatch, the mined receipt, and the reconciliation reads are all real.
  *
  * Fork topology mirrors `session-isolation.test.ts` (see its header for the experimentally
- * confirmed anvil historical-state wedge): a DEDICATED pristine upstream at the pin, spawned
- * here, whose head never moves. Ports are outside the base anvil (8547), the production
- * default range (9545+), and the isolation suite's block (9640–9650).
+ * confirmed anvil historical-state wedge): the session forks are children of the SHARED
+ * pristine upstream `tests/fork/global-setup.ts` boots, whose head never moves. This file used
+ * to spawn its own — the wedge argument requires the upstream to be pristine, not private, and
+ * three private ones meant three cold bootstraps against a metered endpoint (R-3a74989b). The
+ * port map lives in `tests/fork/anvil.ts`; this suite's session children take 9655–9658.
  */
-import { spawn, type ChildProcess } from "node:child_process";
-import { createWriteStream } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import {
   concatHex,
@@ -64,28 +63,18 @@ import type { SandboxChain } from "../../src/server/sandbox/execute-step";
 import {
   captureSessionSnapshot,
   spawnSessionFork,
+  rpcCall,
   type ForkSessionConfig,
 } from "../../src/server/sandbox/fork-session";
-import { sessionAnvilArgs } from "../../src/server/sandbox/anvil-args";
-import { trackProcessExit, type ProcessExitTracker } from "../../src/server/sandbox/process-exit";
-import {
-  SANDBOX_RPC_REQUEST_TIMEOUT_MS,
-  pollUntilReady,
-} from "../../src/server/sandbox/deadlines";
+import { SANDBOX_RPC_REQUEST_TIMEOUT_MS, withDeadline } from "../../src/server/sandbox/deadlines";
 import { createSandboxCaller, type SandboxContext } from "../../src/server/trpc/sandbox-router";
-import { hexWord, record } from "./harness";
+import { SESSION_UPSTREAM_URL } from "./anvil";
+import { assertSharedUpstreamPristine, hexWord, record } from "./harness";
 
 const PINNED_HASH = readsMeta.pinned_block.hash as Hex;
 
-/** Dedicated upstream + session ports: clear of 8547 (base anvil / demo server),
- *  9545–9560 (production default range), and 9640–9650 (isolation suite). */
-const UPSTREAM_PORT = 9653;
-const UPSTREAM_URL = `http://127.0.0.1:${UPSTREAM_PORT}`;
-const UPSTREAM_READY_BUDGET_MS = 120_000;
-const UPSTREAM_READY_PROBE_INTERVAL_MS = 500;
-
 const config: ForkSessionConfig = {
-  upstreamUrl: UPSTREAM_URL,
+  upstreamUrl: SESSION_UPSTREAM_URL,
   baseBlock: PINNED_BLOCK,
   expectBlockHash: PINNED_HASH,
   anvilPath: process.env.ANVIL_PATH ?? "anvil",
@@ -109,18 +98,13 @@ const FLAGSHIP_STEP_COUNT = 13;
 
 const LP_ABI = parseAbi(["function getTotalPooledEther() view returns (uint256)"]);
 
-let rpcId = 0;
+/**
+ * Every probe this suite makes is BOUNDED, by the one helper that threads `deadlines.ts` onto
+ * the socket. A second copy is how the bound goes missing (the round-4 and round-5 lesson: the
+ * duplicate IS the bug), so this file owns no fetch of its own.
+ */
 async function rpcAt<T>(url: string, method: string, params: readonly unknown[] = []): Promise<T> {
-  const res = await fetch(url, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ jsonrpc: "2.0", id: (rpcId += 1), method, params }),
-  });
-  const body = (await res.json()) as { result?: T; error?: { message?: string } };
-  if (body.error !== undefined) {
-    throw new Error(`${method} failed: ${body.error.message ?? "rpc error"}`);
-  }
-  return body.result as T;
+  return rpcCall<T>(url, method, params, SANDBOX_RPC_REQUEST_TIMEOUT_MS);
 }
 
 const blockNumberAt = async (url: string): Promise<bigint> =>
@@ -211,18 +195,26 @@ async function replayRevertAt(url: string, txHash: Hex, minedBlock: bigint): Pro
   };
   const value = tx["value"] as string | undefined;
   if (value !== undefined && BigInt(value) > 0n) payload["value"] = value;
-  // Raw fetch: the error body IS the datum here, so `rpcAt`'s throw-on-error is wrong.
-  const res = await fetch(url, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({
-      jsonrpc: "2.0",
-      id: (rpcId += 1),
-      method: "eth_call",
-      params: [payload, `0x${(minedBlock - 1n).toString(16)}`],
-    }),
-  });
-  const body = (await res.json()) as { error?: { message?: string; data?: unknown } };
+  // The error body IS the datum here, so `rpcAt`'s throw-on-error is wrong — but needing a
+  // different result shape is not a licence to be unbounded, so it runs under the same policy.
+  const body = await withDeadline(
+    `eth_call revert replay against ${url}`,
+    SANDBOX_RPC_REQUEST_TIMEOUT_MS,
+    async (signal) => {
+      const res = await fetch(url, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          jsonrpc: "2.0",
+          id: 1,
+          method: "eth_call",
+          params: [payload, `0x${(minedBlock - 1n).toString(16)}`],
+        }),
+        signal,
+      });
+      return (await res.json()) as { error?: { message?: string; data?: unknown } };
+    },
+  );
   if (body.error === undefined) {
     throw new Error(`revert replay: ${txHash} succeeded at its parent block — no revert bytes`);
   }
@@ -347,103 +339,18 @@ describe("W07 fork gate — execution drills against the real session compositio
     return outcome;
   }
 
-  let upstreamTracker: ProcessExitTracker | null = null;
-  let upstreamTearingDown = false;
-
   beforeAll(async () => {
-    const forkUrl = process.env.FORK_RPC_URL;
-    if (forkUrl === undefined || forkUrl === "") {
-      throw new Error(
-        "FORK_RPC_URL is required — the dedicated session upstream forks from it " +
-          "(global-setup enforces the same requirement for the base anvil)",
-      );
-    }
-
-    // Remote topology for the upstream (it faces the real provider); its head never moves.
-    const upstream: ChildProcess = spawn(
-      config.anvilPath,
-      sessionAnvilArgs({
-        upstreamUrl: forkUrl,
-        baseBlock: PINNED_BLOCK,
-        port: UPSTREAM_PORT,
-        computeUnitsPerSecond: process.env.ANVIL_CUPS ?? "100",
-        forkRetries: "10",
-        forkRetryBackoffMs: "2000",
-      }),
-      { stdio: ["ignore", "pipe", "pipe"] },
-    );
-    upstreamTracker = trackProcessExit(upstream);
-    const logStream = createWriteStream(join(tmpdir(), "circuit-drills-upstream.log"), {
-      flags: "w",
-    });
-    let stderrTail = "";
-    upstream.stdout?.on("data", (d: Buffer) => {
-      logStream.write(d);
-    });
-    upstream.stderr?.on("data", (d: Buffer) => {
-      stderrTail = (stderrTail + d.toString()).slice(-4000);
-      logStream.write(d);
-    });
-    let upstreamFailure: Error | null = null;
-    upstream.on("error", (e) => {
-      upstreamFailure = new Error(`failed to spawn dedicated drills upstream anvil: ${e.message}`);
-    });
-    upstream.on("exit", (code) => {
-      if (upstreamFailure === null && !upstreamTearingDown) {
-        upstreamFailure = new Error(
-          `dedicated drills upstream anvil exited (code ${code}): ${stderrTail}`,
-        );
-      }
-    });
-
-    await pollUntilReady({
-      what: `dedicated drills upstream readiness at ${UPSTREAM_URL}`,
-      budgetMs: UPSTREAM_READY_BUDGET_MS,
-      intervalMs: UPSTREAM_READY_PROBE_INTERVAL_MS,
-      requestTimeoutMs: SANDBOX_RPC_REQUEST_TIMEOUT_MS,
-      probe: () => rpcAt<string>(UPSTREAM_URL, "eth_blockNumber"),
-      fatal: () => upstreamFailure,
-      onTimeout: () =>
-        new Error(
-          `dedicated drills upstream not ready after ${UPSTREAM_READY_BUDGET_MS}ms: ${stderrTail}`,
-        ),
-    });
-
-    // Belt (isolation-suite lesson): the upstream's head must BE the pin — a moved head
-    // re-arms the anvil historical-state wedge, which presents as silent unresponsiveness.
-    const head = await blockNumberAt(UPSTREAM_URL);
-    if (head !== PINNED_BLOCK) {
-      throw new Error(
-        `dedicated drills upstream head is ${head}, not the pin ${PINNED_BLOCK} — ` +
-          "nothing may mine or mutate this upstream",
-      );
-    }
-    const pinned = await rpcAt<{ hash?: string } | null>(UPSTREAM_URL, "eth_getBlockByNumber", [
-      `0x${PINNED_BLOCK.toString(16)}`,
-      false,
-    ]);
-    if (pinned === null || pinned.hash !== PINNED_HASH) {
-      throw new Error(
-        `dedicated drills upstream identity mismatch at ${PINNED_BLOCK}: ` +
-          `${pinned?.hash ?? "null"} != ${PINNED_HASH}`,
-      );
-    }
-    record(`dedicated drills upstream ready at ${UPSTREAM_URL}, pinned to ${PINNED_BLOCK}`);
+    await assertSharedUpstreamPristine("before execution-drills ran");
   });
 
   afterAll(async () => {
     for (const key of [...openKeys]) {
       await caller.destroy({ sessionKey: key }).catch(() => undefined);
     }
-    // The drills tamper with SESSION forks only; the pristine upstream must not have moved.
-    if (upstreamTracker !== null && !upstreamTearingDown) {
-      const head = await blockNumberAt(UPSTREAM_URL).catch(() => null);
-      if (head !== null && head !== PINNED_BLOCK) {
-        throw new Error(`drills upstream head moved to ${head} — a drill leaked onto the upstream`);
-      }
-    }
-    upstreamTearingDown = true;
-    await upstreamTracker?.destroy(10_000);
+    // The drills tamper with SESSION forks only — that is what a child fork is for. The thing
+    // they all fork FROM must be exactly where it started, and the upstream is shared now, so
+    // this check names THIS suite rather than leaving global teardown to say "someone did".
+    await assertSharedUpstreamPristine("after execution-drills ran");
   });
 
   it("failure drill: a mid-plan revert lands failed with the executed prefix settled and zero suffix dispatch", async () => {

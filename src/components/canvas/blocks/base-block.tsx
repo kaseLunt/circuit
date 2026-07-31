@@ -8,7 +8,7 @@ import type { BorrowLimitVerdict } from "../../../core/borrow-limit";
 import { formatBpsAsPercent } from "../../../core/format";
 import type { HealthFactor } from "../../../core/health-factor";
 import { valueOf, type Derived, type Provenanced } from "../../../core/provenance";
-import type { BlockType, ComputedBlockValue } from "../../../lib/strategy/types";
+import type { BlockType, ComputedBlockValue, LiquidationPair } from "../../../lib/strategy/types";
 import { SourcedValue } from "../../shared/sourced-value";
 import { cn } from "../../../lib/utils";
 
@@ -79,6 +79,13 @@ export interface BlockRuntime {
   readonly minHealthFactor: Provenanced<HealthFactor> | null;
   /** Collateral/debt oracle ratio at liquidation, WAD. A correlated pair has no USD price. */
   readonly liquidationRatioWad: Provenanced<bigint> | null;
+  /**
+   * WHICH two reserves that ratio divides, minted with it in `core/risk.ts`. A borrow block
+   * cannot supply this itself: its flow carries no input asset (the edge into it is a
+   * collateral dependency, not a token flow), which is why the sentence used to read
+   * "collateral/debt" for every position regardless of what it held.
+   */
+  readonly liquidationPair: LiquidationPair | null;
   /**
    * SPEC §3 step 4: whether the requested borrow is past the limit, and the LTV/LT math from
    * the ACTIVE e-mode configuration that says so. Derived in `core/borrow-limit.ts` over the

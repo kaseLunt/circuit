@@ -63,14 +63,23 @@ const GOLDEN = {
   eModeCategoryId: 1,
   stepCount: 13,
   initialAmountWei: 10_000_000_000_000_000_000n,
-  minHealthFactorWad: 1_357_142_857_144_167_216n,
-  finalHealthFactorWad: 2_307_142_857_144_167_216n,
+  minHealthFactorWad: 1_357_142_857_143_159_467n,
+  finalHealthFactorWad: 2_307_142_857_142_454_043n,
   liquidationRatioWad: 810_405_201_682_850_969n,
   leverageWad: 1_699_999_999_998_440_640n,
   /** SPEC §5.1's trailing staking APR, over the window's two recorded blocks. */
   stakingAprWad: 23_614_925_307_064_831n,
   grossApyWad: 23_615_196_239_051_092n,
-  netApyWad: 25_065_397_570_968_204n,
+  /**
+   * Moved by 14_429 wei at Codex W09 round-7 (from 25_065_397_570_968_204n), and by nothing
+   * else: the composition's magnitudes stopped being the document's edge allocations and
+   * became measurements off the plan's own realized amounts through the oracle. `p_s` reads
+   * 0.999999999999480213 rather than 1 because the supplied weETH marks one base unit — 1e-8
+   * USD — below the ETH that bought it, and `b_eff` 0.699999999998960427 rather than 0.7 for
+   * the borrow's own wei round trip. The displayed 2.5065% is unchanged; so are `borrowWei`,
+   * the health factors and the weights, which is what keeps this a pin on the same fork run.
+   */
+  netApyWad: 25_065_397_570_953_775n,
   /** §5.2 exposure weights: the collateral legs share (1 + b), the debt leg carries −b. */
   yieldWeightsBps: [16_999, 1, -7_000],
   /** Gas needs a provider (P3a); it is the one thing still absent by design. */
@@ -251,6 +260,7 @@ describe("the sandbox actor is configured, never observed", () => {
     // `recordedProtocol()` is exactly what the log carries. If a user field ever appears on
     // it, something started inventing an account from protocol reads.
     expect(Object.keys(recordedProtocol()).sort()).toEqual([
+      "USDC",
       "WETH",
       "eModes",
       "etherfi",

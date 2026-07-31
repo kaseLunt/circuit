@@ -14,6 +14,7 @@
 import { expect, test, type Locator, type Page } from "@playwright/test";
 import {
   formatBlockTime,
+  formatBpsAsPercent,
   formatHealthFactor,
   formatWadAsMultiple,
   formatWadAsPercent,
@@ -25,7 +26,8 @@ import { rateKindLabel, simulate } from "../src/core/risk";
 import { PINNED_BLOCK, PINNED_TS, WINDOW_BLOCK, WINDOW_TS } from "../src/lib/recorded-reads/reads-log";
 import { sandboxSnapshot } from "../src/lib/recorded-reads/sandbox-snapshot";
 import { SHARE_PARAM, decodeShareGraph } from "../src/lib/share/encode";
-import { leveragedRestakeLoop } from "../src/lib/strategy/templates";
+import { leveragedRestakeLoop, weethUsdcCarry } from "../src/lib/strategy/templates";
+import { borrowLimitVerdict } from "../src/core/borrow-limit";
 import { NOTICE_DURATION_MS } from "../src/components/shared/notice";
 
 /** The flagship's shipped opening position (templates.ts DEFAULT_BORROW_ALLOCATION_BPS). */
@@ -783,5 +785,83 @@ test.describe("ratified deviation 2 — what a cold share arrival actually paint
     expect(consoleErrors).toEqual([]);
 
     await cold.close();
+  });
+});
+
+/**
+ * W09 — the two-template contrast, in a real browser.
+ *
+ * Scope, judged rather than assumed: the charter's e2e obligation is the fork proof, and the
+ * demo script is the FLAGSHIP's story — the carry has no beat in it. What earns a browser
+ * test is the one claim only a browser can settle: that loading the carry from the shipped
+ * roster drives the real store, the real snapshot and the real simulation to a screen whose
+ * regime sentence and risk state are the ones `core/` computes. The jsdom suite proves the
+ * component renders a ceiling it is handed; this proves the app hands it the right one.
+ *
+ * Every expected figure is computed here from the same `sandboxSnapshot()` the browser runs
+ * on. Nothing below is typed.
+ */
+test.describe("W09 — the carry template renders its own regime, beside the loop's", () => {
+  test("loads from the roster into the amber band, quoting the reserve regime out loud", async ({
+    page,
+  }) => {
+    const carry = weethUsdcCarry();
+    const result = simulate(carry, SNAPSHOT);
+    const hf = valueOf(result.minHealthFactor);
+    if (hf.status !== "healthy") throw new Error("the carry fixture has no healthy HF");
+    const verdict = borrowLimitVerdict(carry, SNAPSHOT);
+    if (verdict.status !== "within") throw new Error(`carry verdict is ${verdict.status}`);
+    const ratio = result.liquidationRatioWad;
+    if (ratio === null) throw new Error("the carry fixture has no liquidation ratio");
+
+    // The carry's whole purpose: it arrives amber. If this ever goes green the default has
+    // drifted out of the window its definition site argues for.
+    expect(riskState(hf)).toBe("warning");
+
+    await openComposerFromLanding(page);
+    await page.getByRole("tab", { name: "Templates" }).click();
+    await page.getByRole("button", { name: /weETH carry/ }).click();
+
+    const borrow = node(page, "borrow");
+    await expect(borrow).toBeVisible();
+    // Five blocks, and no unwrap/restake tail — the carry stops at the borrow.
+    await expect(page.locator(".react-flow__node")).toHaveCount(5);
+
+    // THE REGIME, AS A STATED FACT. Not inferable from the numbers, and not deferred to the
+    // moment the position is already over its limit.
+    await expect(borrow).toContainText("No e-mode category governs this position");
+    await expect(borrow).toContainText(formatBpsAsPercent(verdict.ceiling.ltvBps));
+    await expect(borrow).toContainText(formatBpsAsPercent(verdict.ceiling.ltBps));
+    // …and the category regime the flagship stands in must not be quoted here.
+    await expect(borrow).not.toContainText(
+      formatBpsAsPercent(SNAPSHOT.eModeCategories[0]!.ltvBps.value),
+    );
+
+    // The liquidation claim is a PRICE RATIO between the position's own two assets.
+    await expect(borrow).toContainText("Liquidates if weETH/USDC falls to");
+    await expect(borrow).toContainText(formatWadRatio(valueOf(ratio)));
+
+    // The health factor on screen is core's, to the digit, and it is in its warning state.
+    await expect(borrow).toContainText(formatHealthFactor(hfWadValue(hf)));
+    await expect(borrow.locator("[data-block-state]")).toHaveAttribute(
+      "data-block-state",
+      "warning",
+    );
+  });
+
+  test("the loop quotes the category regime for the same collateral", async ({ page }) => {
+    const loop = leveragedRestakeLoop();
+    const verdict = borrowLimitVerdict(loop, SNAPSHOT);
+    if (verdict.status !== "within") throw new Error(`flagship verdict is ${verdict.status}`);
+    expect(verdict.ceiling.categoryId).not.toBeNull();
+
+    await openComposerFromLanding(page);
+    const borrow = node(page, "borrow");
+    // The SAME weETH collateral, a correlated borrow, and therefore a different regime —
+    // which is the contrast the two templates exist to draw.
+    await expect(borrow).toContainText(`E-mode category ${verdict.ceiling.categoryId}`);
+    await expect(borrow).toContainText("governs this position");
+    await expect(borrow).toContainText(formatBpsAsPercent(verdict.ceiling.ltvBps));
+    await expect(borrow).not.toContainText("No e-mode category governs");
   });
 });

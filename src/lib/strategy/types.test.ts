@@ -91,6 +91,7 @@ const simulation: SimulationResult = {
     [],
   ),
   liquidationRatioWad: entered(880_000_000_000_000_000n),
+  liquidationPair: { collateral: "weETH", debt: "WETH" },
   leverageWad: entered(1_500_000_000_000_000_000n),
   yieldSources: [
     {

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { MAX_BLOCKS, validateGraph, type Block, type StrategyGraph } from "../../core/graph";
-import { flagshipGraph } from "../../../tests/helpers/graphs";
+import { carryGraph, flagshipGraph } from "../../../tests/helpers/graphs";
 import {
   MAX_ENCODED_LENGTH,
   SHARE_PARAM,
@@ -97,6 +97,18 @@ describe("share codec — round trip", () => {
   it("decodes to a graph identical to the one encoded", () => {
     const g = flagshipGraph();
     expect(graphOf(tokenOf(g))).toEqual(g);
+  });
+
+  /**
+   * The carry rides the same untrusted transport, and USDC is a NEW value in it — so the
+   * accepting direction is pinned beside the refusals. The token carries a block-id graph and
+   * integer bps; the USDC address is resolved at plan time from the snapshot and never
+   * travels.
+   */
+  it("round-trips the USDC carry, carrying no address for the new asset", () => {
+    const g = carryGraph();
+    expect(graphOf(tokenOf(g))).toEqual(g);
+    expect(tokenOf(g)).not.toContain("0x");
   });
 
   it("transports foreign edge ids verbatim rather than regenerating them", () => {
@@ -346,7 +358,10 @@ describe("share codec — parameter key and value domains (W05 R7)", () => {
       ["input amount padded", { asset: "ETH", amount: " 10" }, "in"],
       ["input amount negative", { asset: "ETH", amount: "-1" }, "in"],
       ["stake protocol", { protocol: "attacker" }, "stake1"],
-      ["wrap asset", { from: "eETH", to: "USDC" }, "wrap1"],
+      // USDT, not USDC: USDC joined core's `Asset` vocabulary with the W09 carry leg, so it
+      // now clears this gate (and is refused downstream by the wrap matrix, below) exactly as
+      // WETH would. The row still needs a symbol core has never heard of.
+      ["wrap asset", { from: "eETH", to: "USDT" }, "wrap1"],
       ["lend protocol", { protocol: "compound", asset: "weETH" }, "supply1"],
       [
         "borrow bps out of range",
@@ -498,6 +513,10 @@ describe("share codec — structural gate is separate from the shape gate (§5.6
     ],
     ["collateral-only borrow asset", withParams("borrow", { protocol: "aave-v3", asset: "weETH", allocationBps: 7000 }), "collateral-only borrow asset"],
     ["unsupported lend asset", withParams("supply1", { protocol: "aave-v3", asset: "ETH" }), "unsupported lend asset"],
+    // W09: USDC is BORROWABLE and not LENDABLE, and the asymmetry is enforced at the same
+    // gate a stranger's link hits. Supplying it is out of scope; the transport must refuse it
+    // rather than let an unproven collateral leg onto the canvas.
+    ["a USDC lend leg", withParams("supply1", { protocol: "aave-v3", asset: "USDC" }), "unsupported lend asset"],
     ["unsupported wrap pair", withParams("wrap1", { from: "eETH", to: "wstETH" }), "unsupported wrap"],
     ["unsupported unwrap pair", withParams("unwrap", { from: "WETH", to: "weETH" }), "unsupported unwrap"],
     ["non-ETH input asset", withParams("in", { asset: "WETH", amount: "10" }), "input asset must be ETH"],

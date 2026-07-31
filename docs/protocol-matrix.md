@@ -5,11 +5,11 @@ mechanics. **Every on-chain value cites a read label in `docs/protocol-matrix-re
 regenerated reproducibly by `node scripts/protocol-reads.mjs` — the script is hard-pinned to
 the fixture block (hash-verified; `--repin` is an explicit separate mode), and reruns are
 byte-identical (the RPC endpoint is serialized as a redacted provider label only).
-79 reads: 78 successes + 1 documented expected revert (`getRevision`, internal getter), zero
+103 reads: 102 successes + 1 documented expected revert (`getRevision`, internal getter), zero
 unexpected failures.
 
-**Address provenance.** Exactly **four** addresses in this pipeline are not on-chain reads —
-`PoolAddressesProvider`, `WETH`, `weETH`, `wstETH` — and none of them is typed into a script.
+**Address provenance.** Exactly **five** addresses in this pipeline are not on-chain reads —
+`PoolAddressesProvider`, `WETH`, `weETH`, `wstETH`, `USDC` — and none of them is typed into a script.
 They are loaded from `docs/address-roots.json`, which pins them to
 `bgd-labs/aave-address-book` `src/AaveV3Ethereum.sol` at commit
 `ad35d3403b02ff0b4ce27acc23b92781b44f78f4` (79,914 bytes, sha256
@@ -22,7 +22,7 @@ each root by its upstream symbol name.
 Everything else is **derived**: Pool / DataProvider / Oracle / ACLManager from the provider;
 `eETH` and the EtherFi LiquidityPool from `weETH`; `stETH` from `wstETH`. Each derivation is
 also independently confirmed on-chain — the Pool round-trips `ADDRESSES_PROVIDER()`, `LP.eETH()`
-agrees with `weETH.eETH()`, all three token roots are members of `Pool.getReservesList()`, and
+agrees with `weETH.eETH()`, all four listed token roots are members of `Pool.getReservesList()`, and
 every token's `symbol()` must match its label (the check that catches a wrong-but-*callable*
 address, which a typo usually is not). Any mismatch aborts before a fixture is written. An archive-capable RPC (`RPC_URL`) is required —
 the block has aged out of public nodes' recent-state windows.** Claims that are not on-chain
@@ -164,6 +164,41 @@ compatibility stubs, recorded as such.
 | Rate strategy params | optimal 30.00%, base 1.00%, slope1 7.00%, slope2 300.00% | `weETH.strategy.getInterestRateDataBps` |
 | Reserve deficit (v3.7 `unbacked`) | `0` | `weETH.getReserveDeficit` |
 
+### USDC `0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48` (W09 carry leg)
+
+The carry's **borrow** reserve. It is enrolled for debt only: `core/graph.ts` lists USDC in
+`BORROW_ASSETS` and deliberately **not** in `LEND_ASSETS`, so a USDC supply leg is refused by
+the structural gate rather than planned against evidence that does not exist.
+
+| Parameter | Value | Read label |
+|---|---|---|
+| Reserve index in `getReservesList` | **3** | `Pool.getReservesList` |
+| **Decimals** | **6** (read, never assumed — the `assetUnit` every base valuation divides by) | `USDC.getReserveConfigurationData`, cross-checked by `USDC.decimals` |
+| LTV / LT / bonus / reserve factor | 75.00% / 78.00% / 4.50% / 10.00% | `USDC.getReserveConfigurationData` |
+| Flags | collateral ✓ · **borrowing ✓** · active ✓ · frozen ✗ · paused ✗ | same + `USDC.getPaused` |
+| Siloed / debt ceiling | false / 0 — **compatibility stubs**, see the retirement note below | `USDC.getSiloedBorrowing`, `USDC.getDebtCeiling (isolation)` |
+| Supply cap / borrow cap | 2,500,000,000 / 2,250,000,000 | `USDC.getReserveCaps` |
+| aToken / vToken scaledTotalSupply | recorded | `USDC.aToken.scaledTotalSupply`, `USDC.variableDebtToken.scaledTotalSupply` |
+| Available liquidity (virtual) | recorded | `USDC.getVirtualUnderlyingBalance` |
+| Rate strategy params | optimal 92.00%, base 0, slope1 4.00%, slope2 10.00% | `USDC.strategy.getInterestRateDataBps` (off the strategy address the data provider REPORTS for USDC) |
+| Reserve deficit (v3.7 `unbacked`) | `1551621` | `USDC.getReserveDeficit` |
+
+**Consequence for e-mode.** USDC's reserve index (3) is **not** a member of category 1's
+borrowable bitmap (`1` = {WETH}), so no recorded category admits weETH collateral against a
+USDC borrow. `buildPlan`'s admitting-category scan therefore selects **no category** for the
+carry, and every LTV/LT quote in the plan, the risk ledger and the borrow ceiling resolves
+through the reserve pair **7750 / 8000** (§3 consequence 3). This is a selection result, not a
+special case: there is no USDC branch anywhere in the e-mode machinery.
+
+**Isolation mode: the question was retired by the revision, not answered.** v3.0-era Aave gave
+USDC a `borrowable-in-isolation` flag and an isolation debt ceiling, and a reviewer reading
+those docs would expect entries here. **v3.7 removed isolation mode and siloed borrowing
+entirely** — verified two independent ways: by ABSENCE in `validateBorrow` (no debt-ceiling
+branch and no siloed branch exists to fire) and by the IPool verification in §3, with the
+DataProvider's `getSiloedBorrowing`/`getDebtCeiling` recorded above as the compatibility stubs
+they are. **No isolation entries are added to the constraint set**, and this paragraph is the
+written scope-out so the gap is recorded rather than merely absent.
+
 **Exact cap formulas (v3.7 `ValidationLogic`,
 https://github.com/aave-dao/aave-v3-origin/blob/main/src/contracts/protocol/libraries/logic/ValidationLogic.sol):**
 supply cap passes iff `(aToken.scaledTotalSupply() + scaledAmount + accruedToTreasury)` scaled
@@ -212,6 +247,23 @@ aToken/vToken `totalSupply` values from their scaled counterparts at the pinned 
 | weETH source | `0x87625393534d5C102cADB66D37201dF24cc26d4C` — **`"Capped weETH / eETH(ETH) / USD"`** (CAPO adapter), 8 decimals | `Oracle.getSourceOfAsset(weETH)`, `OracleSource(weETH).description` |
 | weETH price | `211593732385` (≈$2,115.94) | `Oracle.getAssetPrice(weETH)` |
 | Implied weETH/WETH oracle ratio | ≈1.09984 (== `weETH.getRate` 1.099835…) | derived from the two price reads |
+| USDC source | `0x3f73F03aa83B2A48ed27E964eD0fDb590332095B` — **`"Capped USDC / USD"`** (CAPO adapter), 8 decimals | `Oracle.getSourceOfAsset(USDC)`, `OracleSource(USDC).description` |
+| **USDC price** | **`99989420` (≈$0.99989 — NOT $1.00)** | `Oracle.getAssetPrice(USDC)` |
+
+> **§5.4/§2.5 consequence — USDC is not a dollar, and the product may not say it is.** The
+> Aave source for USDC is a CAPO-style adapter: a market price with a governance cap on the
+> UPSIDE, not a peg. At the pinned block it reads three basis points below $1.00, so any copy,
+> constant or formula asserting "USDC = $1" disagrees with the oracle at the third decimal.
+> `core/risk.ts` prices USDC through `Oracle.getAssetPrice(USDC)` like every other asset and
+> carries the read description into the provenance note; there is no stablecoin branch.
+>
+> **Which way a depeg cuts for the carry.** USDC is the carry's DEBT, so a USDC *downside*
+> move SHRINKS the debt's base value and RAISES the health factor; the upside is capped by the
+> adapter. The carry's real liquidation vector is therefore the weETH price falling in the
+> oracle's own terms — which is exactly what the rendered figure states, as a **weETH/USDC
+> oracle-price ratio**. Two framings are banned for this pair: the correlated-pair
+> depeg/slashing sentence (SPEC §5.4 wrote it for weETH/WETH specifically) and any unqualified
+> USD level. The honest bridge to "USD" is the feed's own quoted description.
 
 > **§5.4 consequence:** weETH risk pricing is a **capped exchange-rate adapter** over ETH/USD —
 > the oracle prices weETH as (capped rate) × ETH/USD. HF for the weETH/WETH pair therefore
@@ -225,6 +277,7 @@ aToken/vToken `totalSupply` values from their scaled counterparts at the pinned 
 | WETH | `0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2` | `WETH.symbol`="WETH"; reserve idx 0 in `Pool.getReservesList` |
 | eETH | `0x35fA164735182de50811E8e2E824cFb9B6118ac2` | `eETH.symbol`="eETH"; `weETH.eETH (round-trip)`; `LP.eETH (round-trip)` |
 | weETH | `0xCd5fE23C85820F7B72D0926FC9b05b43E359b7ee` | `weETH.symbol`="weETH"; reserve idx 28 |
+| USDC | `0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48` | `USDC.symbol`="USDC"; reserve idx 3; `USDC.decimals`=6 |
 | stETH | `0xae7ab96520DE3A18E5e111B5EaAb095312D7fE84` | `stETH.symbol`="stETH"; `wstETH.stETH (round-trip)` |
 | wstETH | `0x7f39C581F595B53c5cb19bD0b3f8dA6c935E2Ca0` | `wstETH.symbol`="wstETH" |
 
@@ -282,3 +335,15 @@ phase does.
    cannot silently disappear. The P1 fork suite reads the same getter live from the fork.
    Regeneration was purely additive: every pre-existing read reproduced byte-identically at the
    pinned block, which is independent evidence of fixture determinism.
+4. ~~**USDC is not in the recorded reserve set**, so the risk path refuses any non-18-decimal
+   base valuation.~~ **RESOLVED (W09).** `scripts/protocol-reads.mjs` gained a USDC section and
+   the log was regenerated at the same pinned block. The §9.3 discipline held again, and more
+   strictly: the section is APPENDED rather than folded into the existing loops, so all **80**
+   pre-existing entries reproduced byte-identically **at their own indices**, and the diff is
+   exactly 23 new reads plus the `USDC` anchor. The three reserves now read through the same
+   two helper sequences — a reserve-specific read list would have been the special-casing the
+   constraint set exists to refuse. With a six-decimal reserve recorded, `core/risk.ts`'s
+   18-decimal refusal became the dishonest branch (it would have rendered the carry's health
+   factor `unknown` while every input to it existed) and was replaced by the protocol's own
+   `assetUnit = 10^decimals` form, with collateral flooring and debt ceiling per
+   `GenericLogic`.

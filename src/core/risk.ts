@@ -41,21 +41,25 @@
  * rate, the ETH/eETH base valuation and the trailing-window crossing are the review's focus
  * points.
  */
-import { WAD } from "./format";
+import { WAD, formatWadAsPercent } from "./format";
 import {
+  assetUnitOf,
+  collateralBaseValue,
   computeHealthFactor,
+  debtBaseValue,
   hfWadValue,
   liquidationRatioWad,
-  usdBase,
   type CollateralEntry,
   type HealthFactor,
 } from "./health-factor";
-import type { Asset, StrategyGraph } from "./graph";
+import type { Asset, Edge, StrategyGraph } from "./graph";
 import {
   buildPlan,
   effectiveLiquidationThresholdBps,
   effectiveLtvBps,
   inCollateralBitmap,
+  RESERVE_KEYS,
+  type BlockFlow,
   type ChainSnapshot,
   type EModeCategorySnapshot,
   type PlanError,
@@ -66,7 +70,6 @@ import {
 import {
   derived,
   derivedOverWindow,
-  entered,
   type AnyProvenanced,
   type Observed,
   type ParamOrigins,
@@ -84,6 +87,7 @@ import {
   rayDivFloor,
   trailingAprWad,
   vTokenBalance,
+  type SinkFractions,
 } from "./rates";
 
 // ————————————————————————— contract —————————————————————————
@@ -159,6 +163,20 @@ export interface SimulationResult {
   /** Collateral/debt oracle ratio at liquidation, WAD. A correlated pair has no
    * honest USD liquidation price (§5.4). */
   liquidationRatioWad: Provenanced<bigint> | null;
+  /**
+   * WHICH two reserves that ratio is a ratio OF — minted with it, never beside it.
+   *
+   * The ratio alone is unrenderable as a sentence: "liquidates if the ratio falls to 1,587"
+   * is meaningless without the pair, and the block used to fill that gap with the words
+   * "collateral/debt" because a borrow flow has no input asset to read (a borrow consumes a
+   * collateral DEPENDENCY, not a token). That was honest and useless — and with two templates
+   * it hid the whole contrast, since weETH/WETH and weETH/USDC both rendered as
+   * "collateral/debt".
+   *
+   * Null exactly when `liquidationRatioWad` is null, because the two are produced by one
+   * derivation over one checkpoint. They cannot disagree about which position they describe.
+   */
+  liquidationPair: LiquidationPair | null;
   /** Collateral exposure ÷ equity after the closed iteration, WAD. */
   leverageWad: Provenanced<bigint> | null;
   /**
@@ -168,6 +186,16 @@ export interface SimulationResult {
    */
   yieldSources: readonly YieldSource[];
   blockValues: Readonly<Record<string, ComputedBlockValue>>;
+}
+
+/**
+ * The two reserves a liquidation ratio is a ratio of, in numerator/denominator order.
+ * `ReserveKey`, not `Asset`: the ratio is a claim about two ORACLE FEEDS, and the feed is a
+ * property of the reserve — so this names what was actually divided.
+ */
+export interface LiquidationPair {
+  readonly collateral: ReserveKey;
+  readonly debt: ReserveKey;
 }
 
 export interface ComputedBlockValue {
@@ -235,8 +263,8 @@ export interface RiskCheckpoint {
   readonly totalDebtBase: bigint | null;
   /** `computeHealthFactor(collateral, totalDebtBase)` — nothing else. */
   readonly healthFactor: HealthFactor;
-  /** Collateral wei on the single correlated collateral reserve, or null if the
-   *  position is not a single correlated pair. */
+  /** Collateral wei on the single collateral reserve, or null if the position is not
+   *  exactly one collateral reserve against exactly one debt reserve. */
   readonly collateralWei: bigint | null;
   readonly debtWei: bigint | null;
   /** The legs standing at this point, in walk order — the one source the entries, the
@@ -269,12 +297,20 @@ interface PriceFeed {
 }
 
 /**
- * Asset → the oracle price that values it, all four from the pinned snapshot (§5.3 bans a
- * non-oracle USD in the risk path). ETH and eETH are money claims and are spelled out:
+ * Asset → the oracle price that values it, every one of them from the pinned snapshot (§5.3
+ * bans a non-oracle USD in the risk path). ETH and eETH are money claims and are spelled out:
  * ETH ≡ WETH by wrap and the matrix records that feed's own description as "ETH / USD";
  * eETH ≡ ETH 1:1 is the denomination Aave's own weETH source already assumes, its
  * description being "Capped weETH / eETH(ETH) / USD". The two assets with no reserve on
  * this market have no price here — a `null` badge, never a proxy.
+ *
+ * NO ASSET IS ASSUMED TO BE WORTH A DOLLAR, and USDC is the one that makes the rule visible:
+ * its Aave source is a CAPO-style capped adapter whose recorded description is
+ * "Capped USDC / USD" (read label `OracleSource(USDC).description`), and its recorded price
+ * at the pinned block is BELOW 1e8 — the feed itself disagrees with a peg, in the third
+ * decimal. Every USDC figure in this module therefore goes through `Oracle.getAssetPrice(USDC)`
+ * exactly like every other asset's; there is no stablecoin branch, and a `1` anywhere here
+ * would be a fabricated observation wearing a plausible number.
  */
 const PRICE_FEED: Readonly<Record<Asset, PriceFeed | null>> = {
   weETH: {
@@ -295,6 +331,11 @@ const PRICE_FEED: Readonly<Record<Asset, PriceFeed | null>> = {
     semantics:
       "priced by Oracle.getAssetPrice(WETH) — eETH ≡ ETH 1:1, the denomination Aave's own weETH source (\"Capped weETH / eETH(ETH) / USD\") already assumes",
   },
+  USDC: {
+    key: "USDC",
+    semantics:
+      "priced by Oracle.getAssetPrice(USDC) — a market feed with a governance cap on the upside, recorded as OracleSource(USDC).description = \"Capped USDC / USD\", not a fixed dollar",
+  },
   stETH: null,
   wstETH: null,
 };
@@ -308,7 +349,32 @@ interface Valuation {
   readonly note?: string;
 }
 
-function valueInBase(amountWei: bigint, asset: Asset, snapshot: ChainSnapshot): Valuation {
+/**
+ * WHICH side of the position a valuation is for — and therefore which way it rounds.
+ *
+ * Not a stylistic distinction: `GenericLogic` floors collateral and CEILS debt, so the
+ * protocol never over-accounts what secures a position nor under-accounts what threatens it.
+ * A single floor-everything valuation understates debt, which understates the debt base, which
+ * overstates the health factor — the optimistic direction, on the gating number.
+ */
+type ValuationSide = "collateral" | "debt";
+
+/**
+ * Base-currency value of a token amount, at the reserve's OWN `assetUnit`.
+ *
+ * The 18-decimal refusal this replaces was honest while the recorded matrix held no
+ * six-decimal reserve: applying an 1e18 divisor to a 1e6 token would have been off by a factor
+ * of 1e12, and refusing beat guessing. The matrix now records USDC (decimals READ, not
+ * assumed), so the general form — the protocol's own, `assetUnit = 10^decimals` — is inside
+ * the recorded set rather than outside it, and the refusal would now be the thing that lies:
+ * it would render the carry's health factor `unknown` while every input to it exists.
+ */
+function valueInBase(
+  amountWei: bigint,
+  asset: Asset,
+  snapshot: ChainSnapshot,
+  side: ValuationSide,
+): Valuation {
   const feed = PRICE_FEED[asset];
   if (feed === null) {
     return {
@@ -318,15 +384,6 @@ function valueInBase(amountWei: bigint, asset: Asset, snapshot: ChainSnapshot): 
     };
   }
   const reserve = snapshot.reserves[feed.key];
-  // `usdBase` is the 18-decimal form; anything else is outside the recorded matrix and
-  // refuses rather than silently applying the wrong scale.
-  if (reserve.decimals.value !== 18) {
-    return {
-      base: null,
-      price: reserve.priceBase,
-      expression: "base valuation for a non-18-decimal reserve is outside the recorded matrix",
-    };
-  }
   if (reserve.priceBase.value <= 0n) {
     return {
       base: null,
@@ -334,10 +391,18 @@ function valueInBase(amountWei: bigint, asset: Asset, snapshot: ChainSnapshot): 
       expression: `the feed that values ${asset} returned no usable price`,
     };
   }
+  const assetUnit = assetUnitOf(reserve.decimals.value);
+  const price = reserve.priceBase.value;
   return {
-    base: usdBase(amountWei, reserve.priceBase.value),
+    base:
+      side === "debt"
+        ? debtBaseValue(amountWei, price, assetUnit)
+        : collateralBaseValue(amountWei, price, assetUnit),
     price: reserve.priceBase,
-    expression: "floor(amountWei × priceBase / 1e18)",
+    expression:
+      side === "debt"
+        ? "mulDivCeil(amountWei, priceBase, 10^decimals) — GenericLogic ceils debt"
+        : "floor(amountWei × priceBase / 10^decimals) — GenericLogic floors collateral",
     note: `AaveOracle base currency (8-dec), ${feed.semantics}`,
   };
 }
@@ -346,10 +411,20 @@ function baseValueProv(
   amount: Provenanced<bigint>,
   asset: Asset,
   snapshot: ChainSnapshot,
+  side: ValuationSide,
 ): Provenanced<bigint> | null {
-  const valuation = valueInBase(amount.value, asset, snapshot);
+  const valuation = valueInBase(amount.value, asset, snapshot, side);
   if (valuation.base === null || valuation.price === null) return null;
-  return derived(valuation.base, valuation.expression, [amount, valuation.price], valuation.note);
+  const feed = PRICE_FEED[asset];
+  const decimals = feed === null ? [] : [snapshot.reserves[feed.key].decimals];
+  // The reserve's `decimals` observation is a genuine INPUT once the divisor is derived from
+  // it, so the provenance tree names it rather than hiding an 1e18 that used to be a literal.
+  return derived(
+    valuation.base,
+    valuation.expression,
+    [amount, valuation.price, ...decimals],
+    valuation.note,
+  );
 }
 
 // ————————————————————————— the ledger (§2.3) —————————————————————————
@@ -411,10 +486,16 @@ function totalDebtBaseOf(debts: readonly DebtLeg[]): bigint | null {
 }
 
 /**
- * The correlated-pair wei, defined only when the position is exactly one collateral reserve
+ * The single-pair wei, defined only when the position is exactly one collateral reserve
  * against exactly one debt reserve — the only shape §5.4's liquidation RATIO describes.
+ *
+ * "Single pair", not "correlated pair": the carry (weETH collateral, USDC debt) has this shape
+ * and is emphatically NOT correlated. The RATIO is well defined for both — it is a claim about
+ * two oracle prices — but the SENTENCE beside it is not: §5.4's depeg/slashing wording was
+ * written for weETH/WETH specifically, and the renderer chooses its copy from the pair's
+ * assets, never from the fact that a ratio exists.
  */
-function correlatedPairOf(
+function singlePairOf(
   supplies: readonly SupplyLeg[],
   debts: readonly DebtLeg[],
 ): { readonly collateralWei: bigint; readonly debtWei: bigint } | null {
@@ -436,7 +517,7 @@ function checkpointOf(
 ): RiskCheckpoint {
   const collateral = collateralEntriesOf(supplies);
   const totalDebtBase = totalDebtBaseOf(debts);
-  const pair = correlatedPairOf(supplies, debts);
+  const pair = singlePairOf(supplies, debts);
   return {
     blockId,
     cause,
@@ -502,7 +583,7 @@ function ledgerFrom(plan: PlanSuccess, snapshot: ChainSnapshot): RiskLedger {
         reserve: key,
         amountWei: amount.value,
         amountProv: amount,
-        baseProv: baseValueProv(amount, flow.inputAsset!, snapshot),
+        baseProv: baseValueProv(amount, flow.inputAsset!, snapshot, "collateral"),
         ltBps: effectiveLiquidationThresholdBps(reserve, targetCategory),
         ltInputs: ltInputsOf(reserve, targetCategory),
         ltvBps: effectiveLtvBps(reserve, targetCategory),
@@ -519,7 +600,7 @@ function ledgerFrom(plan: PlanSuccess, snapshot: ChainSnapshot): RiskLedger {
         reserve: key,
         amountWei: amount.value,
         amountProv: amount,
-        baseProv: baseValueProv(amount, flow.outputAsset!, snapshot),
+        baseProv: baseValueProv(amount, flow.outputAsset!, snapshot, "debt"),
         priceBase: reserve.priceBase,
       });
       checkpoints.push(checkpointOf(flow.blockId, "borrow", supplies, debts));
@@ -550,10 +631,35 @@ export function riskLedger(graph: StrategyGraph, snapshot: ChainSnapshot): RiskL
 
 // ————————————————————————— provenance minting —————————————————————————
 
+/**
+ * A leg's citation for the health factor: its BASE VALUE, not its amount and price flattened
+ * beside each other.
+ *
+ * `computeHealthFactor` consumes `leg.baseProv.value` on both sides — that is literally what
+ * `collateralEntriesOf` and `totalDebtBaseOf` hand it — and `baseValueProv` already carries
+ * the amount, the oracle price AND the reserve's `decimals` observation, because the divisor
+ * is derived from that read. The old flattened pair cited amount and price directly and so
+ * dropped the asset unit from the trail: invisible while every reserve was 18-decimal, and a
+ * missing citation the moment a six-decimal leg arrived — the rendered carry health factor
+ * divides one leg by 1e18 and the other by 1e6 and said so nowhere.
+ *
+ * A leg whose base value did not resolve has no `baseProv` to cite, and its checkpoint's
+ * health factor is `unknown` for exactly that reason; the amount and price it does have are
+ * cited so the unavailable state still traces to something rather than to an empty list.
+ */
+function legBaseInputsOf(leg: SupplyLeg | DebtLeg): readonly AnyProvenanced[] {
+  return leg.baseProv === null ? [leg.amountProv, leg.priceBase] : [leg.baseProv];
+}
+
+/**
+ * The health factor's own inputs: one derivation per leg, plus the LT observations that
+ * decided each collateral's weight. Nothing here builds a parallel citation list — the base
+ * value IS the citation, and everything under it hangs off that one node.
+ */
 function healthFactorInputsOf(cp: RiskCheckpoint): readonly AnyProvenanced[] {
   const inputs: AnyProvenanced[] = [];
-  for (const leg of cp.supplies) inputs.push(leg.amountProv, leg.priceBase, ...leg.ltInputs);
-  for (const leg of cp.debts) inputs.push(leg.amountProv, leg.priceBase);
+  for (const leg of cp.supplies) inputs.push(...legBaseInputsOf(leg), ...leg.ltInputs);
+  for (const leg of cp.debts) inputs.push(...legBaseInputsOf(leg));
   return inputs;
 }
 
@@ -718,21 +824,25 @@ function borrowApyOf(
   return { kind: "apy", wad };
 }
 
-const RESERVE_KEYS = ["weETH", "WETH"] as const;
-
 interface ReserveRates {
   readonly supplyApy: ProvenancedRate | null;
   readonly borrowApy: ProvenancedRate | null;
 }
 
+/**
+ * The rate walk is generic over the reserve set — the USDC borrow leg's APY is the SAME
+ * post-action machinery (`borrowApyOf`) over the USDC reserve's own READ strategy params, not
+ * a stablecoin branch. `RESERVE_KEYS` is `core/plan.ts`'s single declaration, so a reserve
+ * cannot join the snapshot type and skip this loop.
+ */
 function reserveRatesOf(
   plan: PlanSuccess,
   snapshot: ChainSnapshot,
 ): Readonly<Record<ReserveKey, ReserveRates>> {
-  const added: Record<ReserveKey, bigint> = { weETH: 0n, WETH: 0n };
-  const taken: Record<ReserveKey, bigint> = { weETH: 0n, WETH: 0n };
-  const suppliedBy: Record<ReserveKey, AnyProvenanced[]> = { weETH: [], WETH: [] };
-  const borrowedBy: Record<ReserveKey, AnyProvenanced[]> = { weETH: [], WETH: [] };
+  const added: Record<ReserveKey, bigint> = { weETH: 0n, WETH: 0n, USDC: 0n };
+  const taken: Record<ReserveKey, bigint> = { weETH: 0n, WETH: 0n, USDC: 0n };
+  const suppliedBy: Record<ReserveKey, AnyProvenanced[]> = { weETH: [], WETH: [], USDC: [] };
+  const borrowedBy: Record<ReserveKey, AnyProvenanced[]> = { weETH: [], WETH: [], USDC: [] };
 
   for (const flow of plan.flows) {
     if (flow.type === "lend") {
@@ -749,6 +859,7 @@ function reserveRatesOf(
   const rates: Record<ReserveKey, ReserveRates> = {
     weETH: { supplyApy: null, borrowApy: null },
     WETH: { supplyApy: null, borrowApy: null },
+    USDC: { supplyApy: null, borrowApy: null },
   };
   for (const key of RESERVE_KEYS) {
     const reserve = snapshot.reserves[key];
@@ -821,16 +932,20 @@ function blockValuesOf(
     values[flow.blockId] = {
       inputAsset: flow.inputAsset,
       inputAmountWei: flow.inputWei,
+      // A block's rendered in/out value is a VALUATION of a token flow, not the protocol's
+      // debt accounting, so both sides floor. The ceiling belongs to the debt ledger above,
+      // where it is what `validateHFAndLtv` reads; applying it to a displayed flow amount
+      // would state a protocol conservatism about a number the protocol never sees.
       inputValueBase:
         flow.inputWei === null || flow.inputAsset === null
           ? null
-          : baseValueProv(flow.inputWei, flow.inputAsset, snapshot),
+          : baseValueProv(flow.inputWei, flow.inputAsset, snapshot, "collateral"),
       outputAsset,
       outputAmountWei,
       outputValueBase:
         outputAmountWei === null || outputAsset === null
           ? null
-          : baseValueProv(outputAmountWei, outputAsset, snapshot),
+          : baseValueProv(outputAmountWei, outputAsset, snapshot, "collateral"),
       // Gas needs estimateGas/feeHistory against a provider, which arrives with the sandbox
       // session in P3a. Until then every gas slot renders its authored unavailable state
       // rather than a quoted-looking zero.
@@ -859,25 +974,44 @@ function blockValuesOf(
  * Unqualified USD liquidation prices for a correlated pair stay banned (§5.4): no such field
  * exists here, so none can be rendered.
  */
-function liquidationRatioOf(min: RiskCheckpoint | null): Provenanced<bigint> | null {
+function liquidationRatioOf(
+  min: RiskCheckpoint | null,
+  snapshot: ChainSnapshot,
+): { readonly wad: Provenanced<bigint>; readonly pair: LiquidationPair } | null {
   if (min === null) return null;
   const { collateralWei, debtWei } = min;
-  // Non-null exactly when the position is a single correlated pair, which also makes both
-  // leg lists non-empty and gives every supply the same effective threshold.
+  // Non-null exactly when the position is a single collateral reserve against a single debt
+  // reserve, which also makes both leg lists non-empty and gives every supply the same
+  // effective threshold — and gives each side exactly one `decimals` observation to divide by.
   if (collateralWei === null || debtWei === null) return null;
   if (collateralWei <= 0n || debtWei <= 0n) return null;
   const first = min.supplies[0]!;
+  const debtLeg = min.debts[0]!;
   if (first.ltBps <= 0 || first.ltBps > 10_000) return null;
-  return derived(
-    liquidationRatioWad(collateralWei, debtWei, first.ltBps),
-    "debtWei × 1e4 × WAD / (collateralWei × ltBps), ceiling",
+  const collateralDecimals = snapshot.reserves[first.reserve].decimals;
+  const debtDecimals = snapshot.reserves[debtLeg.reserve].decimals;
+  const pair: LiquidationPair = { collateral: first.reserve, debt: debtLeg.reserve };
+  const wad = derived(
+    liquidationRatioWad(
+      collateralWei,
+      debtWei,
+      first.ltBps,
+      assetUnitOf(collateralDecimals.value),
+      assetUnitOf(debtDecimals.value),
+    ),
+    "debtWei × unitColl × 1e4 × WAD / (collateralWei × unitDebt × ltBps), ceiling",
     [
       ...min.supplies.map((s) => s.amountProv),
       ...min.debts.map((d) => d.amountProv),
       ...first.ltInputs,
+      // The two `decimals` reads are inputs the moment the units stop cancelling, which is
+      // exactly the mixed-decimals case this generalization exists for.
+      collateralDecimals,
+      debtDecimals,
     ],
-    "the collateral/debt oracle ratio at HF = 1, at the minimum-HF step",
+    "the collateral/debt oracle price ratio at HF = 1, at the minimum-HF step",
   );
+  return { wad, pair };
 }
 
 /**
@@ -891,7 +1025,7 @@ function leverageOf(
 ): Provenanced<bigint> | null {
   if (initialAmountWei === null) return null;
   if (final === null || final.collateral === null || final.collateral.length === 0) return null;
-  const equity = valueInBase(initialAmountWei.value, "ETH", snapshot);
+  const equity = valueInBase(initialAmountWei.value, "ETH", snapshot, "collateral");
   if (equity.base === null || equity.base === 0n || equity.price === null) return null;
   let exposure = 0n;
   for (const entry of final.collateral) exposure += entry.base;
@@ -955,7 +1089,29 @@ function stakingAprOf(snapshot: ChainSnapshot): ProvenancedRate | null {
 
 /** The three rate legs §5.2 composes, present only when ALL of them are. */
 interface CompositionLegs {
-  readonly bBps: number;
+  /**
+   * WHERE the borrowed value comes to rest — as fractions of the borrow's OWN realized base
+   * value, so `q_s + q_k + q_c = 1` by construction. Cash is the residual and earns nothing.
+   */
+  readonly sinks: SinkFractions;
+  /**
+   * Where the INITIAL EQUITY comes to rest, same three sinks, as fractions of the input's
+   * realized base value. These do NOT sum to 1: value lost to conversion floors, and any gap
+   * between the capped weETH feed and `weETH.getRate`, is a mark-to-market fact that belongs
+   * to no sink and is credited to no rate (`netApyWad`).
+   */
+  readonly equity: SinkFractions;
+  /**
+   * The borrow's realized base value per unit of initial equity.
+   *
+   * NOT `b`, and no longer `b·p_s`. `buildPlan` sizes the borrow from `collateralBase`, floors
+   * it to the borrowed reserve's own token granularity, and that token is valued by its own
+   * oracle — so at six decimals the round trip alone drops real value the allocation product
+   * never sees. The exposure the position carries is measured off the plan, not multiplied out.
+   */
+  readonly bEffWad: bigint;
+  /** Every provenanced base value the three readings above were measured from. */
+  readonly magnitudes: readonly AnyProvenanced[];
   readonly stake: ProvenancedRate;
   readonly supply: ProvenancedRate;
   readonly debt: ProvenancedRate;
@@ -968,17 +1124,219 @@ interface CompositionLegs {
  * second borrow, a rate that did not resolve — returns null and takes the whole family with
  * it, rather than publishing a partial composition that reads as a complete one.
  */
+/** Where borrowed value can come to rest, and what each resting place earns. */
+type SinkKind = "cash" | "staked" | "supplied";
+
+/**
+ * THE SINK ENUMERATION — every terminal state a borrow's value can reach in v1, classified.
+ *
+ * `plan.ts` compiles exactly six block kinds, so the reachable set from a borrow is closed and
+ * small. Each row is a place value can SIT, and the rate it earns while sitting there:
+ *
+ *   input   → ETH, before anything is done with it        → CASH,     earns nothing
+ *   borrow  → the borrowed token itself (WETH, USDC)  → CASH,     earns nothing
+ *   unwrap  → ETH                                      → CASH,     earns nothing
+ *   stake   → eETH (rebasing)                          → STAKED,   earns r_stake
+ *   wrap    → weETH (value-accruing wrapper over eETH) → STAKED,   earns r_stake
+ *   lend    → aToken collateral                        → SUPPLIED, earns r_coll
+ *
+ * `wrap` sits with `stake` deliberately: wrapping eETH into weETH changes the token, not the
+ * position — the wrapper's exchange rate accrues the same staking yield. Only handing it to
+ * Aave adds the supply leg on top.
+ *
+ * Anything NOT in this table returns null and refuses the whole composition. `swap` and
+ * `auto-wrap` exist in the block-type union but have no `plan.ts` arm in v1, and a sink whose
+ * rate is not already one of the three required legs must not be priced by guessing.
+ */
+function sinkKindOf(blockType: string | undefined): SinkKind | null {
+  switch (blockType) {
+    case "input":
+    case "borrow":
+    case "unwrap":
+      return "cash";
+    case "stake":
+    case "wrap":
+      return "staked";
+    case "lend":
+      return "supplied";
+    default:
+      return null;
+  }
+}
+
+/** What rests in each sink, in oracle base currency, plus the valuations it was summed from. */
+interface SinkBases {
+  readonly suppliedBase: bigint;
+  readonly stakedBase: bigint;
+  /** Every valuation this walk consumed, so the composition can cite its magnitudes. */
+  readonly cited: readonly AnyProvenanced[];
+}
+
+/**
+ * ONE valuation definition for the whole composition: the market value of a HOLDING, which is
+ * `valueInBase`'s collateral side. No second conversion chain exists here — in particular
+ * nothing re-derives weETH through `weETH.getRate`, because the position is marked by the
+ * oracle the protocol itself marks it by.
+ *
+ * The debt side is deliberately not used. `GenericLogic` ceils debt so the HEALTH FACTOR is
+ * never optimistic — a safety convention about a gating number, not a claim about worth.
+ * Importing it here would buy no conservatism, because a larger `b_eff` RAISES net APY for a
+ * recycled loop and LOWERS it for a terminal carry, so there is no safe direction to round in;
+ * it would only inject a floor/ceil asymmetry that reports a document recycling all of its
+ * borrow as recycling 99.9999999999% of it. The ledger's debt valuation is untouched and still
+ * ceils, in its own home.
+ */
+function holdingValue(
+  amount: Provenanced<bigint>,
+  asset: Asset | null,
+  snapshot: ChainSnapshot,
+): Provenanced<bigint> | null {
+  if (asset === null) return null;
+  return baseValueProv(amount, asset, snapshot, "collateral");
+}
+
+/**
+ * WHAT VALUE actually reaches each sink — the composition's magnitudes, in oracle base
+ * currency, read off the plan's own realized amounts.
+ *
+ * Not a boolean, and not the edge allocations. Allocations are user-editable
+ * (`setEdgeAllocationBps`, and any shared document can carry them) and `buildPlan` applies them
+ * to real amounts, so a document can route any fraction anywhere. Three earlier readings all
+ * misprice real documents: "is a lend reachable" gives a 1%-recycled path the full leverage
+ * term; "recycled or not" reports `borrow → unwrap → stake` as idle cash when it is eETH
+ * earning the staking rate; and the ALLOCATION PRODUCT — the bps chain, which this replaces —
+ * prices the value that was ASKED FOR rather than the value that arrived.
+ *
+ * WHY NOMINAL FRACTIONS WERE WRONG (Codex W09 round-7). The product of edge allocations says
+ * 100% of the equity reached the lend and the borrow is `b` of it. The plan says otherwise:
+ * staking mints shares and wrapping converts them, both flooring; the supplied weETH is then
+ * valued by the CAPPED weETH feed, which is free to diverge from `weETH.getRate` (a live
+ * property, `docs/protocol-matrix.md` §2.5); and the borrowed token is floored to its own
+ * granularity — at USDC's six decimals that alone is worth ~1e-4 of the borrow. So the nominal
+ * reading publishes a run-rate for a position the document does not hold. The fix is to measure
+ * the exposures instead of computing them, through the SAME base valuation the ledger uses.
+ *
+ * THE WALK IS STILL THE PLAN'S OWN ROUTING RULE, and it is still what CLASSIFIES each resting
+ * place. `validateGraph` gives every non-input block exactly one incoming edge, so each block
+ * downstream has a UNIQUE path and `flowById` holds the amount that actually crossed it. Value
+ * RESTS wherever the plan did not route it onward: `outputWei − Σ(inputWei of its children)`,
+ * measured per block rather than only at leaves.
+ *
+ * ILL-DEFINED SHAPES REFUSE (null → the composition renders its unavailable state):
+ *  - a block kind the enumeration above does not cover;
+ *  - a supplied position that flows onward, where "is this still collateral" is not something
+ *    an allocation walk can answer;
+ *  - a block reachable twice, which the one-incoming-edge rule forbids and which would double
+ *    count if it ever became reachable;
+ *  - children consuming more than their producer emitted (negative retention) — the realized,
+ *    exact form of the over-allocation check the nominal walk had to approximate in bps;
+ *  - an amount with no oracle price, which is a missing read and never a zero.
+ */
+function realizedSinksFrom(
+  graph: StrategyGraph,
+  flowById: ReadonlyMap<string, BlockFlow>,
+  startBlockId: string,
+  snapshot: ChainSnapshot,
+): SinkBases | null {
+  const typeById = new Map(graph.blocks.map((b) => [b.id, b.type]));
+  const outgoing = new Map<string, Edge[]>();
+  for (const edge of graph.edges) {
+    const existing = outgoing.get(edge.source);
+    if (existing === undefined) outgoing.set(edge.source, [edge]);
+    else existing.push(edge);
+  }
+  const seen = new Set<string>();
+  const frontier: string[] = [startBlockId];
+  const cited: AnyProvenanced[] = [];
+  let suppliedBase = 0n;
+  let stakedBase = 0n;
+  while (frontier.length > 0) {
+    const id = frontier.pop()!;
+    if (seen.has(id)) return null;
+    seen.add(id);
+    const kind = sinkKindOf(typeById.get(id));
+    if (kind === null) return null;
+    const flow = flowById.get(id);
+    if (flow === undefined) return null;
+    const edges = outgoing.get(id) ?? [];
+    if (kind === "supplied") {
+      // A lend has NO token output, so its only legal outgoing edge is a collateral
+      // DEPENDENCY into a borrow — no value crosses it, and the walk stops here. An edge to
+      // anything else would be a token flow out of a lend, which does not exist. What rests
+      // here is exactly what the supply consumed.
+      if (edges.some((edge) => typeById.get(edge.target) !== "borrow")) return null;
+      if (flow.inputWei === null) return null;
+      const value = holdingValue(flow.inputWei, flow.inputAsset, snapshot);
+      if (value === null) return null;
+      suppliedBase += value.value;
+      cited.push(value);
+      continue;
+    }
+    if (flow.outputWei === null) return null;
+    const routed: Array<Provenanced<bigint>> = [];
+    for (const edge of edges) {
+      // Same rule from the other end: a borrow's input is a collateral dependency, not a
+      // token flow (`plan.ts` gives every borrow `input: null`), so equity never crosses
+      // into it. The borrowed value's own walk starts AT the borrow instead.
+      if (typeById.get(edge.target) === "borrow") continue;
+      const child = flowById.get(edge.target);
+      if (child === undefined || child.inputWei === null) return null;
+      routed.push(child.inputWei);
+      frontier.push(edge.target);
+    }
+    const retainedWei = routed.reduce((rest, r) => rest - r.value, flow.outputWei.value);
+    if (retainedWei < 0n) return null;
+    if (kind !== "staked" || retainedWei === 0n) continue;
+    const retained =
+      routed.length === 0
+        ? flow.outputWei
+        : derived(retainedWei, "outputWei − Σ(inputWei routed onward)", [flow.outputWei, ...routed]);
+    const value = holdingValue(retained, flow.outputAsset, snapshot);
+    if (value === null) return null;
+    stakedBase += value.value;
+    cited.push(value);
+  }
+  return { suppliedBase, stakedBase, cited };
+}
+
 function compositionLegsOf(
   graph: StrategyGraph,
   plan: PlanSuccess,
+  snapshot: ChainSnapshot,
   rates: Readonly<Record<ReserveKey, ReserveRates>>,
   stakingApy: ProvenancedRate | null,
 ): CompositionLegs | null {
   if (stakingApy === null) return null;
   const borrowBlocks = graph.blocks.filter((b) => b.type === "borrow");
   if (borrowBlocks.length !== 1) return null;
-  const bBps = borrowBlocks[0]!.params["allocationBps"];
-  if (typeof bBps !== "number") return null;
+  const inputBlock = graph.blocks.find((b) => b.type === "input");
+  if (inputBlock === undefined) return null;
+
+  const flowById = new Map(plan.flows.map((f) => [f.blockId, f] as const));
+  const inputFlow = flowById.get(inputBlock.id);
+  const borrowFlow = flowById.get(borrowBlocks[0]!.id);
+  if (inputFlow?.outputWei == null || borrowFlow?.outputWei == null) return null;
+  const equityBase = holdingValue(inputFlow.outputWei, inputFlow.outputAsset, snapshot);
+  const borrowBase = holdingValue(borrowFlow.outputWei, borrowFlow.outputAsset, snapshot);
+  // Both are DIVISORS: `p_*` and `b_eff` are per unit of equity, `q_*` per unit of borrow. A
+  // zero on either leaves the fractions undefined, so the composition refuses rather than
+  // dividing — the same posture as the no-collateral refusal below.
+  if (equityBase === null || equityBase.value <= 0n) return null;
+  if (borrowBase === null || borrowBase.value <= 0n) return null;
+
+  /**
+   * BOTH SIDES, one walk. The initial equity splits into the same three sinks the borrowed
+   * value does — the block vocabulary is the same, so the classification is — and the borrow
+   * is sized against the collateral that ACTUALLY ARRIVED at a lend, which is `buildPlan`'s
+   * own rule (`collateralBase` sums the supplies preceding the borrow).
+   */
+  const equityBases = realizedSinksFrom(graph, flowById, inputBlock.id, snapshot);
+  if (equityBases === null) return null;
+  // Nothing reached a lend, so there is no collateral to size a borrow against and no
+  // composition to publish. Refused rather than divided into.
+  if (equityBases.suppliedBase === 0n) return null;
+  const borrowedBases = realizedSinksFrom(graph, flowById, borrowBlocks[0]!.id, snapshot);
+  if (borrowedBases === null) return null;
 
   const collateralReserves = new Set(
     plan.flows.filter((f) => f.type === "lend").map((f) => f.reserve!),
@@ -991,7 +1349,21 @@ function compositionLegsOf(
   const supply = rates[[...collateralReserves][0]!].supplyApy;
   const debt = rates[[...debtReserves][0]!].borrowApy;
   if (supply === null || debt === null) return null;
-  return { bBps, stake: stakingApy, supply, debt };
+  return {
+    equity: {
+      suppliedWad: (equityBases.suppliedBase * WAD) / equityBase.value,
+      stakedWad: (equityBases.stakedBase * WAD) / equityBase.value,
+    },
+    sinks: {
+      suppliedWad: (borrowedBases.suppliedBase * WAD) / borrowBase.value,
+      stakedWad: (borrowedBases.stakedBase * WAD) / borrowBase.value,
+    },
+    bEffWad: (borrowBase.value * WAD) / equityBase.value,
+    magnitudes: [equityBase, borrowBase, ...equityBases.cited, ...borrowedBases.cited],
+    stake: stakingApy,
+    supply,
+    debt,
+  };
 }
 
 /**
@@ -1012,20 +1384,67 @@ function grossApyOf(legs: CompositionLegs): Provenanced<bigint> {
   );
 }
 
+/**
+ * The net run-rate, in the form the DOCUMENT earns rather than the form the flagship earns.
+ *
+ * §5.2's `(1 + b)` collateral term encodes one closed loop iteration: the borrowed asset is
+ * unwrapped, restaked and re-supplied, so `(1 + b)·E` really does earn the collateral rate.
+ * A terminal borrow never redeploys anything — only `E` is supplied — and charging the
+ * leveraged form there credits yield to capital that was never put to work. The gap is exactly
+ * `b·r_coll`; at the carry's ratified 6000 bps default against this pin's collateral rate that
+ * is over a percentage point of invented return, on the panel AND on the execution receipt.
+ *
+ * The retained-cash reading is STATED in the note rather than left for the reader to infer: the
+ * document says nothing about what happens to the borrowed USDC, so the figure credits it
+ * nothing, and says so (SPEC §5 — the assumption that reaches the screen is named). A refusal
+ * would be the wrong answer here: every rate resolved, and "this document's run-rate is
+ * unavailable" would be false about a document whose rate is perfectly well defined as written.
+ *
+ * The percentages in that note are the MEASURED fractions, so the sentence and the arithmetic
+ * cannot drift apart: if the oracle marks the supplied collateral below the equity that bought
+ * it, the note says so at two decimals and the number carries the same fact at full precision.
+ */
 function netApyOf(legs: CompositionLegs, gross: Provenanced<bigint>): Provenanced<bigint> {
-  const bWad = (BigInt(legs.bBps) * WAD) / BigInt(FULL_ALLOCATION_BPS);
   return derivedOverWindow(
-    netApyWad(bWad, legs.stake.wad.value, legs.supply.wad.value, legs.debt.wad.value),
-    "(1 + b)(1 + r_coll) − b(1 + r_debt) − 1",
-    [entered(legs.bBps), gross, legs.debt.wad],
+    netApyWad(
+      legs.equity,
+      legs.sinks,
+      legs.bEffWad,
+      legs.stake.wad.value,
+      legs.supply.wad.value,
+      legs.debt.wad.value,
+    ),
+    "p_s·r_coll + p_k·r_stake + q_s·b_eff·r_coll + q_k·b_eff·r_stake − b_eff·r_debt, with p_* = sinkBase/equityBase, q_* = sinkBase/borrowBase and b_eff = borrowBase/equityBase — every base value the plan's own realized amount through the oracle",
+    [gross, legs.debt.wad, ...legs.magnitudes],
     WINDOW_REASON,
-    "§5.2, current-rate run-rate over one iteration; incentives and points excluded by construction",
+    "§5.2, current-rate run-rate over one iteration; incentives and points excluded by " +
+      `construction; of the initial equity this document supplies ${formatWadAsPercent(legs.equity.suppliedWad)} ` +
+      `as collateral and leaves ${formatWadAsPercent(legs.equity.stakedWad)} staked, and of the ` +
+      `borrowed value — sized against the collateral that arrived — it supplies ${formatWadAsPercent(legs.sinks.suppliedWad)} ` +
+      `and leaves ${formatWadAsPercent(legs.sinks.stakedWad)} staked; each cash residual is ` +
+      "credited no yield because the document does not deploy it",
   );
 }
 
 /**
+ * A WAD fraction as basis points, rounded to NEAREST.
+ *
+ * The weights are a DISPLAY granularity — the shares §2.8 renders beside each leg — and the
+ * fractions feeding them are now realized measurements rather than the round allocations they
+ * used to be. Truncating would render a 69.99999999990% exposure as 6999 bps: not a more
+ * honest 70% but a less honest one, and it would break the loop's own sum invariant by a
+ * basis point for no reason a reader could name. Rounding to the nearest basis point is what
+ * "to the nearest basis point" means. The published net APY does NOT pass through here — it
+ * keeps full WAD precision, where the same dust is worth ~1e-13 and is simply carried.
+ */
+function bpsOfWad(wad: bigint): number {
+  if (wad < 0n) throw new RangeError("an exposure fraction is non-negative by construction");
+  return Number((wad * BigInt(FULL_ALLOCATION_BPS) + WAD / 2n) / WAD);
+}
+
+/**
  * The §5.2 exposure weights, in the integer bps the contract fixes: the collateral legs share
- * `(1 + b)` and the debt leg carries `−b`, so the three sum to FULL_ALLOCATION_BPS.
+ * `p_s + q_s·b_eff` and the debt leg carries `−b_eff`, all three MEASURED.
  *
  * The collateral share splits in proportion to each leg's rate, with the remainder landing on
  * the supply leg so the sum is exact rather than approximately right.
@@ -1036,22 +1455,44 @@ function netApyOf(legs: CompositionLegs, gross: Provenanced<bigint>): Provenance
  * inventing a preference. The invariant holds in both branches.
  */
 function yieldWeights(
-  bBps: number,
   rStake: bigint,
   rSupply: bigint,
+  equity: SinkFractions,
+  sinks: SinkFractions,
+  bEffWad: bigint,
 ): { readonly stake: number; readonly supply: number; readonly borrow: number } {
-  const collateralBps = FULL_ALLOCATION_BPS + bBps;
+  // EXPOSURE per unit of initial equity, which is what a weight means here. `b_eff` is the
+  // borrow's MEASURED base value per unit of equity, and each leg carries the value that
+  // actually earns it: the supply leg only what reached a lend, the stake leg everything
+  // staked whether supplied or not.
+  //
+  // The three weights sum to FULL_ALLOCATION_BPS only for the fully-recycled, fully-supplied
+  // loop. A terminal borrow sums to `1e4 − b_eff`, a partially-routed document lands between,
+  // and equity that never reached a lend lowers all three together. That spread is the honest
+  // one: a carry is not a 1× position in a single asset, and a half-supplied document is not a
+  // whole one.
+  const bEffBps = bpsOfWad(bEffWad);
+  const collateralBps = bpsOfWad(equity.suppliedWad) + bpsOfWad(mulWad(bEffWad, sinks.suppliedWad));
+  // Value left STAKED earns the staking leg and nothing else, so it lands on that leg alone
+  // rather than joining the rate-proportional split of the supplied collateral.
+  const stakedOnlyBps = bpsOfWad(equity.stakedWad) + bpsOfWad(mulWad(bEffWad, sinks.stakedWad));
   const totalCollateralRate = rStake + rSupply;
   const stake =
     totalCollateralRate > 0n && rStake >= 0n && rSupply >= 0n
       ? Number((BigInt(collateralBps) * rStake) / totalCollateralRate)
       : Math.ceil(collateralBps / 2);
-  return { stake, supply: collateralBps - stake, borrow: -bBps };
+  return { stake: stake + stakedOnlyBps, supply: collateralBps - stake, borrow: -bEffBps };
 }
 
 /** Canonical order: the collateral legs in the order they compound, then the debt leg. */
 function yieldSourcesOf(legs: CompositionLegs): readonly YieldSource[] {
-  const weights = yieldWeights(legs.bBps, legs.stake.wad.value, legs.supply.wad.value);
+  const weights = yieldWeights(
+    legs.stake.wad.value,
+    legs.supply.wad.value,
+    legs.equity,
+    legs.sinks,
+    legs.bEffWad,
+  );
   return [
     { protocol: "etherfi", type: "stake", rate: legs.stake, weightBps: weights.stake },
     { protocol: "aave-v3", type: "supply", rate: legs.supply, weightBps: weights.supply },
@@ -1096,6 +1537,7 @@ function refusal(errors: readonly PlanError[]): SimulationResult {
     minHealthFactor: unknown(),
     finalHealthFactor: unknown(),
     liquidationRatioWad: null,
+    liquidationPair: null,
     leverageWad: null,
     yieldSources: [],
     blockValues: {},
@@ -1126,13 +1568,16 @@ export function simulate(
   // §5.2, complete or nothing: the three legs are resolved together, and if any one of them
   // is missing the gross APY, the net APY and the whole breakdown are unavailable together.
   const stakingApy = stakingAprOf(snapshot);
-  const legs = compositionLegsOf(graph, plan, rates, stakingApy);
+  const legs = compositionLegsOf(graph, plan, snapshot, rates, stakingApy);
   const grossApyWad = legs === null ? null : grossApyOf(legs);
   const netApyWad = legs === null || grossApyWad === null ? null : netApyOf(legs, grossApyWad);
   const yieldSources = legs === null ? [] : yieldSourcesOf(legs);
 
   const inputFlow = plan.flows.find((f) => f.type === "input");
   const initialAmountWei = inputFlow === undefined ? null : inputFlow.outputWei;
+  // One derivation, two fields: the ratio and the pair it describes are minted together, so
+  // no renderer can pair a figure with the wrong two assets.
+  const liquidation = liquidationRatioOf(ledger.min, snapshot);
 
   return {
     isValid: true,
@@ -1142,7 +1587,8 @@ export function simulate(
     gasCostBase: null,
     minHealthFactor: mintHealthFactor(ledger.min, "the minimum across the plan"),
     finalHealthFactor: mintHealthFactor(ledger.final, "after the last risk-changing step"),
-    liquidationRatioWad: liquidationRatioOf(ledger.min),
+    liquidationRatioWad: liquidation === null ? null : liquidation.wad,
+    liquidationPair: liquidation === null ? null : liquidation.pair,
     leverageWad: leverageOf(ledger.final, initialAmountWei, snapshot),
     yieldSources,
     blockValues: blockValuesOf(plan, snapshot, rates, stakingApy),

@@ -722,14 +722,26 @@ export const CANVAS_ORIGIN: BlockPosition = { x: 0, y: 0 };
  */
 export function runtimeRiskFields(
   simulation: SimulationResult | null,
-): Pick<BlockRuntime, "blockValues" | "minHealthFactor" | "liquidationRatioWad"> {
+): Pick<
+  BlockRuntime,
+  "blockValues" | "minHealthFactor" | "liquidationRatioWad" | "liquidationPair"
+> {
   if (simulation === null) {
-    return { blockValues: {}, minHealthFactor: null, liquidationRatioWad: null };
+    return {
+      blockValues: {},
+      minHealthFactor: null,
+      liquidationRatioWad: null,
+      liquidationPair: null,
+    };
   }
   return {
     blockValues: simulation.blockValues,
     minHealthFactor: simulation.minHealthFactor,
     liquidationRatioWad: simulation.liquidationRatioWad,
+    // Carried beside the ratio, never re-derived from a block's own params: the pair is a
+    // fact about the POSITION at the minimum-HF checkpoint, which is not something any one
+    // block knows.
+    liquidationPair: simulation.liquidationPair,
   };
 }
 

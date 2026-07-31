@@ -162,7 +162,7 @@ let rpcId = 0;
  * polling loop, retry ladder, or reconciliation read can stall the session mutex on a
  * hung upstream. The policy (bounds, budgets) lives covered in `deadlines.ts`.
  */
-async function rpcCall<T>(
+export async function rpcCall<T>(
   url: string,
   method: string,
   params: readonly unknown[] = [],

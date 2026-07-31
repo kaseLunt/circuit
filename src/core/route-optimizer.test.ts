@@ -1,7 +1,13 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { validateGraph, type Block, type StrategyGraph } from "./graph";
 import { observationMinter, type ObservationMinter } from "./provenance";
-import { buildPlan, type ChainSnapshot, type PlanError, type ReserveSnapshot } from "./plan";
+import {
+  buildPlan,
+  type ChainSnapshot,
+  type PlanError,
+  type ReserveKey,
+  type ReserveSnapshot,
+} from "./plan";
 import {
   PINNED_BLOCK,
   PINNED_TS,
@@ -105,7 +111,7 @@ function numericField(raw: unknown, key: string, what: string): number {
   return value;
 }
 
-function reserveSnapshot(sym: "weETH" | "WETH", mint: ObservationMinter): ReserveSnapshot {
+function reserveSnapshot(sym: ReserveKey, mint: ObservationMinter): ReserveSnapshot {
   const cfg = `${sym}.getReserveConfigurationData`;
   const rd = `${sym}.getReserveData`;
   const caps = `${sym}.getReserveCaps`;
@@ -155,7 +161,7 @@ function reserveSnapshot(sym: "weETH" | "WETH", mint: ObservationMinter): Reserv
   };
 }
 
-function rateStrategy(sym: "weETH" | "WETH") {
+function rateStrategy(sym: ReserveKey) {
   const label = `${sym}.strategy.getInterestRateDataBps`;
   const raw = readResult(label);
   return {
@@ -175,7 +181,11 @@ function fixtureSnapshot(): ChainSnapshot {
     block: PINNED_BLOCK,
     blockTimestamp: PINNED_TS,
     pool: addressOf(readsMeta.pool, "pool"),
-    reserves: { weETH: reserveSnapshot("weETH", mint), WETH: reserveSnapshot("WETH", mint) },
+    reserves: {
+      weETH: reserveSnapshot("weETH", mint),
+      WETH: reserveSnapshot("WETH", mint),
+      USDC: reserveSnapshot("USDC", mint),
+    },
     eModeCategories: [
       {
         id: 1,
@@ -244,7 +254,7 @@ describe("asset semantics", () => {
   // member in graph.ts is a compile error here rather than a silent rejection
   // that would make incompatibilities disappear instead of being reported.
   it("derives its asset list from graph.ts's Asset union", () => {
-    expect([...ASSETS].sort()).toEqual(["ETH", "WETH", "eETH", "stETH", "weETH", "wstETH"]);
+    expect([...ASSETS].sort()).toEqual(["ETH", "USDC", "WETH", "eETH", "stETH", "weETH", "wstETH"]);
     for (const pair of WRAP_PAIRS) {
       expect(ASSETS).toContain(pair.unwrapped);
       expect(ASSETS).toContain(pair.wrapped);

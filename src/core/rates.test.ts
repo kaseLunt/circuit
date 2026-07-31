@@ -109,7 +109,7 @@ describe("variableBorrowAprRay — invalid domains rejected (not masked)", () =>
 
 describe("netApyWad (§5.2 leveraged-restake)", () => {
   it("unlevered (b=0) equals collateral compound", () => {
-    const net = netApyWad(0n, pctWad(3), pctWad(2), pctWad(2.5));
+    const net = netApyWad({ suppliedWad: WAD, stakedWad: 0n }, { suppliedWad: WAD, stakedWad: 0n }, 0n, pctWad(3), pctWad(2), pctWad(2.5));
     // (1.03)(1.02) - 1 = 0.0506
     expect(net).toBeGreaterThan(pctWad(5));
     expect(net).toBeLessThan(pctWad(5.1));
@@ -117,17 +117,17 @@ describe("netApyWad (§5.2 leveraged-restake)", () => {
 
   it("exact fixture: b=0.5, stake 3%, supply 2%, debt 2.5% → 0.0634e18", () => {
     // rColl=(1.03)(1.02)-1=0.0506; (1.5)(1.0506)-0.5(1.025)-1 = 0.0634 exactly
-    expect(netApyWad(WAD / 2n, pctWad(3), pctWad(2), pctWad(2.5))).toBe(63_400_000_000_000_000n);
+    expect(netApyWad({ suppliedWad: WAD, stakedWad: 0n }, { suppliedWad: WAD, stakedWad: 0n }, WAD / 2n, pctWad(3), pctWad(2), pctWad(2.5))).toBe(63_400_000_000_000_000n);
   });
   it("leverage amplifies a positive carry", () => {
-    const unlev = netApyWad(0n, pctWad(3), pctWad(2), pctWad(2.5));
-    const lev = netApyWad(WAD / 2n, pctWad(3), pctWad(2), pctWad(2.5));
+    const unlev = netApyWad({ suppliedWad: WAD, stakedWad: 0n }, { suppliedWad: WAD, stakedWad: 0n }, 0n, pctWad(3), pctWad(2), pctWad(2.5));
+    const lev = netApyWad({ suppliedWad: WAD, stakedWad: 0n }, { suppliedWad: WAD, stakedWad: 0n }, WAD / 2n, pctWad(3), pctWad(2), pctWad(2.5));
     expect(lev).toBeGreaterThan(unlev); // positive carry → leverage helps
   });
   it("negative carry makes leverage hurt", () => {
     // borrow rate above collateral yield
-    const lev = netApyWad(WAD / 2n, pctWad(1), pctWad(1), pctWad(8));
-    const unlev = netApyWad(0n, pctWad(1), pctWad(1), pctWad(8));
+    const lev = netApyWad({ suppliedWad: WAD, stakedWad: 0n }, { suppliedWad: WAD, stakedWad: 0n }, WAD / 2n, pctWad(1), pctWad(1), pctWad(8));
+    const unlev = netApyWad({ suppliedWad: WAD, stakedWad: 0n }, { suppliedWad: WAD, stakedWad: 0n }, 0n, pctWad(1), pctWad(1), pctWad(8));
     expect(lev).toBeLessThan(unlev);
   });
 });

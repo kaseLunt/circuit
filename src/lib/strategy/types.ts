@@ -31,7 +31,12 @@ import type { Node, Edge } from "@xyflow/react";
  * `@xyflow/react`'s `Node`/`Edge`, and a `core/` module reaching in for the contract would
  * put a React Flow type dependency behind the purity line SPEC §4 draws.
  */
-export type { SimulationResult, ComputedBlockValue, YieldSource } from "../../core/risk";
+export type {
+  SimulationResult,
+  ComputedBlockValue,
+  LiquidationPair,
+  YieldSource,
+} from "../../core/risk";
 
 export type BlockType = "input" | "stake" | "lend" | "borrow" | "swap" | "auto-wrap";
 

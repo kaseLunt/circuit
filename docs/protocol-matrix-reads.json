@@ -22,7 +22,8 @@
    "wstETH": "0x7f39C581F595B53c5cb19bD0b3f8dA6c935E2Ca0",
    "eETH": "0x35fA164735182de50811E8e2E824cFb9B6118ac2",
    "ETHERFI_LP": "0x308861A430be4cce5502d0A12724771Fc6DaF216",
-   "stETH": "0xae7ab96520DE3A18E5e111B5EaAb095312D7fE84"
+   "stETH": "0xae7ab96520DE3A18E5e111B5EaAb095312D7fE84",
+   "USDC": "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48"
   },
   "pool": "0x87870Bca3F3fD6335C3F4ce8392D69350B4fA4E2",
   "pool_data_provider": "0x0a16f2FCC0D44FaE41cc54e079281D84A363bECD",
@@ -808,6 +809,231 @@
    "fn": "stEthPerToken",
    "args": [],
    "result": "1239952638214169360"
+  },
+  {
+   "label": "USDC.symbol",
+   "to": "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48",
+   "fn": "symbol",
+   "args": [],
+   "result": "USDC"
+  },
+  {
+   "label": "USDC.decimals",
+   "to": "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48",
+   "fn": "decimals",
+   "args": [],
+   "result": 6
+  },
+  {
+   "label": "USDC.getReserveConfigurationData",
+   "to": "0x0a16f2FCC0D44FaE41cc54e079281D84A363bECD",
+   "fn": "getReserveConfigurationData",
+   "args": [
+    "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48"
+   ],
+   "result": [
+    "6",
+    "7500",
+    "7800",
+    "10450",
+    "1000",
+    true,
+    true,
+    false,
+    true,
+    false
+   ]
+  },
+  {
+   "label": "USDC.getReserveCaps",
+   "to": "0x0a16f2FCC0D44FaE41cc54e079281D84A363bECD",
+   "fn": "getReserveCaps",
+   "args": [
+    "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48"
+   ],
+   "result": [
+    "2250000000",
+    "2500000000"
+   ]
+  },
+  {
+   "label": "USDC.getPaused",
+   "to": "0x0a16f2FCC0D44FaE41cc54e079281D84A363bECD",
+   "fn": "getPaused",
+   "args": [
+    "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48"
+   ],
+   "result": false
+  },
+  {
+   "label": "USDC.getSiloedBorrowing",
+   "to": "0x0a16f2FCC0D44FaE41cc54e079281D84A363bECD",
+   "fn": "getSiloedBorrowing",
+   "args": [
+    "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48"
+   ],
+   "result": false
+  },
+  {
+   "label": "USDC.getDebtCeiling (isolation)",
+   "to": "0x0a16f2FCC0D44FaE41cc54e079281D84A363bECD",
+   "fn": "getDebtCeiling",
+   "args": [
+    "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48"
+   ],
+   "result": "0"
+  },
+  {
+   "label": "USDC.getReserveTokensAddresses",
+   "to": "0x0a16f2FCC0D44FaE41cc54e079281D84A363bECD",
+   "fn": "getReserveTokensAddresses",
+   "args": [
+    "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48"
+   ],
+   "result": [
+    "0x98C23E9d8f34FEFb1B7BD6a91B7FF122F4e16F5c",
+    "0x0000000000000000000000000000000000000000",
+    "0x72E95b8931767C79bA4EeE721354d6E99a61D004"
+   ]
+  },
+  {
+   "label": "USDC.getReserveData",
+   "to": "0x0a16f2FCC0D44FaE41cc54e079281D84A363bECD",
+   "fn": "getReserveData",
+   "args": [
+    "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48"
+   ],
+   "result": [
+    "0",
+    "72277366120",
+    "2137838491585325",
+    "0",
+    "1922152606809369",
+    "31630501888616452652457266",
+    "39090197883962848564254340",
+    "0",
+    "0",
+    "1179391258220533777847617994",
+    "1240933017494568260003069254",
+    1784776355
+   ]
+  },
+  {
+   "label": "USDC.aToken.totalSupply",
+   "to": "0x98C23E9d8f34FEFb1B7BD6a91B7FF122F4e16F5c",
+   "fn": "totalSupply",
+   "args": [],
+   "result": "2137838491585325"
+  },
+  {
+   "label": "USDC.aToken.scaledTotalSupply",
+   "to": "0x98C23E9d8f34FEFb1B7BD6a91B7FF122F4e16F5c",
+   "fn": "scaledTotalSupply",
+   "args": [],
+   "result": "1812662482307538"
+  },
+  {
+   "label": "USDC.variableDebtToken.totalSupply",
+   "to": "0x72E95b8931767C79bA4EeE721354d6E99a61D004",
+   "fn": "totalSupply",
+   "args": [],
+   "result": "1922152606809369"
+  },
+  {
+   "label": "USDC.variableDebtToken.scaledTotalSupply",
+   "to": "0x72E95b8931767C79bA4EeE721354d6E99a61D004",
+   "fn": "scaledTotalSupply",
+   "args": [],
+   "result": "1548957398169361"
+  },
+  {
+   "label": "USDC.underlying.balanceOf(aToken)",
+   "to": "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48",
+   "fn": "balanceOf",
+   "args": [
+    "0x98C23E9d8f34FEFb1B7BD6a91B7FF122F4e16F5c"
+   ],
+   "result": "215802563925033"
+  },
+  {
+   "label": "USDC.getVirtualUnderlyingBalance",
+   "to": "0x0a16f2FCC0D44FaE41cc54e079281D84A363bECD",
+   "fn": "getVirtualUnderlyingBalance",
+   "args": [
+    "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48"
+   ],
+   "result": "215770862249957"
+  },
+  {
+   "label": "USDC.getReserveDeficit",
+   "to": "0x87870Bca3F3fD6335C3F4ce8392D69350B4fA4E2",
+   "fn": "getReserveDeficit",
+   "args": [
+    "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48"
+   ],
+   "result": "1551621"
+  },
+  {
+   "label": "USDC.getInterestRateStrategyAddress",
+   "to": "0x0a16f2FCC0D44FaE41cc54e079281D84A363bECD",
+   "fn": "getInterestRateStrategyAddress",
+   "args": [
+    "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48"
+   ],
+   "result": "0x9ec6F08190DeA04A54f8Afc53Db96134e5E3FdFB"
+  },
+  {
+   "label": "USDC.strategy.getInterestRateDataBps",
+   "to": "0x9ec6F08190DeA04A54f8Afc53Db96134e5E3FdFB",
+   "fn": "getInterestRateDataBps",
+   "args": [
+    "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48"
+   ],
+   "result": {
+    "optimalUsageRatio": 9200,
+    "baseVariableBorrowRate": 0,
+    "variableRateSlope1": 400,
+    "variableRateSlope2": 1000
+   }
+  },
+  {
+   "label": "Oracle.getSourceOfAsset(USDC)",
+   "to": "0x54586bE62E3c3580375aE3723C145253060Ca0C2",
+   "fn": "getSourceOfAsset",
+   "args": [
+    "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48"
+   ],
+   "result": "0x3f73F03aa83B2A48ed27E964eD0fDb590332095B"
+  },
+  {
+   "label": "Oracle.getAssetPrice(USDC)",
+   "to": "0x54586bE62E3c3580375aE3723C145253060Ca0C2",
+   "fn": "getAssetPrice",
+   "args": [
+    "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48"
+   ],
+   "result": "99989420"
+  },
+  {
+   "label": "OracleSource(USDC).description",
+   "to": "0x3f73F03aa83B2A48ed27E964eD0fDb590332095B",
+   "fn": "description",
+   "args": [],
+   "result": "Capped USDC / USD"
+  },
+  {
+   "label": "OracleSource(USDC).decimals",
+   "to": "0x3f73F03aa83B2A48ed27E964eD0fDb590332095B",
+   "fn": "decimals",
+   "args": [],
+   "result": 8
+  },
+  {
+   "label": "OracleSource(USDC).latestAnswer",
+   "to": "0x3f73F03aa83B2A48ed27E964eD0fDb590332095B",
+   "fn": "latestAnswer",
+   "args": [],
+   "result": "99989420"
   }
  ]
 }

@@ -1,6 +1,13 @@
 import { describe, expect, it } from "vitest";
 import { borrowLimitVerdict, type BorrowCeiling } from "./borrow-limit";
-import { chainOf, flagshipGraph, FORK_PROVEN_BORROW_BPS } from "../../tests/helpers/graphs";
+import {
+  FORK_PROVEN_BORROW_BPS,
+  FORK_PROVEN_CARRY_BPS,
+  carryGraph,
+  chainOf,
+  flagshipGraph,
+  mixedLoopAndCarryGraph,
+} from "../../tests/helpers/graphs";
 import { fixtureSnapshot } from "../../tests/helpers/chain-snapshot";
 import type { StrategyGraph } from "./graph";
 
@@ -140,5 +147,116 @@ describe("borrowLimitVerdict", () => {
     };
     const verdict = borrowLimitVerdict(noAllocation, snapshot);
     expect(verdict.status).toBe("unavailable");
+  });
+});
+
+// ————————————————————————— W09: the carry, at the reserve regime —————————————————————————
+
+/** The carry with one borrow allocation substituted — the same slider, a different regime. */
+function carryAt(bps: number): StrategyGraph {
+  const base = carryGraph();
+  return {
+    ...base,
+    blocks: base.blocks.map((block) =>
+      block.type === "borrow"
+        ? { ...block, params: { ...block.params, allocationBps: bps } }
+        : block,
+    ),
+  };
+}
+
+function carryCeilingAt(bps: number): BorrowCeiling {
+  const verdict = borrowLimitVerdict(carryAt(bps), snapshot);
+  if (verdict.status !== "within" && verdict.status !== "over-limit") {
+    throw new Error(`expected a carry ceiling at ${bps} bps, got ${verdict.status}`);
+  }
+  return verdict.ceiling;
+}
+
+describe("borrowLimitVerdict — the carry, quoted at the regime it actually stands in", () => {
+  /**
+   * SPEC §3.4's named bug, and the reason the ceiling reads its category off the PLAN.
+   *
+   * weETH is a member of category 1's collateral bitmap, so a module that asked "is this
+   * collateral eMode-eligible?" would quote 9300/9500 here. The protocol asks a different
+   * question — what category is the USER in — and for the carry the answer is none, so the
+   * reserve pair governs. Both figures come from the pinned reads; neither is typed.
+   */
+  it("quotes the reserve pair, not the category pair, for a position in no category", () => {
+    const ceiling = carryCeilingAt(FORK_PROVEN_CARRY_BPS);
+    expect(ceiling.categoryId).toBeNull();
+    expect(ceiling.ltvBps).toBe(snapshot.reserves.weETH.ltvBps.value);
+    expect(ceiling.ltBps).toBe(snapshot.reserves.weETH.liquidationThresholdBps.value);
+    // …and it is emphatically NOT the category's, which the same collateral would take
+    // inside category 1. The contrast is the product's whole point, so it is asserted.
+    expect(ceiling.ltvBps).not.toBe(snapshot.eModeCategories[0]!.ltvBps.value);
+    expect(ceiling.ltBps).not.toBe(snapshot.eModeCategories[0]!.liquidationThresholdBps.value);
+    expect(ceiling.ltBps).toBeGreaterThanOrEqual(ceiling.ltvBps);
+  });
+
+  it("admits the shipped carry default with room to spare", () => {
+    const verdict = borrowLimitVerdict(carryGraph(), snapshot);
+    expect(verdict.status).toBe("within");
+    if (verdict.status !== "within") throw new Error("unreachable");
+    expect(verdict.ceiling.requestedAllocationBps).toBe(FORK_PROVEN_CARRY_BPS);
+    expect(verdict.ceiling.debtBase).toBeLessThan(verdict.ceiling.ceilingBase);
+    // The default is deliberately clear of the ceiling — a template that opened one nudge
+    // from a refusal would be a bad default, not a bold one.
+    expect(verdict.ceiling.maxAllocationBps).toBeGreaterThan(FORK_PROVEN_CARRY_BPS);
+  });
+
+  /**
+   * W08's both-sides boundary, RE-RUN at the reserve regime.
+   *
+   * The ceil-chain-vs-floor divergence that motivated the original pin is regime-independent,
+   * but its boundary sits at a different `b` — and now also at a different assetUnit, since
+   * the debt leg's base conversion divides by 1e6 rather than 1e18. Pinning both sides here
+   * proves the rounding chain survived the six-decimal generalization intact.
+   */
+  it("admits exactly at the reserve-regime ceiling and refuses one bp past it", () => {
+    const { maxAllocationBps, ltvBps } = carryCeilingAt(FORK_PROVEN_CARRY_BPS);
+    expect(borrowLimitVerdict(carryAt(maxAllocationBps), snapshot).status).toBe("within");
+    expect(borrowLimitVerdict(carryAt(maxAllocationBps + 1), snapshot).status).toBe("over-limit");
+    // The admissible maximum sits at or just below the effective LTV — the ceil-rounded debt
+    // chain never lets it sit above.
+    expect(maxAllocationBps).toBeLessThanOrEqual(ltvBps);
+    expect(maxAllocationBps).toBeGreaterThan(ltvBps - 10);
+
+    const within = borrowLimitVerdict(carryAt(maxAllocationBps), snapshot);
+    const over = borrowLimitVerdict(carryAt(maxAllocationBps + 1), snapshot);
+    if (within.status !== "within" || over.status !== "over-limit") throw new Error("unreachable");
+    expect(within.ceiling.debtBase).toBeLessThanOrEqual(within.ceiling.ceilingBase);
+    expect(over.ceiling.debtBase).toBeGreaterThan(over.ceiling.ceilingBase);
+    // Same collateral, same ceiling: only the debt moved across the line.
+    expect(over.ceiling.ceilingBase).toBe(within.ceiling.ceilingBase);
+  });
+
+  /**
+   * The debt side really is denominated at 1e6.
+   *
+   * `debtBase` is an oracle-base-currency figure, so it is comparable to `collateralBase`
+   * regardless of the debt token's decimals — which is exactly the property an assetUnit-blind
+   * conversion would destroy. At the shipped default the debt is a shade under 60% of the
+   * collateral's value; a 1e18 divisor would have put it twelve orders below that.
+   */
+  it("values six-decimal debt on the same scale as eighteen-decimal collateral", () => {
+    const ceiling = carryCeilingAt(FORK_PROVEN_CARRY_BPS);
+    const share = (ceiling.debtBase * 10_000n) / ceiling.collateralBase;
+    expect(share).toBeGreaterThan(BigInt(FORK_PROVEN_CARRY_BPS) - 10n);
+    expect(share).toBeLessThanOrEqual(BigInt(FORK_PROVEN_CARRY_BPS));
+  });
+
+  /**
+   * The mixed document forfeits nothing at the ceiling: two debt reserves sum correctly
+   * because `protocolDebtBaseOf` groups by reserve and carries each one's own index and unit.
+   * The document is gated at the FIRST borrow, at the reserve regime, exactly as planned.
+   */
+  it("gates a two-borrow document at its first borrow, with both reserves valued in one base", () => {
+    const verdict = borrowLimitVerdict(mixedLoopAndCarryGraph(), snapshot);
+    expect(verdict.status).toBe("within");
+    if (verdict.status !== "within") throw new Error("unreachable");
+    expect(verdict.ceiling.categoryId).toBeNull();
+    expect(verdict.ceiling.blockId).toBe("borrow");
+    expect(verdict.ceiling.ltvBps).toBe(snapshot.reserves.weETH.ltvBps.value);
   });
 });

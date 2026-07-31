@@ -8,15 +8,18 @@ import { afterEach, describe, expect, it } from "vitest";
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { ReactFlowProvider } from "@xyflow/react";
 import type { ReactNode } from "react";
-import { WAD, formatHealthFactor } from "../../../core/format";
+import { WAD, formatBpsAsPercent, formatHealthFactor } from "../../../core/format";
 import {
   HF_WARN_WAD,
+  assetUnitOf,
+  collateralBaseValue,
   computeHealthFactor,
+  debtBaseValue,
   hfWadValue,
-  usdBase,
   type HealthFactor,
 } from "../../../core/health-factor";
 import { buildPlan, effectiveLiquidationThresholdBps } from "../../../core/plan";
+import { borrowLimitVerdict } from "../../../core/borrow-limit";
 import { simulate } from "../../../core/risk";
 import {
   derived,
@@ -27,7 +30,7 @@ import {
   type Provenanced,
 } from "../../../core/provenance";
 import { PINNED_BLOCK } from "../../../../tests/helpers/protocol-reads";
-import { flagshipGraph } from "../../../../tests/helpers/graphs";
+import { carryGraph, flagshipGraph } from "../../../../tests/helpers/graphs";
 import { fixtureSnapshot } from "../../../../tests/helpers/chain-snapshot";
 import type {
   AutoWrapBlockData,
@@ -90,6 +93,7 @@ function runtime(overrides: Partial<BlockRuntime> = {}): BlockRuntime {
     blockValues: {},
     minHealthFactor: null,
     liquidationRatioWad: null,
+    liquidationPair: null,
     borrowLimit: null,
     writeLockReason: null,
     pending: false,
@@ -679,7 +683,14 @@ describe("BorrowBlock — risk thresholds come from core/health-factor.ts", () =
   );
 
   function borrowRuntime(overrides: Partial<BlockRuntime> = {}): BlockRuntime {
-    return runtime({ borrowAllocations: { borrow1: entered(5_000) }, ...overrides });
+    return runtime({
+      borrowAllocations: { borrow1: entered(5_000) },
+      // The pair the sentence names now comes from the SIMULATION, beside the ratio it
+      // describes — not from the borrow block's own (structurally absent) input asset. The
+      // fixture supplies the flagship's pair because that is what its ratio is a ratio of.
+      liquidationPair: { collateral: "weETH", debt: "WETH" },
+      ...overrides,
+    });
   }
 
   it("leads with the liquidation sentence, not with digits", () => {
@@ -899,11 +910,20 @@ describe("BorrowBlock — risk thresholds come from core/health-factor.ts", () =
         computeHealthFactor(
           [
             {
-              base: usdBase(firstSupplyWei, weETH.priceBase.value),
+              base: collateralBaseValue(
+                firstSupplyWei,
+                weETH.priceBase.value,
+                assetUnitOf(weETH.decimals.value),
+              ),
               ltBps: effectiveLiquidationThresholdBps(weETH, category),
             },
           ],
-          usdBase(borrowWei, snapshot.reserves.WETH.priceBase.value),
+          // Debt ceils, collateral floors — GenericLogic's own directions.
+          debtBaseValue(
+            borrowWei,
+            snapshot.reserves.WETH.priceBase.value,
+            assetUnitOf(snapshot.reserves.WETH.decimals.value),
+          ),
         ),
       ),
     );
@@ -1042,5 +1062,146 @@ describe("BLOCK_COMPONENTS", () => {
       ["auto-wrap", "borrow", "input", "lend", "stake"].sort(),
     );
     expect(Object.keys(BLOCK_COMPONENTS)).not.toContain("swap");
+  });
+});
+
+// ————————————————————————— W09: the regime is a rendered fact —————————————————————————
+
+/**
+ * SPEC §3.4's named correctness bug is quoting the WRONG regime. Its quieter sibling is
+ * quoting NO regime: a user who adds an uncorrelated borrow to the loop moves the whole
+ * position from the e-mode category's thresholds to the reserve's, every number moves
+ * honestly, and nothing says why. These pin the sentence that says why — in both regimes,
+ * from the ceiling's own fields, with no authored threshold anywhere in the component.
+ */
+describe("BorrowBlock — the governing regime is stated, not implied", () => {
+  const ceilingOf = (graph: ReturnType<typeof flagshipGraph>) => {
+    const verdict = borrowLimitVerdict(graph, fixtureSnapshot());
+    if (verdict.status !== "within") throw new Error(`expected a within verdict, got ${verdict.status}`);
+    return verdict;
+  };
+
+  function runtimeFor(verdict: ReturnType<typeof ceilingOf>): Partial<BlockRuntime> {
+    // The component keys the ceiling to its own block id, so the fixture's borrow block id
+    // has to be the one the plan produced.
+    return {
+      borrowAllocations: { borrow: entered(verdict.ceiling.requestedAllocationBps) },
+      borrowLimit: verdict,
+      minHealthFactor: healthFactor(2n * WAD),
+    };
+  }
+
+  it("names the e-mode category, and its thresholds, for the correlated loop", () => {
+    const verdict = ceilingOf(flagshipGraph());
+    const { container } = mount(
+      <BorrowBlock {...nodeProps("borrow", "borrow", borrowData)} />,
+      runtime(runtimeFor(verdict)),
+    );
+    expect(container.textContent).toContain(`E-mode category ${verdict.ceiling.categoryId}`);
+    expect(container.textContent).toContain("governs this position");
+    expect(container.textContent).toContain(formatBpsAsPercent(verdict.ceiling.ltvBps));
+    expect(container.textContent).toContain(formatBpsAsPercent(verdict.ceiling.ltBps));
+  });
+
+  it("says out loud that NO category governs the carry, and quotes the reserve pair instead", () => {
+    const verdict = ceilingOf(carryGraph());
+    expect(verdict.ceiling.categoryId).toBeNull();
+    const { container } = mount(
+      <BorrowBlock {...nodeProps("borrow", "borrow", { ...borrowData, asset: "USDC" })} />,
+      runtime(runtimeFor(verdict)),
+    );
+    expect(container.textContent).toContain("No e-mode category governs this position");
+    expect(container.textContent).toContain(formatBpsAsPercent(verdict.ceiling.ltvBps));
+    expect(container.textContent).toContain(formatBpsAsPercent(verdict.ceiling.ltBps));
+    // The regime the position is NOT in must not appear anywhere on the block.
+    const categoryLtv = formatBpsAsPercent(fixtureSnapshot().eModeCategories[0]!.ltvBps.value);
+    expect(container.textContent).not.toContain(categoryLtv);
+  });
+
+  it("frames the carry's liquidation level as an oracle-price ratio between its own two assets", () => {
+    const result = simulate(carryGraph(), fixtureSnapshot());
+    const { container } = mount(
+      <BorrowBlock {...nodeProps("borrow", "borrow", { ...borrowData, asset: "USDC" })} />,
+      runtime({
+        borrowAllocations: { borrow: entered(6_000) },
+        blockValues: { borrow: { ...RESOLVED_VALUE, inputAsset: null } },
+        liquidationRatioWad: result.liquidationRatioWad,
+        // Straight from the simulation — the pair is not something this test authors.
+        liquidationPair: result.liquidationPair,
+        minHealthFactor: result.minHealthFactor,
+      }),
+    );
+    // A RATIO claim naming both assets — never a bare dollar level, and never the correlated
+    // pair's depeg wording, which was written for weETH/WETH specifically.
+    expect(container.textContent).toContain("Liquidates if weETH/USDC falls to");
+    expect(container.textContent ?? "").not.toMatch(/depeg|slash/i);
+    // Scoped to the SENTENCE, not the whole block: the value zone legitimately renders
+    // oracle-base-currency figures, and what must never carry a dollar is the liquidation
+    // CLAIM — "liquidates at $X" for a pair whose oracle is a ratio would be the §2.5 lie.
+    const sentenceNode = [...container.querySelectorAll("p")].find((p) =>
+      (p.textContent ?? "").startsWith("Liquidates if"),
+    );
+    if (sentenceNode === undefined) throw new Error("no liquidation sentence rendered");
+    expect(sentenceNode.textContent).not.toContain("$");
+  });
+
+  /**
+   * Codex W09 round-2 finding 3 / treatment §2.5, W09 objective 3: "the risk labels state
+   * which way a depeg cuts (USDC downside RAISES carry HF)".
+   *
+   * The direction is counterintuitive and no production text stated it — a user had to work
+   * out for themselves that the stablecoin is the DEBT, so its downside helps them. Asserted
+   * from `simulate` and `borrowLimitVerdict` output: the asset names are the pair core minted
+   * and the gate is the ceiling's own `categoryId`, so nothing here is authored copy the
+   * component could have disagreed with.
+   */
+  it("states which way the carry's debt asset cuts — USDC downside RAISES the health factor", () => {
+    const verdict = ceilingOf(carryGraph());
+    expect(verdict.ceiling.categoryId).toBeNull();
+    const result = simulate(carryGraph(), fixtureSnapshot());
+    if (result.liquidationPair === null) throw new Error("the carry must mint a pair");
+    const { debt, collateral } = result.liquidationPair;
+    const { container } = mount(
+      <BorrowBlock {...nodeProps("borrow", "borrow", { ...borrowData, asset: "USDC" })} />,
+      runtime({
+        ...runtimeFor(verdict),
+        liquidationRatioWad: result.liquidationRatioWad,
+        liquidationPair: result.liquidationPair,
+        minHealthFactor: result.minHealthFactor,
+      }),
+    );
+    const text = container.textContent ?? "";
+    // HF-POSITIVE, in the block's own words: the debt shrinks, so the health factor rises.
+    expect(text).toContain(`${debt} is this position's debt`);
+    expect(text).toContain("shrinks the debt and raises the health factor");
+    // …and the liquidation vector is named the other way round, so "downside is good" cannot
+    // be read as "nothing liquidates this".
+    expect(text).toContain(`What liquidates this position is ${collateral} falling against ${debt}`);
+    // Still no depeg/slashing wording — §2.5 bans that framing for this pair.
+    expect(text).not.toMatch(/depeg|slash/i);
+  });
+
+  it("says nothing of the sort for the correlated loop, whose debt does not move alone", () => {
+    const verdict = ceilingOf(flagshipGraph());
+    expect(verdict.ceiling.categoryId).not.toBeNull();
+    const result = simulate(flagshipGraph(), fixtureSnapshot());
+    const { container } = mount(
+      <BorrowBlock {...nodeProps("borrow", "borrow", borrowData)} />,
+      runtime({
+        ...runtimeFor(verdict),
+        liquidationRatioWad: result.liquidationRatioWad,
+        liquidationPair: result.liquidationPair,
+        minHealthFactor: result.minHealthFactor,
+      }),
+    );
+    const text = container.textContent ?? "";
+    // weETH is priced through eETH/ETH, so "a fall in WETH raises the health factor" is not
+    // true here — and an uncorrelated note on a correlated pair is exactly the framing §2.5
+    // bans. The block still names the pair and the regime; it just makes no direction claim.
+    expect(text).not.toContain("is this position's debt");
+    expect(text).not.toContain("shrinks the debt");
+    expect(text).not.toContain("What liquidates this position is");
+    expect(text).toContain("Liquidates if weETH/WETH falls to");
+    expect(text).toContain(`E-mode category ${verdict.ceiling.categoryId}`);
   });
 });

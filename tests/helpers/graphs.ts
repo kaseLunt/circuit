@@ -72,6 +72,92 @@ export function flagshipGraph(
   return { blocks, edges: linearEdges(chain) };
 }
 
+/**
+ * The carry's borrow allocation, fork-proven — and, unlike the flagship's, the SAME value the
+ * shipped template defaults to.
+ *
+ * The flagship carries two numbers one slider apart because its demo script needs the composer
+ * to OPEN safe and cross into warning on the step-3 drag. The carry has no such beat: its whole
+ * point is that it rests in the amber band on arrival, so the honest default and the proven
+ * point are the same point, and `templates.test.ts` pins that they have not drifted apart. The
+ * value is the owner's ratified 6000 bps (2026-07-30); the constraint it satisfies is recorded
+ * at its definition site in `src/lib/strategy/templates.ts`.
+ */
+export const FORK_PROVEN_CARRY_BPS = 6000;
+
+/**
+ * The W09 USDC carry: supply weETH, borrow USDC against it. FIVE blocks, six steps, and NO
+ * `set-emode` — no recorded category admits a USDC borrow, so the plan runs at the reserve
+ * regime by selection rather than by exception.
+ *
+ * The block ids are the same CONTRACT the flagship's are: `core/plan.ts` derives every
+ * `TransactionStep.id` from them, so renaming one silently renames plan steps.
+ */
+export function carryGraph(
+  amount: string | number = "10",
+  allocationBps: number = FORK_PROVEN_CARRY_BPS,
+): StrategyGraph {
+  const blocks: Block[] = [
+    { id: "in", type: "input", params: { asset: "ETH", amount } },
+    { id: "stake1", type: "stake", params: { protocol: "etherfi" } },
+    { id: "wrap1", type: "wrap", params: { from: "eETH", to: "weETH" } },
+    { id: "supply1", type: "lend", params: { protocol: "aave-v3", asset: "weETH" } },
+    { id: "borrow", type: "borrow", params: { protocol: "aave-v3", asset: "USDC", allocationBps } },
+  ];
+  return { blocks, edges: linearEdges(["in", "stake1", "wrap1", "supply1", "borrow"]) };
+}
+
+/**
+ * Loop AND carry in one document — the mixed shape the owner ratified on 2026-07-30 as
+ * PLANNED, not refused.
+ *
+ * It is protocol-legal (both borrows validate at category 0), so refusing it would refuse
+ * something the chain accepts. What it forfeits is the §5.2 composition and the single-pair
+ * liquidation ratio, both of which require exactly one borrow — and those unavailable states
+ * are the correct outputs, pinned as such rather than left as holes.
+ */
+export function mixedLoopAndCarryGraph(
+  amount: string | number = "10",
+  loopBps: number = 3000,
+  carryBps: number = 2000,
+): StrategyGraph {
+  const blocks: Block[] = [
+    { id: "in", type: "input", params: { asset: "ETH", amount } },
+    { id: "stake1", type: "stake", params: { protocol: "etherfi" } },
+    { id: "wrap1", type: "wrap", params: { from: "eETH", to: "weETH" } },
+    { id: "supply1", type: "lend", params: { protocol: "aave-v3", asset: "weETH" } },
+    {
+      id: "borrow",
+      type: "borrow",
+      params: { protocol: "aave-v3", asset: "WETH", allocationBps: loopBps },
+    },
+    { id: "unwrap", type: "unwrap", params: { from: "WETH", to: "ETH" } },
+    { id: "stake2", type: "stake", params: { protocol: "etherfi" } },
+    { id: "wrap2", type: "wrap", params: { from: "eETH", to: "weETH" } },
+    { id: "supply2", type: "lend", params: { protocol: "aave-v3", asset: "weETH" } },
+    {
+      id: "carry",
+      type: "borrow",
+      params: { protocol: "aave-v3", asset: "USDC", allocationBps: carryBps },
+    },
+  ];
+  return {
+    blocks,
+    edges: linearEdges([
+      "in",
+      "stake1",
+      "wrap1",
+      "supply1",
+      "borrow",
+      "unwrap",
+      "stake2",
+      "wrap2",
+      "supply2",
+      "carry",
+    ]),
+  };
+}
+
 export function chainOf(blocks: Block[]): StrategyGraph {
   return { blocks, edges: linearEdges(blocks.map((b) => b.id)) };
 }
@@ -114,6 +200,23 @@ export interface StepRow {
         readonly attribution: AmountAttribution;
       };
 }
+
+/**
+ * The carry's enumerated execution steps (W09), in canonical order.
+ *
+ * Six, and the ABSENCES are the content: no `setUserEMode` (no category admits the pair) and
+ * no approve targeting USDC (the borrow only ever moves USDC pool → actor, so no allowance
+ * exists to grant). Both are asserted as absences in `plan.test.ts` rather than left implied
+ * by the length.
+ */
+export const CANONICAL_CARRY_STEPS: readonly StepRow[] = [
+  { index: 1, id: "stake1:deposit", blockId: "stake1", to: "LP", functionName: "deposit", signature: "function deposit()", valueSpec: "amount", amount: { kind: "literal", wei: 10n * WAD_WEI } },
+  { index: 2, id: "wrap1:approve", blockId: "wrap1", to: "eETH", functionName: "approve", signature: "function approve(address,uint256)", valueSpec: "none", amount: { kind: "step-output", producer: "stake1:deposit", attribution: "share-delta" } },
+  { index: 3, id: "wrap1:wrap", blockId: "wrap1", to: "weETH", functionName: "wrap", signature: "function wrap(uint256)", valueSpec: "none", amount: { kind: "step-output", producer: "stake1:deposit", attribution: "share-delta" } },
+  { index: 4, id: "supply1:approve", blockId: "supply1", to: "weETH", functionName: "approve", signature: "function approve(address,uint256)", valueSpec: "none", amount: { kind: "step-output", producer: "wrap1:wrap", attribution: "transfer-event" } },
+  { index: 5, id: "supply1:supply", blockId: "supply1", to: "pool", functionName: "supply", signature: "function supply(address,uint256,address,uint16)", valueSpec: "none", amount: { kind: "step-output", producer: "wrap1:wrap", attribution: "transfer-event" } },
+  { index: 6, id: "borrow:borrow", blockId: "borrow", to: "pool", functionName: "borrow", signature: "function borrow(address,uint256,uint256,uint16,address)", valueSpec: "none", amount: { kind: "derived" } },
+];
 
 /** SPEC §2's enumerated execution steps, in canonical order. */
 export const CANONICAL_STEPS: readonly StepRow[] = [
