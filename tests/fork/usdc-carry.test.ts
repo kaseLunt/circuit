@@ -122,6 +122,26 @@ const FLAGSHIP_PREFIX_STEPS = 6;
 const CEILING_BPS = 7749;
 const OVER_CEILING_BPS = 7750;
 
+/**
+ * THE TWO SIGNED MARGINS, in oracle base units (8-dec), at the pinned block.
+ *
+ * `relWithin` at 1e-6 over a base figure of 1.49e12 tolerates roughly 1.5 MILLION units — four
+ * orders of magnitude more than the 97-unit excess that decides this boundary. A GenericLogic
+ * rounding regression far larger than the thing under test would pass a tolerance check, which
+ * is why the accepted side asserts EXACT integer equality against `borrow-limit.ts`'s own
+ * prediction and pins both margins as integers rather than as fractions of anything.
+ *
+ * Both are deterministic functions of the fork's base block: the fixture block is fixed, every
+ * input is a read at that block, and the arithmetic is integer end to end. They are stated as
+ * literals here so a shift in the protocol's rounding chain fails LOUDLY rather than sliding
+ * inside a tolerance band.
+ *
+ *   headroom = ceilingBase − debtBase(7749) = 1490996818049 − 1490804431402 = 192386647
+ *   excess   = debtBase(7750) − ceilingBase = 1490996818146 − 1490996818049 =        97
+ */
+const CEILING_HEADROOM_BASE = 192_386_647n;
+const OVER_CEILING_EXCESS_BASE = 97n;
+
 /** Balance-mapping scan bound, the `findAllowanceSlotAt` discipline. */
 const BALANCE_SCAN_SLOTS = 32n;
 /** Pre-existing USDC seeded on the actor, in the reserve's own six-decimal units. */
@@ -158,8 +178,13 @@ async function rpcAt<T>(url: string, method: string, params: readonly unknown[] 
 const blockNumberAt = async (url: string): Promise<bigint> =>
   BigInt(await rpcAt<string>(url, "eth_blockNumber"));
 
-async function callAt(url: string, to: Address, data: Hex): Promise<Hex> {
-  return rpcAt<Hex>(url, "eth_call", [{ to, data }, "latest"]);
+/**
+ * `block` pins the read to a specific height. Default "latest" is right for a probe; a
+ * comparison that claims EXACT equality against a prediction has to name the block it is
+ * exact AT, because every index-bearing figure the pool reports accrues with block timestamp.
+ */
+async function callAt(url: string, to: Address, data: Hex, block?: bigint): Promise<Hex> {
+  return rpcAt<Hex>(url, "eth_call", [{ to, data }, block === undefined ? "latest" : hexQuantity(block)]);
 }
 
 async function balanceOfAt(url: string, token: Address, who: Address): Promise<bigint> {
@@ -187,6 +212,7 @@ async function userAccountDataAt(
   url: string,
   pool: Address,
   who: Address,
+  block?: bigint,
 ): Promise<{
   collateralBase: bigint;
   debtBase: bigint;
@@ -198,6 +224,7 @@ async function userAccountDataAt(
     url,
     pool,
     encodeFunctionData({ abi: ABI.pool, functionName: "getUserAccountData", args: [who] }),
+    block,
   );
   const words = raw.slice(2).match(/.{64}/g);
   if (words === null || words.length < 6) throw new Error("getUserAccountData returned no tuple");
@@ -758,8 +785,28 @@ describe("W09 fork gate — the USDC carry on the real session composition", () 
 
     // The client gate ACCEPTS the document at the ceiling — the claim the chain is about to
     // settle — and the plan it produces is the same six-step carry, still without a set-emode.
+    // The verdict is RETAINED: its `ceiling.debtBase` is the prediction the chain has to match
+    // to the unit, and its `ceilingBase` is the limit that prediction sits under.
     const atCeiling = carryGraph("10", CEILING_BPS);
-    expect(borrowLimitVerdict(atCeiling, snapshot).status).toBe("within");
+    const atVerdict = borrowLimitVerdict(atCeiling, snapshot);
+    if (atVerdict.status !== "within") {
+      throw new Error(`the at-ceiling carry is not within: ${atVerdict.status}`);
+    }
+    const predicted = atVerdict.ceiling;
+
+    // THE GEOMETRY OF THE BOUNDARY, as integers. `relWithin` at 1e-6 would tolerate ~1.5e6
+    // base units here; the excess that decides the line is 97. Both margins are therefore
+    // pinned exactly, from the client's own protocol-rounding chain.
+    expect(predicted.ceilingBase - predicted.debtBase).toBe(CEILING_HEADROOM_BASE);
+    const overVerdict = borrowLimitVerdict(carryGraph("10", OVER_CEILING_BPS), snapshot);
+    if (overVerdict.status !== "over-limit") {
+      throw new Error(`the over-ceiling carry is not over-limit: ${overVerdict.status}`);
+    }
+    expect(overVerdict.ceiling.debtBase - overVerdict.ceiling.ceilingBase).toBe(
+      OVER_CEILING_EXCESS_BASE,
+    );
+    // Same collateral on both sides, so the two margins describe one line rather than two.
+    expect(overVerdict.ceiling.ceilingBase).toBe(predicted.ceilingBase);
 
     const encoded = encodeShareGraph(atCeiling);
     if (!encoded.ok) throw new Error("at-ceiling carry refused by the share codec");
@@ -777,6 +824,7 @@ describe("W09 fork gate — the USDC carry on the real session composition", () 
     }
 
     let borrowedWei = 0n;
+    let borrowBlock = 0n;
     for (let index = 0; index < CARRY_STEP_COUNT; index += 1) {
       const outcome = await caller.executeStep({ sessionKey: key, planHash, stepIndex: index });
       if (!outcome.ok) throw new Error(`executeStep refused: ${JSON.stringify(outcome.refusal)}`);
@@ -784,6 +832,11 @@ describe("W09 fork gate — the USDC carry on the real session composition", () 
       // has proven nothing about the accepted side.
       if (outcome.result.status !== "attributed") {
         throw new Error(`at-ceiling step ${index} settled as ${outcome.result.status}`);
+      }
+      if (outcome.result.stepId === "borrow:borrow") {
+        // The height the exact comparison below is exact AT — the pool's own receipt, not a
+        // subsequent `eth_blockNumber` that another transaction could have moved.
+        borrowBlock = BigInt(outcome.result.receipt.blockNumber);
       }
       const output = outcome.result.output;
       if (output === null) continue;
@@ -804,8 +857,25 @@ describe("W09 fork gate — the USDC carry on the real session composition", () 
       }
     }
     expect(borrowedWei).toBeGreaterThan(0n);
+    expect(borrowBlock).toBeGreaterThan(0n);
 
-    const account = await userAccountDataAt(url, snapshot.pool, session.actor);
+    /**
+     * THE LOAD-BEARING COMPARISON, at the borrow's OWN block.
+     *
+     * Read at `latest` this would be exact only by luck: `getUserAccountData` values debt
+     * through `getNormalizedDebt()`, which accrues with block timestamp, so one more mined
+     * block moves the figure and an equality would have to be softened into a tolerance. Pinned
+     * to the height the borrow settled at, the protocol's mint → read-back → base-conversion
+     * chain and `borrow-limit.ts`'s reproduction of it are evaluated over the same index, and
+     * EXACT equality is an honest claim rather than a lucky one.
+     */
+    const account = await userAccountDataAt(url, snapshot.pool, session.actor, borrowBlock);
+    // EXACT, to the base unit, on both sides of the ledger the ceiling is computed from.
+    expect(account.debtBase).toBe(predicted.debtBase);
+    expect(account.collateralBase).toBe(predicted.collateralBase);
+    // …and the chain's OWN headroom figure is the pinned margin — `percentMul(collateral,
+    // ltv) - debt` computed by GenericLogic, not by us, landing on the same 192,386,647.
+    expect(account.availableBorrowsBase).toBe(CEILING_HEADROOM_BASE);
     // The debt is REAL and the position is not liquidatable: the LTV line the borrow just
     // cleared sits below the LT line, so the ceiling is a borrowing limit and not a
     // liquidation. The two windows stay distinct here as well as in the refusal below.
@@ -813,8 +883,10 @@ describe("W09 fork gate — the USDC carry on the real session composition", () 
     expect(account.healthFactor).toBeGreaterThan(10n ** 18n);
     // The chain's own weighted LTV is the pinned refused-side number.
     expect(account.ltv).toBe(BigInt(OVER_CEILING_BPS));
-    // …and the ledger's valuation of that debt agrees with the chain's — the six-decimal
-    // claim again, now at the boundary rather than in the middle of the range.
+    // The RISK ledger is a second, independent derivation of the same position — it values
+    // debt straight off the amount rather than through the scaled-mint round trip — so it is
+    // compared within tolerance rather than pinned. The exact claim above is the gate; this
+    // one says the two derivations have not silently diverged.
     const ours = hfWadValue(borrowCheckpoint.healthFactor);
     if (ours === null) throw new Error("the at-ceiling ledger health factor is unknown");
     expect(
@@ -825,9 +897,6 @@ describe("W09 fork gate — the USDC carry on the real session composition", () 
       relWithin(BigInt(borrowCheckpoint.totalDebtBase!), account.debtBase, SANDBOX_HF_REL_POW),
       `at-ceiling ledger debtBase ${borrowCheckpoint.totalDebtBase} vs chain ${account.debtBase}`,
     ).toBe(true);
-    // Barely any room left, in the protocol's own figure: under a tenth of a percent of the
-    // collateral it stands against.
-    expect(account.availableBorrowsBase).toBeLessThan(account.collateralBase / 1_000n);
 
     /**
      * LAST admissible, proven on the settled position itself: one more borrow — sized from
@@ -871,10 +940,14 @@ describe("W09 fork gate — the USDC carry on the real session composition", () 
     expect(after.debtBase).toBeLessThan(account.debtBase + account.availableBorrowsBase);
 
     record(
-      `ceiling receipt: allocation ${CEILING_BPS} SETTLED — borrowed ${borrowedWei} USDC, ` +
-        `chain debtBase ${account.debtBase}, HF ${account.healthFactor}, headroom ` +
-        `${account.availableBorrowsBase} of collateral ${account.collateralBase}; ` +
-        `+${overshootWei} more reverts ${refused.raw}`,
+      `ceiling receipt: allocation ${CEILING_BPS} SETTLED at block ${borrowBlock} — borrowed ` +
+        `${borrowedWei} USDC; chain debtBase ${account.debtBase} == predicted ` +
+        `${predicted.debtBase} (delta ${account.debtBase - predicted.debtBase}), collateral ` +
+        `${account.collateralBase}, ceiling ${predicted.ceilingBase}, chain headroom ` +
+        `${account.availableBorrowsBase}, HF ${account.healthFactor}; one bp more predicts ` +
+        `${overVerdict.ceiling.debtBase} = ceiling + ` +
+        `${overVerdict.ceiling.debtBase - overVerdict.ceiling.ceilingBase}; +${overshootWei} ` +
+        `USDC on the settled position reverts ${refused.raw}`,
     );
     await closeSession(key);
   });
@@ -903,8 +976,17 @@ describe("W09 fork gate — the USDC carry on the real session composition", () 
     expect(maxAllocationBps).toBe(CEILING_BPS);
     const over = maxAllocationBps + 1;
     expect(over).toBe(OVER_CEILING_BPS);
-    // The client gate agrees the over-ceiling document is over the ceiling…
-    expect(borrowLimitVerdict(carryGraph("10", over), snapshot).status).toBe("over-limit");
+    // The client gate agrees the over-ceiling document is over the ceiling — and by HOW MUCH,
+    // as an integer. 97 base units out of 1.49e12 is the whole margin the chain is about to
+    // refuse on; a drill that only checked the verdict's status would pass just as happily if
+    // the rounding chain had moved the debt by a million.
+    const overVerdict = borrowLimitVerdict(carryGraph("10", over), snapshot);
+    if (overVerdict.status !== "over-limit") {
+      throw new Error(`the over-ceiling carry is not over-limit: ${overVerdict.status}`);
+    }
+    expect(overVerdict.ceiling.debtBase - overVerdict.ceiling.ceilingBase).toBe(
+      OVER_CEILING_EXCESS_BASE,
+    );
 
     const encoded = encodeShareGraph(carryGraph("10", over));
     if (!encoded.ok) throw new Error("over-ceiling carry refused by the share codec");
