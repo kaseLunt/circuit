@@ -28,7 +28,7 @@ deliverables:
   - src/lib/wallet/wallet-provider.tsx
   - docs/live-execution-checklist.md
 evidence_receipts:
-  - roadmap/evidence/E-W08-p3b-wallet-live-gating.md
+  - roadmap/evidence/E-W08-p3b-wallet-live-gating-r2.md
 invalidated_by:
   - SPEC.md
   - src/lib/execution/**
@@ -36,7 +36,7 @@ invalidated_by:
   - eslint.config.mjs
 review_when: event:invalidated-by-change
 updated: 2026-07-30
-evidence_fingerprint: sha256:495ac5d820d9f5ec26be833e1456650177f244ef9753d0a058e9f1574eb5dd2b
+evidence_fingerprint: sha256:a8ac7924581d7f749993e2195b4987514453ac20ddb352d2bafa376ad8d3fa93
 ---
 
 # W08 — P3b: wallet boundary and live gating
