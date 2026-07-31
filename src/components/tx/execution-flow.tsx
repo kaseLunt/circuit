@@ -28,6 +28,12 @@ import type { SimulationResult } from "../../lib/strategy/types";
 import type { ExecutionPhase, SettledStepFact } from "../../lib/execution/types";
 import type { DriverFault, DriverSnapshot } from "../../lib/tx/driver";
 import { chainHfProvenance } from "../../lib/tx/provenance";
+import {
+  liquidationPairLabel,
+  liquidationPrefix,
+  liquidationRatioLabel,
+  liquidationSentence,
+} from "../shared/liquidation-copy";
 import { SourcedValue, slotClassName, type SlotRamp } from "../shared/sourced-value";
 import { PreSignReview } from "./pre-sign-review";
 import { StepList } from "./step-list";
@@ -42,6 +48,8 @@ const CONTEXT_RAMP: SlotRamp = {
   resolved: "text-xs text-muted-foreground",
   size: "text-xs",
 };
+/** "1587.3241" — the receipt's ratio slot, wide enough for an uncorrelated pair's level. */
+const RATIO_SLOT_CHARS = 7;
 
 export interface ExecutionFlowProps {
   readonly plan: PlanSuccess;
@@ -186,6 +194,41 @@ function lastChainRisk(settled: readonly SettledStepFact[]): SettledStepFact | n
   return null;
 }
 
+/**
+ * The receipt's liquidation line, naming the pair the level is a level OF.
+ *
+ * The ratio used to render here beside the words "the collateral/debt oracle ratio", which
+ * made a weETH/USDC carry's receipt indistinguishable from a weETH/WETH loop's — the one
+ * surface a user reads AFTER committing. Pair and ratio come from one derivation in
+ * `core/risk.ts` and are null together, so the unavailable branch names no pair at all.
+ * Every word is `shared/liquidation-copy.ts`'s, which is also the canvas block's and the
+ * simulation panel's: three surfaces, one sentence.
+ */
+function LiquidationLine({ simulation }: { readonly simulation: SimulationResult }) {
+  const pair = liquidationPairLabel(simulation.liquidationPair);
+  const ratio = simulation.liquidationRatioWad;
+  if (ratio === null) {
+    return <p className="text-xs text-muted-foreground">{liquidationSentence(pair, null, false)}</p>;
+  }
+  return (
+    <p className="text-xs text-muted-foreground">
+      {liquidationPrefix(pair)}
+      <SourcedValue
+        value={ratio}
+        pending={false}
+        label={liquidationRatioLabel(pair)}
+        chars={RATIO_SLOT_CHARS}
+        format={formatWadRatio}
+        unavailableReason="ratio unavailable"
+        inline
+        provenance="disclosure"
+        className={slotClassName(true, false, CONTEXT_RAMP)}
+      />
+      .
+    </p>
+  );
+}
+
 function CompleteReceipt({
   plan,
   snapshot,
@@ -276,20 +319,7 @@ function CompleteReceipt({
           </div>
         </div>
         {simulation === null ? null : (
-          <p className="text-xs text-muted-foreground">
-            {"Liquidates when the collateral/debt oracle ratio reaches "}
-            <SourcedValue
-              value={simulation.liquidationRatioWad}
-              pending={false}
-              label="Liquidation ratio"
-              chars={7}
-              format={formatWadRatio}
-              unavailableReason="ratio unavailable"
-              inline
-              provenance="disclosure"
-              className={slotClassName(simulation.liquidationRatioWad !== null, false, CONTEXT_RAMP)}
-            />
-          </p>
+          <LiquidationLine simulation={simulation} />
         )}
         <p className="text-xs text-muted-foreground">
           {`${plan.steps.length} steps confirmed on the session fork — a forked-mainnet demo, not proof of live behavior.`}

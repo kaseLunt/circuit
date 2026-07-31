@@ -592,9 +592,15 @@ test.describe("Sandbox execution — run all steps, watch attribution, read the 
       await expect(
         receipt.getByRole("button", { name: formatWadAsPercent(valueOf(netApyWad)) }),
       ).toBeVisible();
+      // The pair the level is a level OF, read off the simulation that minted the ratio
+      // (Codex W09 finding 2). The receipt used to print one generic sentence, which a carry
+      // would have printed identically — on the one surface a user reads after committing.
+      const pair = SIM.liquidationPair;
+      if (pair === null) throw new Error("the fixture must produce a liquidation pair");
       await expect(receipt).toContainText(
-        "Liquidates when the collateral/debt oracle ratio reaches",
+        `Liquidates if ${pair.collateral}/${pair.debt} falls to`,
       );
+      await expect(receipt).not.toContainText("collateral/debt");
       await expect(
         receipt.getByRole("button", { name: formatWadRatio(valueOf(ratioWad)) }),
       ).toBeVisible();

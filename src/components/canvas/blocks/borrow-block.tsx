@@ -9,6 +9,12 @@ import { rateKindLabel } from "../../../core/risk";
 import type { BorrowCeiling } from "../../../core/borrow-limit";
 import { FULL_ALLOCATION_BPS, type BorrowBlockData } from "../../../lib/strategy/types";
 import { AssetChip } from "../../shared/asset-chip";
+import {
+  liquidationPairLabel,
+  liquidationPrefix,
+  liquidationRatioLabel,
+  liquidationSentence,
+} from "../../shared/liquidation-copy";
 import { SourcedValue, slotClassName, type SlotRamp } from "../../shared/sourced-value";
 import {
   BaseBlock,
@@ -108,24 +114,6 @@ function regimeSentence(ceiling: BorrowCeiling): string {
       )} borrowable, liquidation at ${formatBpsAsPercent(ceiling.ltBps)}.`;
 }
 
-/** The prose a settled-but-empty risk read gets. Never a dash, never a zero. */
-const LIQUIDATION_UNAVAILABLE = "Liquidation level unavailable. The risk read did not resolve.";
-
-/**
- * The ONE authored liquidation sentence, in the two forms it has to take: the words the
- * visible row wraps around the `SourcedValue` that renders the ratio, and the whole string
- * the slider announces. Both come from here, so the pointer path and the keyboard path
- * cannot say different things — the defect two independent authorings guarantee.
- */
-function liquidationPrefix(pair: string): string {
-  return `Liquidates if ${pair} falls to `;
-}
-
-function liquidationSentence(pair: string, ratio: string | null, pending: boolean): string {
-  if (ratio !== null) return `${liquidationPrefix(pair)}${ratio}.`;
-  return pending ? `Liquidation level for ${pair} loading.` : LIQUIDATION_UNAVAILABLE;
-}
-
 /**
  * Open debt against the supplied collateral.
  *
@@ -160,14 +148,8 @@ export function BorrowBlock({ id, data, selected }: NodePropsFor<BorrowBlockData
    * collateral dependency, not a token flow — so that read was always null in the running app
    * and every position, correlated or not, rendered as "collateral/debt". With two templates
    * that erased the entire contrast: weETH/WETH and weETH/USDC printed the same sentence.
-   * The generic wording survives only as the genuinely-unknown case, where the ratio is
-   * unavailable too and the sentence is about an absence.
    */
-  const liquidationPair = runtime.liquidationPair;
-  const pair =
-    liquidationPair === null
-      ? "collateral/debt"
-      : `${liquidationPair.collateral}/${liquidationPair.debt}`;
+  const pair = liquidationPairLabel(runtime.liquidationPair);
 
   const allocation = runtime.borrowAllocations[id] ?? null;
   const allocationText =
@@ -311,7 +293,7 @@ export function BorrowBlock({ id, data, selected }: NodePropsFor<BorrowBlockData
           <SourcedValue
             value={ratio}
             pending={runtime.pending}
-            label={`Liquidation ratio, ${pair}`}
+            label={liquidationRatioLabel(pair)}
             chars={RATIO_SLOT_CHARS}
             format={formatWadRatio}
             unavailableReason="unavailable"
