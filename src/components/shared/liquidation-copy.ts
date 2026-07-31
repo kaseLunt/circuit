@@ -64,3 +64,42 @@ export function liquidationSentence(pair: string, ratio: string | null, pending:
 export function liquidationRatioLabel(pair: string): string {
   return `Liquidation ratio, ${pair}`;
 }
+
+/**
+ * WHICH WAY THE DEBT ASSET CUTS — treatment §2.5's risk-direction note (W09 objective 3:
+ * "the risk labels state which way a depeg cuts").
+ *
+ * The carry borrows a stablecoin against weETH, and the consequence is counterintuitive
+ * enough that no user should have to derive it: the borrowed asset is the DEBT, so a fall in
+ * its oracle price SHRINKS the debt and RAISES the health factor. Nothing in the product said
+ * so, and the ratio above cannot say it — a ratio is symmetric prose about two prices, while
+ * this is a claim about which side of the position each asset sits on.
+ *
+ * WHEN IT RENDERS, and why that is a read rather than a classification. Only where NO e-mode
+ * category governs the position. That is the protocol's own statement that it does not treat
+ * these two reserves as a correlated pair — the same `categoryId` the regime sentence beside
+ * this one already quotes, so the note and the regime cannot disagree. For a category-governed
+ * pair the note would be worse than redundant: weETH is priced through eETH/ETH, so "a fall in
+ * WETH raises the health factor" is false for the loop, and treatment §2.5 bans the
+ * correlated-pair depeg wording outright. Correlation is therefore never asserted here; the
+ * absence of a governing category is, and it is read off the ceiling.
+ *
+ * WHAT IT DOES NOT SAY. §2.5 also records that USDC's feed caps the UPSIDE (a CAPO adapter).
+ * That is a property of the feed's own description, which this module has not read, so it is
+ * not stated — the oracle's semantics reach the screen through the provenance trail, where
+ * they are quoted rather than paraphrased.
+ *
+ * The asset names come from the pair `core/risk.ts` minted with the ratio. No symbol is
+ * authored here, so a third template borrowing something else inherits the sentence.
+ */
+export function debtDirectionNote(
+  pair: LiquidationPair | null,
+  categoryId: number | null,
+): string | null {
+  if (pair === null || categoryId !== null) return null;
+  return (
+    `${pair.debt} is this position's debt, so a fall in its oracle price shrinks the debt and ` +
+    `raises the health factor. What liquidates this position is ${pair.collateral} falling ` +
+    `against ${pair.debt}.`
+  );
+}

@@ -10,6 +10,7 @@ import type { BorrowCeiling } from "../../../core/borrow-limit";
 import { FULL_ALLOCATION_BPS, type BorrowBlockData } from "../../../lib/strategy/types";
 import { AssetChip } from "../../shared/asset-chip";
 import {
+  debtDirectionNote,
   liquidationPairLabel,
   liquidationPrefix,
   liquidationRatioLabel,
@@ -208,6 +209,26 @@ export function BorrowBlock({ id, data, selected }: NodePropsFor<BorrowBlockData
               ? "Choose how much of the collateral value to borrow."
               : undefined;
 
+  /**
+   * Treatment §2.5's risk-direction note, and it renders HERE and nowhere else.
+   *
+   * §2.5 scopes it to "the contrast surface (§4)", and §4 is the carry template's canvas
+   * shape — the block is the one surface that already states regime facts (the `no e-mode`
+   * line directly beneath this). The simulation panel carries headline figures for one
+   * document and the execution receipt is a settled record whose taste ruling is stillness;
+   * neither states a regime today, and neither is where the two templates are compared. So
+   * the copy lives in the shared home with the rest of the liquidation sentence — one author
+   * for all of it — and the block is its only caller.
+   *
+   * The regime is the gate, read off the ceiling that the sentence below quotes: no governing
+   * category is the protocol's own statement that these two reserves are not a correlated
+   * pair.
+   */
+  const directionNote = debtDirectionNote(
+    runtime.liquidationPair,
+    ceiling === null ? null : ceiling.categoryId,
+  );
+
   const ratio = runtime.liquidationRatioWad;
   const sentence = liquidationSentence(
     pair,
@@ -302,6 +323,10 @@ export function BorrowBlock({ id, data, selected }: NodePropsFor<BorrowBlockData
           />
           .
         </p>
+      )}
+
+      {directionNote === null ? null : (
+        <p className="text-xs text-muted-foreground">{directionNote}</p>
       )}
 
       {ceiling === null ? null : (
