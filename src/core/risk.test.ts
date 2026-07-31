@@ -514,7 +514,7 @@ const MINT_QUALIFICATIONS = {
   // The recycled fraction rides the note, so the qualification names the shape the document
   // actually has (the flagship recycles all of its borrow — 100.00%).
   netComposition:
-    "§5.2, current-rate run-rate over one iteration; incentives and points excluded by construction; of the borrowed value this document supplies 100.00% as collateral and leaves 0.00% staked, and the cash residual is credited no yield because the document does not deploy it",
+    "§5.2, current-rate run-rate over one iteration; incentives and points excluded by construction; of the initial equity this document supplies 100.00% as collateral and leaves 0.00% staked, and of the borrowed value — sized against the collateral that arrived — it supplies 100.00% and leaves 0.00% staked; each cash residual is credited no yield because the document does not deploy it",
   windowLicence:
     "cross-block window: an instantaneous exchange rate is not an APR (SPEC §5.1); the window's endpoints are two reads at two blocks",
 } as const;
@@ -669,7 +669,7 @@ describe("the §5.2 yield composition (design §2.7, §2.8)", () => {
     expect(requireValue(result.grossApyWad, "gross")).toBe(gross);
     expect(requireValue(result.netApyWad, "net")).toBe(
       // q = WAD: the flagship recycles its whole borrow into collateral.
-      netApyWad(WAD, 0n, (7_000n * WAD) / 10_000n, stake, supply, debt),
+      netApyWad({ suppliedWad: WAD, stakedWad: 0n }, { suppliedWad: WAD, stakedWad: 0n }, (7_000n * WAD) / 10_000n, stake, supply, debt),
     );
   });
 
@@ -1370,8 +1370,8 @@ describe("the USDC carry (W09) — an uncorrelated leg through the same engine",
 
     // The retained-cash reading is STATED, not silent (SPEC §5).
     const netTrail = provenanceTrailText(result.netApyWad!).join("\n");
-    expect(netTrail).toContain("(1 + q_s·b)(1 + r_coll) + q_k·b(1 + r_stake) + q_c·b − b(1 + r_debt) − 1");
-    expect(netTrail).toContain("supplies 0.00% as collateral and leaves 0.00% staked");
+    expect(netTrail).toContain("p_s·r_coll + p_k·r_stake + q_s·b_eff·r_coll + q_k·b_eff·r_stake − b_eff·r_debt, b_eff = b·p_s");
+    expect(netTrail).toContain("borrowed value — sized against the collateral that arrived — it supplies 0.00%");
     expect(netTrail).toContain("credited no yield");
   });
 
@@ -1400,8 +1400,8 @@ describe("the USDC carry (W09) — an uncorrelated leg through the same engine",
     // shape of 1× collateral against a short in another reserve.
     expect(result.yieldSources.reduce((a, s) => a + s.weightBps, 0)).toBe(10_000);
     const netTrail = provenanceTrailText(result.netApyWad!).join("\n");
-    expect(netTrail).toContain("(1 + q_s·b)(1 + r_coll) + q_k·b(1 + r_stake) + q_c·b − b(1 + r_debt) − 1");
-    expect(netTrail).toContain("supplies 100.00% as collateral and leaves 0.00% staked");
+    expect(netTrail).toContain("p_s·r_coll + p_k·r_stake + q_s·b_eff·r_coll + q_k·b_eff·r_stake − b_eff·r_debt, b_eff = b·p_s");
+    expect(netTrail).toContain("borrowed value — sized against the collateral that arrived — it supplies 100.00%");
   });
 
   /**
@@ -1431,29 +1431,42 @@ describe("the USDC carry (W09) — an uncorrelated leg through the same engine",
     }
 
     /**
-     * The general closed form, written out independently of the function under test:
+     * The general closed form, written out independently of the function under test — as the
+     * VALUE-AFTER decomposition the derivation actually produced, not its algebraic expansion.
      *
-     *   (1 + q_s·b)(1 + r_coll) + q_k·b(1 + r_stake) + q_c·b − b(1 + r_debt) − 1
+     *   b_eff = b·p_s                        (the borrow sizes against ARRIVED collateral)
+     *   after = (p_s + q_s·b_eff)(1 + r_coll)
+     *         + (p_k + q_k·b_eff)(1 + r_stake)
+     *         + (p_c + q_c·b_eff)
+     *         − b_eff(1 + r_debt)
+     *   net   = after − 1
+     *
+     * The expansion `p_s·r_coll + p_k·r_stake + …` is algebraically identical but NOT
+     * bit-identical: integer WAD math floors at each product, and grouping the earning capital
+     * before multiplying floors once instead of twice. The grouped form is the one that
+     * describes the position, so it is the one written here.
      */
     const longhand = (
       r: ReturnType<typeof simulate>,
       qSuppliedWad: bigint,
       bBps: number,
       qStakedWad = 0n,
+      pSuppliedWad = WAD,
+      pStakedWad = 0n,
     ): bigint => {
       const rStake = requireValue(r.yieldSources[0]!.rate.wad, "r_stake");
       const rSupply = requireValue(r.yieldSources[1]!.rate.wad, "r_supply");
       const rDebt = requireValue(r.yieldSources[2]!.rate.wad, "r_debt");
       const rColl = ((WAD + rStake) * (WAD + rSupply)) / WAD - WAD;
-      const b = (BigInt(bBps) * WAD) / 10_000n;
-      const supplied = (qSuppliedWad * b) / WAD;
-      const staked = (qStakedWad * b) / WAD;
-      const cash = b - supplied - staked;
+      const bEff = ((BigInt(bBps) * WAD) / 10_000n) * pSuppliedWad / WAD;
+      const supplied = (qSuppliedWad * bEff) / WAD;
+      const staked = (qStakedWad * bEff) / WAD;
+      const cash = bEff - supplied - staked;
       return (
-        ((WAD + supplied) * (WAD + rColl)) / WAD +
-        (staked * (WAD + rStake)) / WAD +
-        cash -
-        (b * (WAD + rDebt)) / WAD -
+        ((pSuppliedWad + supplied) * (WAD + rColl)) / WAD +
+        ((pStakedWad + staked) * (WAD + rStake)) / WAD +
+        (WAD - pSuppliedWad - pStakedWad + cash) -
+        (bEff * (WAD + rDebt)) / WAD -
         WAD
       );
     };
@@ -1477,7 +1490,7 @@ describe("the USDC carry (W09) — an uncorrelated leg through the same engine",
       expect(weights[0]! + weights[1]!).toBe(10_000 + FORK_PROVEN_BORROW_BPS / 2);
       expect(weights[2]).toBe(-FORK_PROVEN_BORROW_BPS);
       expect(provenanceTrailText(result.netApyWad!).join("\n")).toContain(
-        "supplies 50.00% as collateral and leaves 0.00% staked",
+        "borrowed value — sized against the collateral that arrived — it supplies 50.00%",
       );
     });
 
@@ -1557,8 +1570,73 @@ describe("the USDC carry (W09) — an uncorrelated leg through the same engine",
       expect(weights[2]).toBe(-FORK_PROVEN_BORROW_BPS);
       expect(weights[0]! + weights[1]!).toBe(10_000 + FORK_PROVEN_BORROW_BPS);
       expect(provenanceTrailText(result.netApyWad!).join("\n")).toContain(
-        "supplies 0.00% as collateral and leaves 100.00% staked",
+        "borrowed value — sized against the collateral that arrived — it supplies 0.00% and leaves 100.00% staked",
       );
+    });
+
+    /**
+     * Codex W09 round-6 finding — THE INITIAL EQUITY SPLITS TOO, and the borrow sizes against
+     * what arrived.
+     *
+     * `buildPlan` applies the borrow's allocation to `collateralBase` — the supplies that
+     * actually PRECEDE the borrow — not to equity. Throttle `stake1 → wrap1` to 4000 bps and
+     * 60% of the equity rests as eETH: a 6000-bps carry then borrows 60% of the 40% that
+     * arrived, which is 24% of equity. Reading the raw allocation prices debt the document
+     * never takes on, and credits the whole equity with the supplied-collateral rate.
+     *
+     *   p_s = 0.4, p_k = 0.6, p_c = 0        b_eff = 0.6 × 0.4 = 0.24
+     *   net = p_s·r_coll + p_k·r_stake − b_eff·r_debt
+     */
+    it("sizes the borrow against ARRIVED collateral when the pre-lend path is throttled", () => {
+      const base = carryGraph();
+      const graph = {
+        blocks: base.blocks,
+        edges: base.edges.map((e) =>
+          e.source === "stake1" ? { ...e, allocationBps: 4_000 } : e,
+        ),
+      };
+      const result = simulate(graph, snapshot);
+      const pS = (4_000n * WAD) / 10_000n;
+      const pK = WAD - pS;
+      const bEff = (((BigInt(FORK_PROVEN_CARRY_BPS) * WAD) / 10_000n) * pS) / WAD;
+      // 24% of initial equity, exactly as the reviewer computed.
+      expect(bEff).toBe((2_400n * WAD) / 10_000n);
+
+      // q_s = 0 (terminal carry), p_s = 0.4, p_k = 0.6.
+      const expected = longhand(result, 0n, FORK_PROVEN_CARRY_BPS, 0n, pS, pK);
+      expect(requireValue(result.netApyWad, "net")).toBe(expected);
+
+      // The reading this replaces: full equity on r_coll, debt at the RAW 60%.
+      const rawAllocation = longhand(result, 0n, FORK_PROVEN_CARRY_BPS, 0n, WAD, 0n);
+      expect(requireValue(result.netApyWad, "net")).not.toBe(rawAllocation);
+      expect(expected - rawAllocation).toBeGreaterThan(WAD / 100n);
+
+      // Exposures follow: the debt leg is b_eff, not b.
+      const weights = result.yieldSources.map((s) => s.weightBps);
+      expect(weights[2]).toBe(-2_400);
+      expect(weights[0]! + weights[1]!).toBe(10_000);
+      expect(provenanceTrailText(result.netApyWad!).join("\n")).toContain(
+        "of the initial equity this document supplies 40.00% as collateral and leaves 60.00% staked",
+      );
+    });
+
+    /** The same throttle on the LOOP topology, where the borrow is recycled as well. */
+    it("normalizes a throttled pre-lend path on the recycled loop too", () => {
+      const base = flagshipGraph();
+      const graph = {
+        blocks: base.blocks,
+        edges: base.edges.map((e) =>
+          e.source === "stake1" ? { ...e, allocationBps: 4_000 } : e,
+        ),
+      };
+      const result = simulate(graph, snapshot);
+      const pS = (4_000n * WAD) / 10_000n;
+      const pK = WAD - pS;
+      // q_s = 1: the loop still recycles all of what it borrows.
+      expect(requireValue(result.netApyWad, "net")).toBe(
+        longhand(result, WAD, FORK_PROVEN_BORROW_BPS, 0n, pS, pK),
+      );
+      expect(result.yieldSources[2]!.weightBps).toBe(-2_800);
     });
 
     /**

@@ -87,6 +87,7 @@ import {
   rayDivFloor,
   trailingAprWad,
   vTokenBalance,
+  type SinkFractions,
 } from "./rates";
 
 // ————————————————————————— contract —————————————————————————
@@ -1094,7 +1095,13 @@ interface CompositionLegs {
    * left in a staked position; cash is the residual. Read off the document's own edge
    * allocations, never off which template it came from.
    */
-  readonly sinks: { readonly suppliedWad: bigint; readonly stakedWad: bigint };
+  readonly sinks: SinkFractions;
+  /**
+   * Where the INITIAL EQUITY comes to rest, same three sinks. `suppliedWad` here is `p_s`,
+   * the fraction that actually reached a lend — and therefore the base the borrow allocation
+   * multiplies, since the borrow sizes against arrived collateral rather than against equity.
+   */
+  readonly equity: SinkFractions;
   readonly stake: ProvenancedRate;
   readonly supply: ProvenancedRate;
   readonly debt: ProvenancedRate;
@@ -1116,12 +1123,12 @@ type SinkKind = "cash" | "staked" | "supplied";
  * `plan.ts` compiles exactly six block kinds, so the reachable set from a borrow is closed and
  * small. Each row is a place value can SIT, and the rate it earns while sitting there:
  *
+ *   input   → ETH, before anything is done with it        → CASH,     earns nothing
  *   borrow  → the borrowed token itself (WETH, USDC)  → CASH,     earns nothing
  *   unwrap  → ETH                                      → CASH,     earns nothing
  *   stake   → eETH (rebasing)                          → STAKED,   earns r_stake
  *   wrap    → weETH (value-accruing wrapper over eETH) → STAKED,   earns r_stake
  *   lend    → aToken collateral                        → SUPPLIED, earns r_coll
- *   input   → unreachable downstream of a borrow (inputs have no incoming edge)
  *
  * `wrap` sits with `stake` deliberately: wrapping eETH into weETH changes the token, not the
  * position — the wrapper's exchange rate accrues the same staking yield. Only handing it to
@@ -1133,6 +1140,7 @@ type SinkKind = "cash" | "staked" | "supplied";
  */
 function sinkKindOf(blockType: string | undefined): SinkKind | null {
   switch (blockType) {
+    case "input":
     case "borrow":
     case "unwrap":
       return "cash";
@@ -1173,10 +1181,7 @@ function sinkKindOf(blockType: string | undefined): SinkKind | null {
  *    count if it ever became reachable;
  *  - allocations out of one block exceeding 100%, or fractions escaping [0, 1].
  */
-function borrowSinksOf(
-  graph: StrategyGraph,
-  borrowBlockId: string,
-): { readonly suppliedWad: bigint; readonly stakedWad: bigint } | null {
+function sinksFrom(graph: StrategyGraph, startBlockId: string): SinkFractions | null {
   const typeById = new Map(graph.blocks.map((b) => [b.id, b.type]));
   const outgoing = new Map<string, Edge[]>();
   for (const edge of graph.edges) {
@@ -1186,7 +1191,7 @@ function borrowSinksOf(
   }
   const seen = new Set<string>();
   const frontier: Array<{ readonly id: string; readonly weight: bigint }> = [
-    { id: borrowBlockId, weight: WAD },
+    { id: startBlockId, weight: WAD },
   ];
   let suppliedWad = 0n;
   let stakedWad = 0n;
@@ -1198,12 +1203,19 @@ function borrowSinksOf(
     if (kind === null) return null;
     const edges = outgoing.get(id) ?? [];
     if (kind === "supplied") {
-      if (edges.length > 0) return null;
+      // A lend has NO token output, so its only legal outgoing edge is a collateral
+      // DEPENDENCY into a borrow — no value crosses it, and the walk stops here. An edge to
+      // anything else would be a token flow out of a lend, which does not exist.
+      if (edges.some((edge) => typeById.get(edge.target) !== "borrow")) return null;
       suppliedWad += weight;
       continue;
     }
     let routedWad = 0n;
     for (const edge of edges) {
+      // Same rule from the other end: a borrow's input is a collateral dependency, not a
+      // token flow (`plan.ts` gives every borrow `input: null`), so equity never crosses
+      // into it. The borrowed value's own walk starts AT the borrow instead.
+      if (typeById.get(edge.target) === "borrow") continue;
       const share = (BigInt(edge.allocationBps) * WAD) / BigInt(FULL_ALLOCATION_BPS);
       routedWad += share;
       frontier.push({ id: edge.target, weight: mulWad(weight, share) });
@@ -1227,7 +1239,21 @@ function compositionLegsOf(
   if (borrowBlocks.length !== 1) return null;
   const bBps = borrowBlocks[0]!.params["allocationBps"];
   if (typeof bBps !== "number") return null;
-  const sinks = borrowSinksOf(graph, borrowBlocks[0]!.id);
+  /**
+   * BOTH SIDES, one walk. The initial equity splits into the same three sinks the borrowed
+   * value does — the block vocabulary is the same, so the classification is — and the borrow
+   * is sized against the collateral that ACTUALLY ARRIVED at a lend, which is `buildPlan`'s
+   * own rule (`collateralBase` sums the supplies preceding the borrow). Reading the raw
+   * allocation as a fraction of equity prices debt the document never takes on.
+   */
+  const inputBlock = graph.blocks.find((b) => b.type === "input");
+  if (inputBlock === undefined) return null;
+  const equity = sinksFrom(graph, inputBlock.id);
+  if (equity === null) return null;
+  // Nothing reached a lend, so there is no collateral to size a borrow against and no
+  // composition to publish. Refused rather than divided into.
+  if (equity.suppliedWad === 0n) return null;
+  const sinks = sinksFrom(graph, borrowBlocks[0]!.id);
   if (sinks === null) return null;
 
   const collateralReserves = new Set(
@@ -1241,7 +1267,7 @@ function compositionLegsOf(
   const supply = rates[[...collateralReserves][0]!].supplyApy;
   const debt = rates[[...debtReserves][0]!].borrowApy;
   if (supply === null || debt === null) return null;
-  return { bBps, sinks, stake: stakingApy, supply, debt };
+  return { bBps, equity, sinks, stake: stakingApy, supply, debt };
 }
 
 /**
@@ -1282,20 +1308,22 @@ function netApyOf(legs: CompositionLegs, gross: Provenanced<bigint>): Provenance
   const bWad = (BigInt(legs.bBps) * WAD) / BigInt(FULL_ALLOCATION_BPS);
   return derivedOverWindow(
     netApyWad(
-      legs.sinks.suppliedWad,
-      legs.sinks.stakedWad,
+      legs.equity,
+      legs.sinks,
       bWad,
       legs.stake.wad.value,
       legs.supply.wad.value,
       legs.debt.wad.value,
     ),
-    "(1 + q_s·b)(1 + r_coll) + q_k·b(1 + r_stake) + q_c·b − b(1 + r_debt) − 1",
+    "p_s·r_coll + p_k·r_stake + q_s·b_eff·r_coll + q_k·b_eff·r_stake − b_eff·r_debt, b_eff = b·p_s",
     [entered(legs.bBps), gross, legs.debt.wad],
     WINDOW_REASON,
     "§5.2, current-rate run-rate over one iteration; incentives and points excluded by " +
-      `construction; of the borrowed value this document supplies ${formatWadAsPercent(legs.sinks.suppliedWad)} ` +
-      `as collateral and leaves ${formatWadAsPercent(legs.sinks.stakedWad)} staked, and the cash ` +
-      "residual is credited no yield because the document does not deploy it",
+      `construction; of the initial equity this document supplies ${formatWadAsPercent(legs.equity.suppliedWad)} ` +
+      `as collateral and leaves ${formatWadAsPercent(legs.equity.stakedWad)} staked, and of the ` +
+      `borrowed value — sized against the collateral that arrived — it supplies ${formatWadAsPercent(legs.sinks.suppliedWad)} ` +
+      `and leaves ${formatWadAsPercent(legs.sinks.stakedWad)} staked; each cash residual is ` +
+      "credited no yield because the document does not deploy it",
   );
 }
 
@@ -1315,24 +1343,34 @@ function yieldWeights(
   bBps: number,
   rStake: bigint,
   rSupply: bigint,
-  sinks: { readonly suppliedWad: bigint; readonly stakedWad: bigint },
+  equity: SinkFractions,
+  sinks: SinkFractions,
 ): { readonly stake: number; readonly supply: number; readonly borrow: number } {
-  // The collateral EXPOSURE, which is what a weight means here: `(1 + q·b)·E`, where `q` is the
-  // fraction of the borrow the document actually routes back into collateral. The three weights
-  // sum to FULL_ALLOCATION_BPS only when `q = 1`; a terminal borrow sums to `1e4 − b`, and a
-  // partial one lands between. That spread is the honest one — a carry is not a 1× position in
-  // a single asset, it is 1× collateral against a short of `b` in another reserve.
+  // EXPOSURE per unit of initial equity, which is what a weight means here. The borrow is
+  // `b_eff = b · p_s` because it sizes against ARRIVED collateral, and each leg carries the
+  // value that actually earns it: the supply leg only what reached a lend, the stake leg
+  // everything staked whether supplied or not.
+  //
+  // The three weights sum to FULL_ALLOCATION_BPS only for the fully-recycled, fully-supplied
+  // loop. A terminal borrow sums to `1e4 − b`, a partially-routed document lands between, and
+  // equity that never reached a lend lowers all three together. That spread is the honest one:
+  // a carry is not a 1× position in a single asset, and a half-supplied document is not a
+  // whole one.
+  const bEffBps = Number((BigInt(bBps) * equity.suppliedWad) / WAD);
   const collateralBps =
-    FULL_ALLOCATION_BPS + Number((BigInt(bBps) * sinks.suppliedWad) / WAD);
-  // Borrowed value left STAKED earns the staking leg and nothing else, so it lands on that
-  // leg alone rather than joining the rate-proportional split of the supplied collateral.
-  const stakedOnlyBps = Number((BigInt(bBps) * sinks.stakedWad) / WAD);
+    Number((BigInt(FULL_ALLOCATION_BPS) * equity.suppliedWad) / WAD) +
+    Number((BigInt(bEffBps) * sinks.suppliedWad) / WAD);
+  // Value left STAKED earns the staking leg and nothing else, so it lands on that leg alone
+  // rather than joining the rate-proportional split of the supplied collateral.
+  const stakedOnlyBps =
+    Number((BigInt(FULL_ALLOCATION_BPS) * equity.stakedWad) / WAD) +
+    Number((BigInt(bEffBps) * sinks.stakedWad) / WAD);
   const totalCollateralRate = rStake + rSupply;
   const stake =
     totalCollateralRate > 0n && rStake >= 0n && rSupply >= 0n
       ? Number((BigInt(collateralBps) * rStake) / totalCollateralRate)
       : Math.ceil(collateralBps / 2);
-  return { stake: stake + stakedOnlyBps, supply: collateralBps - stake, borrow: -bBps };
+  return { stake: stake + stakedOnlyBps, supply: collateralBps - stake, borrow: -bEffBps };
 }
 
 /** Canonical order: the collateral legs in the order they compound, then the debt leg. */
@@ -1341,6 +1379,7 @@ function yieldSourcesOf(legs: CompositionLegs): readonly YieldSource[] {
     legs.bBps,
     legs.stake.wad.value,
     legs.supply.wad.value,
+    legs.equity,
     legs.sinks,
   );
   return [

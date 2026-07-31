@@ -114,13 +114,22 @@ export function variableBorrowAprRay(strategy: RateStrategyBps, utilizationWad: 
   return wadToRay(aprWad);
 }
 
+/** Where value comes to rest, as fractions of the amount that entered. Cash is the residual. */
+export interface SinkFractions {
+  readonly suppliedWad: bigint;
+  readonly stakedWad: bigint;
+}
+
 /**
  * Net APY (WAD) of one iteration, normalized to initial equity (SPEC §5.2). All rates are WAD
- * APYs; `bWad` is the borrow allocation as a fraction of collateral value at open.
+ * APYs; `bWad` is the borrow allocation as a fraction of ARRIVED COLLATERAL value at open.
  *
- *   r_coll = (1 + r_stake)(1 + r_supply) − 1        (compounds on collateral)
- *   netAPY = (1 + q_s·b)(1 + r_coll) + q_k·b(1 + r_stake) + q_c·b − b(1 + r_debt) − 1
- *          = r_coll + q_s·b·r_coll + q_k·b·r_stake − b·r_debt
+ *   r_coll  = (1 + r_stake)(1 + r_supply) − 1       (compounds on supplied collateral)
+ *   b_eff   = b · p_s                                (the borrow sizes against ARRIVED collateral)
+ *   netAPY  = p_s(1 + r_coll) + p_k(1 + r_stake) + p_c
+ *           + q_s·b_eff(1 + r_coll) + q_k·b_eff(1 + r_stake) + q_c·b_eff
+ *           − b_eff(1 + r_debt) − 1
+ *           = p_s·r_coll + p_k·r_stake + q_s·b_eff·r_coll + q_k·b_eff·r_stake − b_eff·r_debt
  *
  * THE BORROWED VALUE HAS THREE POSSIBLE FATES, and they earn three different rates. `q_s` is
  * the fraction re-SUPPLIED as Aave collateral (earning the full `r_coll`), `q_k` the fraction
@@ -149,8 +158,8 @@ export function variableBorrowAprRay(strategy: RateStrategyBps, utilizationWad: 
  * Incentives/points are excluded by construction (not a parameter).
  */
 export function netApyWad(
-  suppliedWad: bigint,
-  stakedWad: bigint,
+  equity: SinkFractions,
+  borrowed: SinkFractions,
   bWad: bigint,
   rStakeApyWad: bigint,
   rSupplyApyWad: bigint,
@@ -158,13 +167,17 @@ export function netApyWad(
 ): bigint {
   const one = WAD;
   const rColl = mulWad(one + rStakeApyWad, one + rSupplyApyWad) - one;
-  const supplied = mulWad(suppliedWad, bWad);
-  const staked = mulWad(stakedWad, bWad);
-  const cash = bWad - supplied - staked;
-  const collLeg = mulWad(one + supplied, one + rColl);
-  const stakeLeg = mulWad(staked, one + rStakeApyWad);
-  const debtLeg = mulWad(bWad, one + rDebtApyWad);
-  return collLeg + stakeLeg + cash - debtLeg - one;
+  // The borrow sizes against ARRIVED collateral, not against equity: `buildPlan` multiplies
+  // the allocation by the collateral that actually reached a lend.
+  const bEff = mulWad(bWad, equity.suppliedWad);
+  const supplied = mulWad(borrowed.suppliedWad, bEff);
+  const staked = mulWad(borrowed.stakedWad, bEff);
+  const cash = bEff - supplied - staked;
+  const collLeg = mulWad(equity.suppliedWad + supplied, one + rColl);
+  const stakeLeg = mulWad(equity.stakedWad + staked, one + rStakeApyWad);
+  const cashLeg = one - equity.suppliedWad - equity.stakedWad + cash;
+  const debtLeg = mulWad(bEff, one + rDebtApyWad);
+  return collLeg + stakeLeg + cashLeg - debtLeg - one;
 }
 
 // Aave v3.7 accounting math, implemented byte-exactly from the deployed
