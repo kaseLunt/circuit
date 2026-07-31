@@ -1,6 +1,6 @@
 /**
  * W09 carry-leg fork gate: the USDC carry executed end to end on the real session
- * composition, plus the two revert receipts the product path cannot produce by design.
+ * composition, plus the hand-built revert receipts the product path cannot produce by design.
  *
  * WHAT ONLY THIS FILE CAN PROVE. The unit suite pins the arithmetic against the committed
  * reads log; what it cannot do is show that the six-decimal generalization agrees with the
@@ -17,6 +17,12 @@
  * their own `setUserEMode(1)` and assert what the DEPLOYED revision does with them, which is
  * what turns the source citation into a receipt. Same shape as the P2 accrual negative
  * control in `flagship-plan.test.ts`.
+ *
+ * THE LTV BOUNDARY IS DRILLED FROM BOTH SIDES, and that is not belt-and-braces. A refusal one
+ * bp past the ceiling passes for ANY client ceiling at or below the protocol's, because
+ * everything past the real line reverts; only executing AT the ceiling — settled, attributed,
+ * read back off the chain — says where the line is. The two drills below pin 7749 accepted and
+ * 7750 refused, each on a fork of its own so neither subsidizes the other.
  *
  * WHAT IS NOT PROVEN HERE: nothing below claims USDC will not be upgraded, or that Circle
  * will not blacklist an address. The tolerance comparison is the standing answer to both —
@@ -89,7 +95,7 @@ const config: ForkSessionConfig = {
   expectBlockHash: PINNED_HASH,
   anvilPath: process.env.ANVIL_PATH ?? "anvil",
   portBase: 9665,
-  portCount: 4,
+  portCount: 5,
   computeUnitsPerSecond: "100",
   forkRetries: "10",
   forkRetryBackoffMs: "2000",
@@ -98,6 +104,24 @@ const config: ForkSessionConfig = {
 const CARRY_STEP_COUNT = 6;
 /** The flagship prefix that lands weETH collateral INSIDE category 1: through supply1:supply. */
 const FLAGSHIP_PREFIX_STEPS = 6;
+
+/**
+ * THE BOUNDARY, PINNED ON BOTH SIDES — 7749 accepted, 7750 refused.
+ *
+ * These two numbers do not feed anything: `core/borrow-limit.ts` DERIVES the ceiling from the
+ * session's own snapshot, and the drills below assert its derivation lands here. Without the
+ * pin, a ceiling that silently moved would still be "one bp past the ceiling" and both drills
+ * would still pass — while quietly proving a boundary nobody had reviewed. With it, a shift in
+ * either direction fails at the assertion rather than re-aiming the evidence.
+ *
+ * `CEILING_BPS + 1` is also the weETH reserve's own LTV (7750 bps, read — not typed): the
+ * protocol's ceil-rounded debt chain costs exactly one bp against a borrower who asks for the
+ * whole of it, which is the fact `maxAllocationBpsOf`'s search exists to find and the reason
+ * the ceiling is not `ceilingBase × 1e4 / collateralBase`.
+ */
+const CEILING_BPS = 7749;
+const OVER_CEILING_BPS = 7750;
+
 /** Balance-mapping scan bound, the `findAllowanceSlotAt` discipline. */
 const BALANCE_SCAN_SLOTS = 32n;
 /** Pre-existing USDC seeded on the actor, in the reserve's own six-decimal units. */
@@ -163,7 +187,13 @@ async function userAccountDataAt(
   url: string,
   pool: Address,
   who: Address,
-): Promise<{ collateralBase: bigint; debtBase: bigint; ltv: bigint; healthFactor: bigint }> {
+): Promise<{
+  collateralBase: bigint;
+  debtBase: bigint;
+  availableBorrowsBase: bigint;
+  ltv: bigint;
+  healthFactor: bigint;
+}> {
   const raw = await callAt(
     url,
     pool,
@@ -174,6 +204,10 @@ async function userAccountDataAt(
   return {
     collateralBase: BigInt(`0x${words[0]!}`),
     debtBase: BigInt(`0x${words[1]!}`),
+    // The protocol's OWN headroom figure — `percentMul(collateral, ltv) - debt`, floored at
+    // zero (GenericLogic.calculateAvailableBorrows). The boundary drill reads its remaining
+    // room off the chain rather than recomputing it.
+    availableBorrowsBase: BigInt(`0x${words[2]!}`),
     ltv: BigInt(`0x${words[4]!}`),
     healthFactor: BigInt(`0x${words[5]!}`),
   };
@@ -297,7 +331,9 @@ async function seedBalance(
 
 describe("W09 fork gate — the USDC carry on the real session composition", () => {
   const registry = createSessionRegistry({
-    maxSessions: 3,
+    // One per drill, and the drills retire their own (see `closeSession`) — the capacity is
+    // headroom for a failing drill's leaked session, not a licence to hold four forks open.
+    maxSessions: 4,
     ttlMs: 30 * 60_000,
     maxTxPerSession: 32,
     minExecuteIntervalMs: 0,
@@ -334,6 +370,23 @@ describe("W09 fork gate — the USDC carry on the real session composition", () 
       key: created.session.sessionKey,
       session: await sessionOf(created.session.sessionKey),
     };
+  }
+
+  /**
+   * Retire a drill's session as soon as its evidence is complete.
+   *
+   * Every drill here wants a FORK OF ITS OWN — an earlier drill's collateral, debt or e-mode
+   * membership must never subsidize a later one's claim, and that is the whole reason each
+   * calls `createSession()` rather than sharing. Retiring on the way out keeps at most one
+   * session anvil alive beside the upstream, which is what makes a fourth drill free. The
+   * `afterAll` sweep stays: a drill that throws leaks its session, and the sweep collects it.
+   */
+  async function closeSession(key: string): Promise<void> {
+    const destroyed = await caller.destroy({ sessionKey: key });
+    if (!destroyed.ok) {
+      throw new Error(`session destroy refused: ${JSON.stringify(destroyed.refusal)}`);
+    }
+    openKeys.delete(key);
   }
 
   let upstreamTracker: ProcessExitTracker | null = null;
@@ -599,6 +652,7 @@ describe("W09 fork gate — the USDC carry on the real session composition", () 
     expect(decoded.source).toBe("custom-error");
     expect(decoded.message).toContain("not borrowable in that e-mode category");
     record(`order-B receipt: setUserEMode(1) with USDC debt reverts ${decoded.raw}`);
+    await closeSession(key);
   });
 
   /**
@@ -662,10 +716,172 @@ describe("W09 fork gate — the USDC carry on the real session composition", () 
     const after = await userAccountDataAt(url, snapshot.pool, session.actor);
     expect(after.debtBase).toBe(0n);
     record(`negative control: hand-built borrow(USDC) under eMode 1 reverts ${decoded.raw}`);
+    await closeSession(key);
   });
 
   /**
-   * THE RESERVE-REGIME LTV BOUNDARY, fork-proven one bp past the ceiling.
+   * THE RESERVE-REGIME LTV BOUNDARY, ACCEPTED SIDE — the ceiling's own value, executed and
+   * SETTLED on a fork of its own.
+   *
+   * The refusal drill below drives one bp PAST the ceiling and watches the chain reject it.
+   * On its own that proves less than it looks: a client ceiling set anywhere below the
+   * protocol's — off by one bp, off by a hundred — produces exactly the same passing refusal,
+   * because everything past the real line reverts. The half that pins the line is this one:
+   * the ceiling's own value has to MINE. So the carry runs at exactly `maxAllocationBps`
+   * through the product path, settles, and the position is read back off the chain.
+   *
+   * The margin is not decorative. At the pin the ceiling's debt lands 192,386,647 base units
+   * under the limit and one bp more lands 97 base units OVER it — 6e-11 of the position. A
+   * client that reproduced the protocol's rounding chain even slightly differently would miss
+   * by more than that, which is why both sides are drilled rather than one.
+   *
+   * A FRESH SESSION, for the reason every drill here takes one: an earlier drill's collateral
+   * or debt would move the very ceiling this one is testing.
+   */
+  it("executes and settles the carry at exactly the ceiling — the last allocation the chain admits", async () => {
+    const { key, session } = await createSession();
+    const url = session.fork.rpcUrl;
+    const snapshot = await captureSessionSnapshot(session.fork, session.actor);
+
+    const verdict = borrowLimitVerdict(carryGraph(), snapshot);
+    if (verdict.status !== "within") throw new Error(`carry is not within: ${verdict.status}`);
+    const { maxAllocationBps } = verdict.ceiling;
+    // BOTH SIDES PINNED. The ceiling is derived from the session's own snapshot; these
+    // assertions state where that derivation lands, so a silent shift cannot re-aim the
+    // drill at some other boundary while still "passing".
+    expect(maxAllocationBps).toBe(CEILING_BPS);
+    expect(maxAllocationBps + 1).toBe(OVER_CEILING_BPS);
+    // …and the refused side is the reserve's own LTV, READ off the snapshot: the protocol's
+    // ceil-rounded debt chain costs a borrower exactly one bp of the LTV it advertises.
+    expect(snapshot.reserves.weETH.ltvBps.value).toBe(OVER_CEILING_BPS);
+    expect(verdict.ceiling.ltvBps).toBe(OVER_CEILING_BPS);
+
+    // The client gate ACCEPTS the document at the ceiling — the claim the chain is about to
+    // settle — and the plan it produces is the same six-step carry, still without a set-emode.
+    const atCeiling = carryGraph("10", CEILING_BPS);
+    expect(borrowLimitVerdict(atCeiling, snapshot).status).toBe("within");
+
+    const encoded = encodeShareGraph(atCeiling);
+    if (!encoded.ok) throw new Error("at-ceiling carry refused by the share codec");
+    const planned = await caller.plan({ sessionKey: key, document: encoded.token });
+    if (!planned.ok) throw new Error(`plan refused: ${JSON.stringify(planned.refusal)}`);
+    expect(planned.plan.stepCount).toBe(CARRY_STEP_COUNT);
+    expect(planned.plan.steps.some((step) => step.id.endsWith(":set-emode"))).toBe(false);
+    const planHash = planned.plan.planHash as Hex;
+
+    const ledger = riskLedger(atCeiling, snapshot);
+    expect(ledger.ok).toBe(true);
+    const borrowCheckpoint = ledger.checkpoints.find((cp) => cp.cause === "borrow");
+    if (borrowCheckpoint === undefined) {
+      throw new Error("the at-ceiling carry produced no borrow checkpoint");
+    }
+
+    let borrowedWei = 0n;
+    for (let index = 0; index < CARRY_STEP_COUNT; index += 1) {
+      const outcome = await caller.executeStep({ sessionKey: key, planHash, stepIndex: index });
+      if (!outcome.ok) throw new Error(`executeStep refused: ${JSON.stringify(outcome.refusal)}`);
+      // SETTLED, not merely sent: the ceiling's borrow mines and attributes, or this drill
+      // has proven nothing about the accepted side.
+      if (outcome.result.status !== "attributed") {
+        throw new Error(`at-ceiling step ${index} settled as ${outcome.result.status}`);
+      }
+      const output = outcome.result.output;
+      if (output === null) continue;
+      expect(
+        withinOutputTolerance(
+          BigInt(output.predictedWei),
+          BigInt(output.attributedWei),
+          SANDBOX_OUTPUT_TOLERANCE,
+        ),
+        `${outcome.result.stepId} breached tolerance at the ceiling`,
+      ).toBe(true);
+      if (outcome.result.stepId === "borrow:borrow") {
+        // The same two invariants the 6000-bps drill holds the borrow to, at the boundary:
+        // a Transfer-event attribution, and EXACT agreement with the calldata amount.
+        expect(output.mechanism).toBe("transfer-event");
+        borrowedWei = BigInt(output.attributedWei);
+        expect(borrowedWei - BigInt(output.predictedWei)).toBe(0n);
+      }
+    }
+    expect(borrowedWei).toBeGreaterThan(0n);
+
+    const account = await userAccountDataAt(url, snapshot.pool, session.actor);
+    // The debt is REAL and the position is not liquidatable: the LTV line the borrow just
+    // cleared sits below the LT line, so the ceiling is a borrowing limit and not a
+    // liquidation. The two windows stay distinct here as well as in the refusal below.
+    expect(account.debtBase).toBeGreaterThan(0n);
+    expect(account.healthFactor).toBeGreaterThan(10n ** 18n);
+    // The chain's own weighted LTV is the pinned refused-side number.
+    expect(account.ltv).toBe(BigInt(OVER_CEILING_BPS));
+    // …and the ledger's valuation of that debt agrees with the chain's — the six-decimal
+    // claim again, now at the boundary rather than in the middle of the range.
+    const ours = hfWadValue(borrowCheckpoint.healthFactor);
+    if (ours === null) throw new Error("the at-ceiling ledger health factor is unknown");
+    expect(
+      relWithin(ours, account.healthFactor, SANDBOX_HF_REL_POW),
+      `at-ceiling ledger HF ${ours} vs chain ${account.healthFactor}`,
+    ).toBe(true);
+    expect(
+      relWithin(BigInt(borrowCheckpoint.totalDebtBase!), account.debtBase, SANDBOX_HF_REL_POW),
+      `at-ceiling ledger debtBase ${borrowCheckpoint.totalDebtBase} vs chain ${account.debtBase}`,
+    ).toBe(true);
+    // Barely any room left, in the protocol's own figure: under a tenth of a percent of the
+    // collateral it stands against.
+    expect(account.availableBorrowsBase).toBeLessThan(account.collateralBase / 1_000n);
+
+    /**
+     * LAST admissible, proven on the settled position itself: one more borrow — sized from
+     * the chain's OWN headroom reading, five times over, so the drill cannot quietly stop
+     * exceeding it — is refused with the LTV window's error. The plan-time drill below shows
+     * the same line from the product path; this shows it standing on the accepted point.
+     */
+    const usdc = snapshot.reserves.USDC.underlying;
+    // The actor holds exactly what the ceiling's borrow paid out and nothing else — which is
+    // also the statement that this fork is fresh.
+    const usdcBefore = await balanceOfAt(url, usdc, session.actor);
+    expect(usdcBefore).toBe(borrowedWei);
+
+    const usdcUnit = 10n ** BigInt(snapshot.reserves.USDC.decimals.value);
+    const overshootWei =
+      (account.availableBorrowsBase * 5n * usdcUnit) /
+        BigInt(snapshot.reserves.USDC.priceBase.value) +
+      1n;
+    const extra = await sendRaw(
+      url,
+      session.actor,
+      snapshot.pool,
+      encodeFunctionData({
+        abi: ABI.pool,
+        functionName: "borrow",
+        args: [usdc, overshootWei, 2n, 0, session.actor],
+      }),
+    );
+    expect(extra.status).toBe(0n);
+    const refused = decodeRevert(await revertBytesOf(url, extra));
+    expect(refused.source).toBe("custom-error");
+    expect(refused.message).toBe("Collateral cannot cover the requested borrow");
+    // The LTV line, not the LT line — the same non-conflation the plan-time drill asserts.
+    expect(refused.message).not.toContain("liquidation threshold");
+    // NOTHING LANDED. The token balance is the exact witness — unlike the pool's base-currency
+    // debt figure, an ERC-20 balance does not accrue between blocks, so this stays an equality
+    // rather than a tolerance. The debt reading beside it is bounded rather than pinned for the
+    // same reason: it must not have taken on even the HEADROOM, let alone five times it.
+    expect(await balanceOfAt(url, usdc, session.actor)).toBe(usdcBefore);
+    const after = await userAccountDataAt(url, snapshot.pool, session.actor);
+    expect(after.debtBase).toBeLessThan(account.debtBase + account.availableBorrowsBase);
+
+    record(
+      `ceiling receipt: allocation ${CEILING_BPS} SETTLED — borrowed ${borrowedWei} USDC, ` +
+        `chain debtBase ${account.debtBase}, HF ${account.healthFactor}, headroom ` +
+        `${account.availableBorrowsBase} of collateral ${account.collateralBase}; ` +
+        `+${overshootWei} more reverts ${refused.raw}`,
+    );
+    await closeSession(key);
+  });
+
+  /**
+   * THE RESERVE-REGIME LTV BOUNDARY, REFUSED SIDE — one bp past the ceiling the drill above
+   * settled at.
    *
    * `core/borrow-limit.ts` computes the largest admissible allocation from the pinned
    * snapshot; this drives the plan one bp ABOVE it and asserts the chain refuses with
@@ -682,7 +898,11 @@ describe("W09 fork gate — the USDC carry on the real session composition", () 
     if (verdict.status !== "within") throw new Error(`carry is not within: ${verdict.status}`);
     const { maxAllocationBps } = verdict.ceiling;
     expect(maxAllocationBps).toBeGreaterThan(FORK_PROVEN_CARRY_BPS);
+    // The same two pinned numbers the accepted-side drill settles at: this is the bp AFTER
+    // the one that mined, on a fork where nothing else has happened.
+    expect(maxAllocationBps).toBe(CEILING_BPS);
     const over = maxAllocationBps + 1;
+    expect(over).toBe(OVER_CEILING_BPS);
     // The client gate agrees the over-ceiling document is over the ceiling…
     expect(borrowLimitVerdict(carryGraph("10", over), snapshot).status).toBe("over-limit");
 
@@ -738,5 +958,6 @@ describe("W09 fork gate — the USDC carry on the real session composition", () 
     record(
       `boundary receipt: allocation ${over} (ceiling ${maxAllocationBps}) reverts ${replayed.raw}`,
     );
+    await closeSession(key);
   });
 });
