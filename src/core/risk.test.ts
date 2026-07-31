@@ -1249,6 +1249,38 @@ describe("the USDC carry (W09) — an uncorrelated leg through the same engine",
   });
 
   /**
+   * Codex W09 round-2 finding 2 — the SAME omission, one derivation over.
+   *
+   * `healthFactorInputsOf` cited each leg's amount and price side by side and dropped the base
+   * valuation that carries the reserve's `decimals` read. The health factor divides one leg by
+   * 1e18 and the other by 1e6; the rendered figure depended on both divisors and named
+   * neither. The citation is now the leg's base value, which already carries amount, price and
+   * decimals — one node, not a second list beside the first.
+   *
+   * Asserted on the minimum AND the final health factor, and on the correlated loop as well as
+   * the carry: the fix is a generalization of the citation, not a carry-shaped patch.
+   */
+  it("cites both decimals reads in the health factor's trail, on every leg of every shape", () => {
+    const shapes = [
+      { name: "carry", result: simulate(carryGraph(), snapshot), units: ["weETH", "USDC"] },
+      { name: "loop", result: simulate(flagshipGraph(), snapshot), units: ["weETH", "WETH"] },
+    ] as const;
+    for (const { name, result, units } of shapes) {
+      for (const role of ["minHealthFactor", "finalHealthFactor"] as const) {
+        const trail = provenanceTrailText(result[role]).join("\n");
+        for (const unit of units) {
+          expect(trail, `${name} ${role}`).toContain(`${unit}.getReserveConfigurationData.decimals`);
+        }
+        // The oracle price and the amount are still reachable underneath the base value, and
+        // the LT observation that weighted the collateral is still cited beside it — the base
+        // value was ADDED to the citation, nothing was traded away for it.
+        expect(trail, `${name} ${role}`).toContain("getAssetPrice");
+        expect(trail, `${name} ${role}`).toContain("liquidationThreshold");
+      }
+    }
+  });
+
+  /**
    * The ratio and the pair it describes are ONE derivation, so a renderer cannot put a
    * weETH/WETH figure next to a weETH/USDC label. Held across every document shape this repo
    * can build, including the ones where both go null together.

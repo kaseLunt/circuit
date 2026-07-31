@@ -630,10 +630,35 @@ export function riskLedger(graph: StrategyGraph, snapshot: ChainSnapshot): RiskL
 
 // ————————————————————————— provenance minting —————————————————————————
 
+/**
+ * A leg's citation for the health factor: its BASE VALUE, not its amount and price flattened
+ * beside each other.
+ *
+ * `computeHealthFactor` consumes `leg.baseProv.value` on both sides — that is literally what
+ * `collateralEntriesOf` and `totalDebtBaseOf` hand it — and `baseValueProv` already carries
+ * the amount, the oracle price AND the reserve's `decimals` observation, because the divisor
+ * is derived from that read. The old flattened pair cited amount and price directly and so
+ * dropped the asset unit from the trail: invisible while every reserve was 18-decimal, and a
+ * missing citation the moment a six-decimal leg arrived — the rendered carry health factor
+ * divides one leg by 1e18 and the other by 1e6 and said so nowhere.
+ *
+ * A leg whose base value did not resolve has no `baseProv` to cite, and its checkpoint's
+ * health factor is `unknown` for exactly that reason; the amount and price it does have are
+ * cited so the unavailable state still traces to something rather than to an empty list.
+ */
+function legBaseInputsOf(leg: SupplyLeg | DebtLeg): readonly AnyProvenanced[] {
+  return leg.baseProv === null ? [leg.amountProv, leg.priceBase] : [leg.baseProv];
+}
+
+/**
+ * The health factor's own inputs: one derivation per leg, plus the LT observations that
+ * decided each collateral's weight. Nothing here builds a parallel citation list — the base
+ * value IS the citation, and everything under it hangs off that one node.
+ */
 function healthFactorInputsOf(cp: RiskCheckpoint): readonly AnyProvenanced[] {
   const inputs: AnyProvenanced[] = [];
-  for (const leg of cp.supplies) inputs.push(leg.amountProv, leg.priceBase, ...leg.ltInputs);
-  for (const leg of cp.debts) inputs.push(leg.amountProv, leg.priceBase);
+  for (const leg of cp.supplies) inputs.push(...legBaseInputsOf(leg), ...leg.ltInputs);
+  for (const leg of cp.debts) inputs.push(...legBaseInputsOf(leg));
   return inputs;
 }
 
