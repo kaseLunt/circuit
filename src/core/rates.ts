@@ -115,16 +115,31 @@ export function variableBorrowAprRay(strategy: RateStrategyBps, utilizationWad: 
 }
 
 /**
- * Net APY (WAD) of one leveraged-restake iteration, normalized to initial equity
- * (SPEC §5.2). All rates are WAD APYs; `bWad` is the borrow allocation as a
- * fraction of collateral value at open.
+ * Net APY (WAD) of one iteration, normalized to initial equity (SPEC §5.2). All rates are WAD
+ * APYs; `bWad` is the borrow allocation as a fraction of collateral value at open, and
+ * `recycledWad` is the fraction `q` of the BORROWED value that comes back as collateral.
  *
  *   r_coll = (1 + r_stake)(1 + r_supply) − 1        (compounds on collateral)
- *   netAPY = (1 + b)(1 + r_coll) − b(1 + r_debt) − 1
+ *   netAPY = (1 + q·b)(1 + r_coll) + (1 − q)·b − b(1 + r_debt) − 1
+ *          = (1 + q·b)·r_coll − b·r_debt
+ *
+ * WHY `q` IS A PARAMETER AND NOT AN ASSUMPTION. The collateral term is a statement about how
+ * much capital is actually SUPPLIED. The flagship loop unwraps its borrowed WETH, restakes and
+ * re-supplies all of it, so `(1 + b)·E` genuinely earns — that is `q = 1`. The carry borrows
+ * USDC and the document ends, so only `E` earns — `q = 0`. Edge allocations are user-editable,
+ * so a document can route ANY fraction back: at `q = 0.5` only half the borrowed value is
+ * supplied, and crediting the collateral rate on all of it invents yield on capital that was
+ * never deployed. Both older forms are exact special cases of this one — the second and third
+ * terms cancel at `q = 1` (nothing retained) and at `q = 0` (`b` retained, `b` charged), so the
+ * pinned loop and carry numbers are byte-unchanged.
+ *
+ * The retained fraction `(1 − q)·b` is credited NO yield: the document does not deploy it, and
+ * this function does not guess what a holder might do with it.
  *
  * Incentives/points are excluded by construction (not a parameter).
  */
 export function netApyWad(
+  recycledWad: bigint,
   bWad: bigint,
   rStakeApyWad: bigint,
   rSupplyApyWad: bigint,
@@ -132,39 +147,11 @@ export function netApyWad(
 ): bigint {
   const one = WAD;
   const rColl = mulWad(one + rStakeApyWad, one + rSupplyApyWad) - one;
-  const collLeg = mulWad(one + bWad, one + rColl);
+  const recycled = mulWad(recycledWad, bWad);
+  const collLeg = mulWad(one + recycled, one + rColl);
+  const retained = bWad - recycled;
   const debtLeg = mulWad(bWad, one + rDebtApyWad);
-  return collLeg - debtLeg - one;
-}
-
-/**
- * Net APY (WAD) of a TERMINAL borrow — a document that borrows and then stops.
- *
- *   netAPY = r_coll − b·r_debt
- *
- * WHY THIS IS A DIFFERENT FORMULA AND NOT A TUNING OF THE ONE ABOVE. `netApyWad`'s `(1 + b)`
- * collateral term is the statement that the borrowed value came BACK as collateral — the loop
- * borrows WETH, unwraps, restakes and re-supplies, so the position really does earn the
- * collateral rate on `(1 + b)·E`. The carry does not: it borrows USDC and the document ends,
- * so only `E` is ever supplied and only `E` earns. Applying the leveraged form there credits
- * yield to capital that was never deployed — the difference is exactly `b·r_coll`, which at the
- * carry's default is worth more than a percentage point of overstated return.
- *
- * WHAT IT ASSUMES ABOUT THE BORROWED ASSET: nothing, and that is the point. The document does
- * not deploy the USDC, so this credits it no yield. That is a reading of the document rather
- * than a guess about the holder — and because a reader could still mistake it for a claim, the
- * caller states the retained-cash reading in the figure's own provenance note (SPEC §5: an
- * assumption that reaches the screen is named, never silent).
- */
-export function terminalBorrowNetApyWad(
-  bWad: bigint,
-  rStakeApyWad: bigint,
-  rSupplyApyWad: bigint,
-  rDebtApyWad: bigint,
-): bigint {
-  const one = WAD;
-  const rColl = mulWad(one + rStakeApyWad, one + rSupplyApyWad) - one;
-  return rColl - mulWad(bWad, rDebtApyWad);
+  return collLeg + retained - debtLeg - one;
 }
 
 // Aave v3.7 accounting math, implemented byte-exactly from the deployed

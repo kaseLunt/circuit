@@ -511,8 +511,10 @@ const MINT_QUALIFICATIONS = {
   // reason must NOT displace
   stakingApr: "trailing staking APR",
   grossComposition: "§5.2 r_coll, staking and supply compounding on one collateral",
+  // The recycled fraction rides the note, so the qualification names the shape the document
+  // actually has (the flagship recycles all of its borrow — 100.00%).
   netComposition:
-    "§5.2, current-rate run-rate over one iteration; incentives and points excluded by construction",
+    "§5.2, current-rate run-rate over one iteration; incentives and points excluded by construction; 100.00% of the borrowed value is routed back into collateral by this document, and the retained remainder is credited no yield because the document does not deploy it",
   windowLicence:
     "cross-block window: an instantaneous exchange rate is not an APR (SPEC §5.1); the window's endpoints are two reads at two blocks",
 } as const;
@@ -666,7 +668,8 @@ describe("the §5.2 yield composition (design §2.7, §2.8)", () => {
     const gross = mulWad(WAD + stake, WAD + supply) - WAD;
     expect(requireValue(result.grossApyWad, "gross")).toBe(gross);
     expect(requireValue(result.netApyWad, "net")).toBe(
-      netApyWad((7_000n * WAD) / 10_000n, stake, supply, debt),
+      // q = WAD: the flagship recycles its whole borrow into collateral.
+      netApyWad(WAD, (7_000n * WAD) / 10_000n, stake, supply, debt),
     );
   });
 
@@ -1367,8 +1370,9 @@ describe("the USDC carry (W09) — an uncorrelated leg through the same engine",
 
     // The retained-cash reading is STATED, not silent (SPEC §5).
     const netTrail = provenanceTrailText(result.netApyWad!).join("\n");
-    expect(netTrail).toContain("r_coll − b·r_debt");
-    expect(netTrail).toContain("not redeployed by this document");
+    expect(netTrail).toContain("(1 + q·b)(1 + r_coll) + (1 − q)·b − b(1 + r_debt) − 1");
+    expect(netTrail).toContain("0.00% of the borrowed value is routed back into collateral");
+    expect(netTrail).toContain("credited no yield");
   });
 
   /**
@@ -1396,7 +1400,127 @@ describe("the USDC carry (W09) — an uncorrelated leg through the same engine",
     // shape of 1× collateral against a short in another reserve.
     expect(result.yieldSources.reduce((a, s) => a + s.weightBps, 0)).toBe(10_000);
     const netTrail = provenanceTrailText(result.netApyWad!).join("\n");
-    expect(netTrail).toContain("(1 + b)(1 + r_coll) − b(1 + r_debt) − 1");
+    expect(netTrail).toContain("(1 + q·b)(1 + r_coll) + (1 − q)·b − b(1 + r_debt) − 1");
+    expect(netTrail).toContain("100.00% of the borrowed value is routed back into collateral");
+  });
+
+  /**
+   * Codex W09 round-4 finding 1 — the recycled fraction is a NUMBER, not a flag.
+   *
+   * Edge allocations are user-editable (`setEdgeAllocationBps`, and any shared document can
+   * carry them) and `buildPlan` applies them to the real amounts, so a document can route any
+   * fraction of its borrow back into collateral. Reading that as yes/no gave a 1%-recycled path
+   * the full leverage term. The general form is
+   *
+   *   net = (1 + q·b)(1 + r_coll) + (1 − q)·b − b(1 + r_debt) − 1
+   *       = (1 + q·b)·r_coll − b·r_debt
+   *
+   * and the two shipped shapes are its q=1 and q=0 endpoints. Every expectation below is
+   * computed LONGHAND from the leg rates so the test does not re-run the function under test.
+   */
+  describe("the recycled fraction q, read off the document's own edge allocations", () => {
+    /** The flagship, with the borrow→unwrap edge throttled to `bps` of the borrowed value. */
+    function partiallyRecycled(bps: number): ReturnType<typeof flagshipGraph> {
+      const base = flagshipGraph();
+      return {
+        blocks: base.blocks,
+        edges: base.edges.map((e) =>
+          e.source === "borrow" ? { ...e, allocationBps: bps } : e,
+        ),
+      };
+    }
+
+    const longhand = (r: ReturnType<typeof simulate>, qWad: bigint, bBps: number): bigint => {
+      const rStake = requireValue(r.yieldSources[0]!.rate.wad, "r_stake");
+      const rSupply = requireValue(r.yieldSources[1]!.rate.wad, "r_supply");
+      const rDebt = requireValue(r.yieldSources[2]!.rate.wad, "r_debt");
+      const rColl = ((WAD + rStake) * (WAD + rSupply)) / WAD - WAD;
+      const b = (BigInt(bBps) * WAD) / 10_000n;
+      const qb = (qWad * b) / WAD;
+      // (1 + q·b)(1 + r_coll) + (1 − q)·b − b(1 + r_debt) − 1
+      return (
+        ((WAD + qb) * (WAD + rColl)) / WAD + (b - qb) - (b * (WAD + rDebt)) / WAD - WAD
+      );
+    };
+
+    it("prices a half-recycled document between its two endpoints, longhand", () => {
+      const graph = partiallyRecycled(5_000);
+      const result = simulate(graph, snapshot);
+      const net = requireValue(result.netApyWad, "net");
+      expect(net).toBe(longhand(result, WAD / 2n, FORK_PROVEN_BORROW_BPS));
+
+      // Strictly between the two endpoints — the whole point of the finding.
+      const full = longhand(result, WAD, FORK_PROVEN_BORROW_BPS);
+      const none = longhand(result, 0n, FORK_PROVEN_BORROW_BPS);
+      expect(net).toBeLessThan(full);
+      expect(net).toBeGreaterThan(none);
+      // …and the old boolean reading would have published the q=1 number for this document.
+      expect(full - net).toBeGreaterThan(0n);
+
+      // The exposure weight follows q too: collateral is (1 + q·b)·E.
+      const weights = result.yieldSources.map((s) => s.weightBps);
+      expect(weights[0]! + weights[1]!).toBe(10_000 + FORK_PROVEN_BORROW_BPS / 2);
+      expect(weights[2]).toBe(-FORK_PROVEN_BORROW_BPS);
+      expect(provenanceTrailText(result.netApyWad!).join("\n")).toContain(
+        "50.00% of the borrowed value is routed back into collateral",
+      );
+    });
+
+    /** q walks with the allocation, and the two endpoints stay byte-identical to the pins. */
+    it("tracks the allocation across the range, with q=1 and q=0 byte-unchanged", () => {
+      for (const bps of [100, 2_500, 5_000, 7_500, 10_000]) {
+        const result = simulate(partiallyRecycled(bps), snapshot);
+        const qWad = (BigInt(bps) * WAD) / 10_000n;
+        expect(requireValue(result.netApyWad, `q=${bps}`), `q=${bps}`).toBe(
+          longhand(result, qWad, FORK_PROVEN_BORROW_BPS),
+        );
+      }
+      // q = 1 is the untouched flagship, byte-identical to its landed pin.
+      const loop = simulate(flagshipGraph(), snapshot);
+      expect(requireValue(loop.netApyWad, "loop")).toBe(
+        longhand(loop, WAD, FORK_PROVEN_BORROW_BPS),
+      );
+      // q = 0 is the carry, byte-identical to its landed pin.
+      const carry = simulate(carryGraph(), snapshot);
+      expect(requireValue(carry.netApyWad, "carry")).toBe(
+        longhand(carry, 0n, FORK_PROVEN_CARRY_BPS),
+      );
+    });
+
+    /**
+     * A RETAINED TERMINAL BRANCH beside a recycled one: the borrow splits, half re-supplied and
+     * half left as cash on a terminal unwrap. q is the recycled half only.
+     */
+    it("counts only the branch that reaches a lend when the borrow forks", () => {
+      const base = flagshipGraph();
+      const graph = {
+        blocks: [...base.blocks, { id: "spare", type: "unwrap" as const, params: { from: "WETH", to: "ETH" } }],
+        edges: [
+          ...base.edges.map((e) => (e.source === "borrow" ? { ...e, allocationBps: 6_000 } : e)),
+          { id: "eSpare", source: "borrow", target: "spare", allocationBps: 4_000 },
+        ],
+      };
+      const result = simulate(graph, snapshot);
+      expect(requireValue(result.netApyWad, "net")).toBe(
+        longhand(result, (6_000n * WAD) / 10_000n, FORK_PROVEN_BORROW_BPS),
+      );
+    });
+
+    /**
+     * ILL-DEFINED SHAPES REFUSE. A lend the borrow feeds that itself flows onward leaves "is
+     * this still collateral?" unanswerable by an allocation walk, so the whole composition goes
+     * to its unavailable state rather than publishing a guess.
+     */
+    it("refuses the composition when a recycled lend flows onward", () => {
+      const base = flagshipGraph();
+      const graph = {
+        blocks: [...base.blocks, { id: "after", type: "unwrap" as const, params: { from: "WETH", to: "ETH" } }],
+        edges: [...base.edges, { id: "eAfter", source: "supply2", target: "after", allocationBps: 10_000 }],
+      };
+      const result = simulate(graph, snapshot);
+      expect(result.netApyWad).toBeNull();
+      expect(result.yieldSources).toEqual([]);
+    });
   });
 
   /**
