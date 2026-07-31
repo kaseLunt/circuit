@@ -12,8 +12,19 @@ import {
   type CollateralEntry,
   type HealthFactor,
 } from "./health-factor";
-import { effectiveLiquidationThresholdBps, buildPlan, type ChainSnapshot } from "./plan";
-import { WAD, formatHealthFactor, formatWadAsMultiple, formatWadRatio } from "./format";
+import {
+  effectiveLiquidationThresholdBps,
+  buildPlan,
+  type ChainSnapshot,
+  type PlanSuccess,
+} from "./plan";
+import {
+  WAD,
+  formatHealthFactor,
+  formatWadAsMultiple,
+  formatWadAsPercent,
+  formatWadRatio,
+} from "./format";
 import {
   accruedVariableBorrowIndexRay,
   currentRatesRay,
@@ -41,7 +52,7 @@ import {
   mixedLoopAndCarryGraph,
 } from "../../tests/helpers/graphs";
 import { fixtureSnapshot, type RawFixture } from "../../tests/helpers/chain-snapshot";
-import type { Block } from "./graph";
+import type { Asset, Block, StrategyGraph } from "./graph";
 
 // ————————————————————————— helpers —————————————————————————
 
@@ -97,6 +108,111 @@ function fixtureLegs(allocationBps: number, snap: ChainSnapshot = snapshot) {
 function bigintJson(_key: string, value: unknown): unknown {
   return typeof value === "bigint" ? value.toString() : value;
 }
+
+// ————————————————————————— realized exposures (Codex W09 round-7) —————————————————————————
+
+/**
+ * THE COMPOSITION'S MAGNITUDES ARE MEASURED, NOT ALLOCATED.
+ *
+ * `p_*`, `q_*` and `b_eff` are realized base values over realized base values. These helpers
+ * measure them in the TEST, from `buildPlan`'s own flows and the fixture's oracle prices, so
+ * every composition expectation below is an independent reproduction rather than a re-run of
+ * `risk.ts`. What each test states is the CLASSIFICATION — which named block holds what —
+ * because that is the part a reader must be able to check by eye.
+ */
+function holdingBase(wei: bigint, asset: Asset, snap: ChainSnapshot): bigint {
+  const key = asset === "weETH" || asset === "USDC" ? asset : "WETH";
+  const reserve = snap.reserves[key];
+  return collateralBaseValue(wei, reserve.priceBase.value, assetUnitOf(reserve.decimals.value));
+}
+
+/** What the plan leaves resting AT a block: its output, less everything it routed onward. */
+function restingBase(
+  plan: PlanSuccess,
+  graph: StrategyGraph,
+  blockId: string,
+  snap: ChainSnapshot,
+): bigint {
+  const flowOf = (id: string) => plan.flows.find((f) => f.blockId === id);
+  const flow = flowOf(blockId);
+  if (flow === undefined) throw new Error(`no flow for block ${blockId}`);
+  // A lend has no token output; what rests there is exactly what it consumed.
+  if (flow.type === "lend") return holdingBase(flow.inputWei!.value, flow.inputAsset!, snap);
+  const routed = graph.edges
+    .filter((e) => e.source === blockId)
+    .map((e) => flowOf(e.target))
+    .reduce((a, child) => {
+      if (child === undefined) throw new Error(`no flow downstream of ${blockId}`);
+      // A borrow's producer edge is a collateral DEPENDENCY, not a token flow: `plan.ts` gives
+      // it `inputWei: null`, and no value crosses it.
+      return child.inputWei === null ? a : a + child.inputWei.value;
+    }, 0n);
+  return holdingBase(flow.outputWei!.value - routed, flow.outputAsset!, snap);
+}
+
+/** Which named blocks hold the equity's sinks and the borrow's sinks. Cash is the residual. */
+interface SinkBlocks {
+  readonly equitySupplied: readonly string[];
+  readonly equityStaked?: readonly string[];
+  readonly borrowSupplied?: readonly string[];
+  readonly borrowStaked?: readonly string[];
+}
+
+/** The realized exposures, each per unit of the input block's own base value. */
+function exposuresOf(graph: StrategyGraph, sinks: SinkBlocks, snap: ChainSnapshot = snapshot) {
+  const plan = buildPlan(graph, snap);
+  if (!plan.ok) throw new Error(`fixture plan failed: ${JSON.stringify(plan.errors, bigintJson)}`);
+  const input = plan.flows.find((f) => f.type === "input")!;
+  const borrow = plan.flows.find((f) => f.type === "borrow")!;
+  const equityBase = holdingBase(input.outputWei!.value, input.outputAsset!, snap);
+  const borrowBase = holdingBase(borrow.outputWei!.value, borrow.outputAsset!, snap);
+  const sum = (ids: readonly string[] | undefined): bigint =>
+    (ids ?? []).reduce((a, id) => a + restingBase(plan, graph, id, snap), 0n);
+  return {
+    equityBase,
+    borrowBase,
+    pS: (sum(sinks.equitySupplied) * WAD) / equityBase,
+    pK: (sum(sinks.equityStaked) * WAD) / equityBase,
+    qS: (sum(sinks.borrowSupplied) * WAD) / borrowBase,
+    qK: (sum(sinks.borrowStaked) * WAD) / borrowBase,
+    bEff: (borrowBase * WAD) / equityBase,
+  };
+}
+
+/**
+ * The published form, written out term by term: RATES ON EXPOSURES.
+ *
+ * An instantaneous mark-to-market gap is not a yield, so whatever the fractions fall short of
+ * 1 by is charged to no rate and simply absent from the sum. The value-after decomposition
+ * this replaces could not stay silent about it — it needs a `1 − p_s − p_k` term, and with
+ * realized fractions that term either credits the shortfall at par (claiming evaporated value
+ * is spendable cash) or drops it (subtracting a one-time mark from a run-rate). Both are
+ * statements the additive form never has to make.
+ */
+function netLonghand(
+  r: ReturnType<typeof simulate>,
+  graph: StrategyGraph,
+  sinks: SinkBlocks,
+  snap: ChainSnapshot = snapshot,
+): bigint {
+  const rStake = requireValue(r.yieldSources[0]!.rate.wad, "r_stake");
+  const rSupply = requireValue(r.yieldSources[1]!.rate.wad, "r_supply");
+  const rDebt = requireValue(r.yieldSources[2]!.rate.wad, "r_debt");
+  const rColl = ((WAD + rStake) * (WAD + rSupply)) / WAD - WAD;
+  const e = exposuresOf(graph, sinks, snap);
+  return (
+    (e.pS * rColl) / WAD +
+    (e.pK * rStake) / WAD +
+    (((e.qS * e.bEff) / WAD) * rColl) / WAD +
+    (((e.qK * e.bEff) / WAD) * rStake) / WAD -
+    (e.bEff * rDebt) / WAD
+  );
+}
+
+/** The flagship's own classification: equity into `supply1`, the whole borrow into `supply2`. */
+const LOOP_SINKS: SinkBlocks = { equitySupplied: ["supply1"], borrowSupplied: ["supply2"] };
+/** The carry's: equity into `supply1`, the borrowed USDC held as cash. */
+const CARRY_SINKS: SinkBlocks = { equitySupplied: ["supply1"] };
 
 const INPUT: Block = { id: "in", type: "input", params: { asset: "ETH", amount: "10" } };
 const STAKE: Block = { id: "stake1", type: "stake", params: { protocol: "etherfi" } };
@@ -648,8 +764,25 @@ describe("the §5.2 yield composition (design §2.7, §2.8)", () => {
 
     expect(requireValue(at5000.grossApyWad, "gross")).toBe(23_615_196_239_517_746n);
     expect(requireValue(at7000.grossApyWad, "gross")).toBe(23_615_196_239_051_092n);
-    expect(requireValue(at5000.netApyWad, "net")).toBe(24_651_067_240_960_524n);
-    expect(requireValue(at7000.netApyWad, "net")).toBe(25_065_397_570_968_204n);
+    /**
+     * MOVED BY DUST at Codex W09 round-7, and the cause is stated rather than absorbed.
+     *
+     * Both nets fell by exactly 14_429 wei — 1.4e-12 of a percentage point, four orders of
+     * magnitude below the 2.5065% / 2.4651% these still display. The magnitudes stopped being
+     * the edge allocations and became measurements:
+     *
+     *   p_s   1.0                  → 0.999999999999480213   (was 24_651_067_240_960_524n /
+     *   b_eff 0.7                  → 0.699999999998960427    25_065_397_570_968_204n)
+     *
+     * The realized supplied weETH is worth 1_923_866_861_999 base units against the input
+     * ETH's 1_923_866_862_000 — ONE base unit, 1e-8 USD out of $19_238.67 — because staking
+     * mints shares and wrapping converts them, both flooring, and the capped weETH feed
+     * already sits 4.5e-13 below `weETH.getRate × the ETH/USD feed` at this very block.
+     * `b_eff` then loses a second unit to the borrow's own wei round trip. A wei of dust with
+     * a stated cause beats a synthetic term that hides it.
+     */
+    expect(requireValue(at5000.netApyWad, "net")).toBe(24_651_067_240_946_095n);
+    expect(requireValue(at7000.netApyWad, "net")).toBe(25_065_397_570_953_775n);
 
     // More leverage on a collateral yielding more than the debt costs raises the net APY.
     expect(requireValue(at7000.netApyWad, "net")).toBeGreaterThan(
@@ -667,10 +800,55 @@ describe("the §5.2 yield composition (design §2.7, §2.8)", () => {
 
     const gross = mulWad(WAD + stake, WAD + supply) - WAD;
     expect(requireValue(result.grossApyWad, "gross")).toBe(gross);
+    // The magnitudes are measured off the plan, so the primitive is fed the same realized
+    // exposures the test derived — not the 1.0 and 0.7 the document asked for.
+    const e = exposuresOf(flagshipGraph("10", 7000), LOOP_SINKS);
     expect(requireValue(result.netApyWad, "net")).toBe(
-      // q = WAD: the flagship recycles its whole borrow into collateral.
-      netApyWad({ suppliedWad: WAD, stakedWad: 0n }, { suppliedWad: WAD, stakedWad: 0n }, (7_000n * WAD) / 10_000n, stake, supply, debt),
+      netApyWad(
+        { suppliedWad: e.pS, stakedWad: e.pK },
+        { suppliedWad: e.qS, stakedWad: e.qK },
+        e.bEff,
+        stake,
+        supply,
+        debt,
+      ),
     );
+  });
+
+  /**
+   * THE FORM ITSELF, as a property of the primitive: rates applied to exposures, with the
+   * shortfall charged to nothing.
+   *
+   * When the realized fractions fall short of 1 — which is the whole round-7 finding — the
+   * value-after decomposition has to say something about the gap, and both things it can say
+   * are false. Crediting it at par claims value the oracle no longer marks is spendable cash;
+   * dropping it subtracts a one-time mark from a run-rate, a full percentage point of it for a
+   * 1% divergence. This pins that `netApyWad` does neither.
+   */
+  it("charges a valuation shortfall to no rate — a mark is not a yield", () => {
+    const rStake = 20_000_000_000_000_000n;
+    const rSupply = 10_000_000_000_000_000n;
+    const rDebt = 30_000_000_000_000_000n;
+    const rColl = mulWad(WAD + rStake, WAD + rSupply) - WAD;
+    // One percent of the equity does not reach any sink: p_s + p_k = 0.99.
+    const pS = (99n * WAD) / 100n;
+    const bEff = (693n * WAD) / 1_000n;
+    const net = netApyWad(
+      { suppliedWad: pS, stakedWad: 0n },
+      { suppliedWad: WAD, stakedWad: 0n },
+      bEff,
+      rStake,
+      rSupply,
+      rDebt,
+    );
+    expect(net).toBe(mulWad(pS, rColl) + mulWad(bEff, rColl) - mulWad(bEff, rDebt));
+
+    // The rejected reading, longhand: the same position valued a year out with the shortfall
+    // left out of it. It is a FULL PERCENTAGE POINT lower, and none of that point is a rate.
+    const droppedShortfall =
+      mulWad(pS + bEff, WAD + rColl) - mulWad(bEff, WAD + rDebt) - WAD;
+    expect(net - droppedShortfall).toBe(WAD - pS);
+    expect(net - droppedShortfall).toBe(WAD / 100n);
   });
 
   it("carries the three legs in canonical order, each with the rate its block shows", () => {
@@ -1347,12 +1525,12 @@ describe("the USDC carry (W09) — an uncorrelated leg through the same engine",
     const rStake = requireValue(stake!.rate.wad, "r_stake");
     const rSupply = requireValue(supply!.rate.wad, "r_supply");
     const rDebt = requireValue(borrow!.rate.wad, "r_debt");
-    const b = (BigInt(FORK_PROVEN_CARRY_BPS) * WAD) / 10_000n;
+    const e = exposuresOf(carryGraph(), CARRY_SINKS);
 
     //   r_coll  = (1 + r_stake)(1 + r_supply) − 1
-    //   net     = r_coll − b·r_debt          ← the borrowed USDC is not redeployed
+    //   net     = p_s·r_coll − b_eff·r_debt   ← the borrowed USDC is not redeployed
     const rColl = ((WAD + rStake) * (WAD + rSupply)) / WAD - WAD;
-    const expected = rColl - (b * rDebt) / WAD;
+    const expected = (e.pS * rColl) / WAD - (e.bEff * rDebt) / WAD;
     expect(requireValue(result.netApyWad, "net")).toBe(expected);
     expect(requireValue(result.grossApyWad, "gross")).toBe(rColl);
 
@@ -1360,17 +1538,29 @@ describe("the USDC carry (W09) — an uncorrelated leg through the same engine",
     expect(expected).toBeLessThan(0n);
 
     // The leveraged form, computed longhand, is what the code used to publish — and the gap
-    // between them is exactly b·r_coll, the yield on capital the carry never supplied.
-    const leveraged = ((WAD + b) * (WAD + rColl)) / WAD - (b * (WAD + rDebt)) / WAD - WAD;
+    // between them is exactly b_eff·r_coll, the yield on capital the carry never supplied.
+    const leveraged =
+      ((WAD + e.bEff) * (WAD + rColl)) / WAD - (e.bEff * (WAD + rDebt)) / WAD - WAD;
     expect(leveraged).toBeGreaterThan(0n);
-    expect(leveraged - expected).toBe((b * rColl) / WAD);
+    expect(leveraged - expected).toBeGreaterThan(WAD / 100n);
 
     // Exposure weights follow the same fact: collateral is 1×E, not (1 + b)×E.
     expect(result.yieldSources.map((s) => s.weightBps)).toEqual([9_999, 1, -FORK_PROVEN_CARRY_BPS]);
 
+    /**
+     * SIX DECIMALS COST REAL DEBT, and the carry is where that first shows. `buildPlan` sizes
+     * the borrow at 1_154_320_117_199 base units and then floors it to USDC's own 1e-6
+     * granularity — 11_544.422571 USDC, worth 1_154_320_117_109. The 90 base units that do not
+     * fit are debt the position never takes on, so `b_eff` is 0.5999999999527 rather than the
+     * 0.6 the allocation asked for. Nominal sizing would charge the run-rate for all of it.
+     */
+    expect(e.bEff).toBe(599_999_999_952_699_429n);
+    expect(e.bEff).toBeLessThan((BigInt(FORK_PROVEN_CARRY_BPS) * WAD) / 10_000n);
+
     // The retained-cash reading is STATED, not silent (SPEC §5).
     const netTrail = provenanceTrailText(result.netApyWad!).join("\n");
-    expect(netTrail).toContain("p_s·r_coll + p_k·r_stake + q_s·b_eff·r_coll + q_k·b_eff·r_stake − b_eff·r_debt, b_eff = b·p_s");
+    expect(netTrail).toContain("p_s·r_coll + p_k·r_stake + q_s·b_eff·r_coll + q_k·b_eff·r_stake − b_eff·r_debt");
+    expect(netTrail).toContain("b_eff = borrowBase/equityBase");
     expect(netTrail).toContain("borrowed value — sized against the collateral that arrived — it supplies 0.00%");
     expect(netTrail).toContain("credited no yield");
   });
@@ -1381,15 +1571,9 @@ describe("the USDC carry (W09) — an uncorrelated leg through the same engine",
    */
   it("leaves the recycled loop on the leveraged form, weights and number unchanged", () => {
     const result = simulate(flagshipGraph(), snapshot);
-    const [stake, supply, borrow] = result.yieldSources;
-    const rStake = requireValue(stake!.rate.wad, "r_stake");
-    const rSupply = requireValue(supply!.rate.wad, "r_supply");
-    const rDebt = requireValue(borrow!.rate.wad, "r_debt");
-    const b = (BigInt(FORK_PROVEN_BORROW_BPS) * WAD) / 10_000n;
-
-    const rColl = ((WAD + rStake) * (WAD + rSupply)) / WAD - WAD;
-    const leveraged = ((WAD + b) * (WAD + rColl)) / WAD - (b * (WAD + rDebt)) / WAD - WAD;
-    expect(requireValue(result.netApyWad, "net")).toBe(leveraged);
+    expect(requireValue(result.netApyWad, "net")).toBe(
+      netLonghand(result, flagshipGraph(), LOOP_SINKS),
+    );
     expect(result.yieldSources.map((s) => s.weightBps)).toEqual([
       16_999,
       1,
@@ -1399,8 +1583,12 @@ describe("the USDC carry (W09) — an uncorrelated leg through the same engine",
     // position in one asset. The carry's weights sum to 1e4 − b instead, which is the honest
     // shape of 1× collateral against a short in another reserve.
     expect(result.yieldSources.reduce((a, s) => a + s.weightBps, 0)).toBe(10_000);
+    // The loop recycles ALL of what it borrows, and the realized reading says so exactly:
+    // the borrowed WETH is re-supplied whole, so `q_s` is WAD to the wei, not merely 100.00%.
+    expect(exposuresOf(flagshipGraph(), LOOP_SINKS).qS).toBe(WAD);
     const netTrail = provenanceTrailText(result.netApyWad!).join("\n");
-    expect(netTrail).toContain("p_s·r_coll + p_k·r_stake + q_s·b_eff·r_coll + q_k·b_eff·r_stake − b_eff·r_debt, b_eff = b·p_s");
+    expect(netTrail).toContain("p_s·r_coll + p_k·r_stake + q_s·b_eff·r_coll + q_k·b_eff·r_stake − b_eff·r_debt");
+    expect(netTrail).toContain("q_* = sinkBase/borrowBase");
     expect(netTrail).toContain("borrowed value — sized against the collateral that arrived — it supplies 100.00%");
   });
 
@@ -1412,13 +1600,14 @@ describe("the USDC carry (W09) — an uncorrelated leg through the same engine",
    * fraction of its borrow back into collateral. Reading that as yes/no gave a 1%-recycled path
    * the full leverage term. The general form is
    *
-   *   net = (1 + q·b)(1 + r_coll) + (1 − q)·b − b(1 + r_debt) − 1
-   *       = (1 + q·b)·r_coll − b·r_debt
+   *   net = p_s·r_coll + p_k·r_stake + q_s·b_eff·r_coll + q_k·b_eff·r_stake − b_eff·r_debt
    *
-   * and the two shipped shapes are its q=1 and q=0 endpoints. Every expectation below is
-   * computed LONGHAND from the leg rates so the test does not re-run the function under test.
+   * and the two shipped shapes are its q_s=1 and q_s=0 endpoints. Round-7 made every magnitude
+   * in it a MEASUREMENT: `netLonghand` derives each one from the plan's own amounts and the
+   * fixture's oracle prices, so no expectation below re-runs the function under test, and none
+   * of them is the allocation the document asked for.
    */
-  describe("the recycled fraction q, read off the document's own edge allocations", () => {
+  describe("the recycled fraction q, measured off the value the plan actually routed", () => {
     /** The flagship, with the borrow→unwrap edge throttled to `bps` of the borrowed value. */
     function partiallyRecycled(bps: number): ReturnType<typeof flagshipGraph> {
       const base = flagshipGraph();
@@ -1430,56 +1619,24 @@ describe("the USDC carry (W09) — an uncorrelated leg through the same engine",
       };
     }
 
-    /**
-     * The general closed form, written out independently of the function under test — as the
-     * VALUE-AFTER decomposition the derivation actually produced, not its algebraic expansion.
-     *
-     *   b_eff = b·p_s                        (the borrow sizes against ARRIVED collateral)
-     *   after = (p_s + q_s·b_eff)(1 + r_coll)
-     *         + (p_k + q_k·b_eff)(1 + r_stake)
-     *         + (p_c + q_c·b_eff)
-     *         − b_eff(1 + r_debt)
-     *   net   = after − 1
-     *
-     * The expansion `p_s·r_coll + p_k·r_stake + …` is algebraically identical but NOT
-     * bit-identical: integer WAD math floors at each product, and grouping the earning capital
-     * before multiplying floors once instead of twice. The grouped form is the one that
-     * describes the position, so it is the one written here.
-     */
-    const longhand = (
-      r: ReturnType<typeof simulate>,
-      qSuppliedWad: bigint,
-      bBps: number,
-      qStakedWad = 0n,
-      pSuppliedWad = WAD,
-      pStakedWad = 0n,
-    ): bigint => {
-      const rStake = requireValue(r.yieldSources[0]!.rate.wad, "r_stake");
-      const rSupply = requireValue(r.yieldSources[1]!.rate.wad, "r_supply");
-      const rDebt = requireValue(r.yieldSources[2]!.rate.wad, "r_debt");
-      const rColl = ((WAD + rStake) * (WAD + rSupply)) / WAD - WAD;
-      const bEff = ((BigInt(bBps) * WAD) / 10_000n) * pSuppliedWad / WAD;
-      const supplied = (qSuppliedWad * bEff) / WAD;
-      const staked = (qStakedWad * bEff) / WAD;
-      const cash = bEff - supplied - staked;
-      return (
-        ((pSuppliedWad + supplied) * (WAD + rColl)) / WAD +
-        ((pStakedWad + staked) * (WAD + rStake)) / WAD +
-        (WAD - pSuppliedWad - pStakedWad + cash) -
-        (bEff * (WAD + rDebt)) / WAD -
-        WAD
-      );
-    };
-
     it("prices a half-recycled document between its two endpoints, longhand", () => {
       const graph = partiallyRecycled(5_000);
       const result = simulate(graph, snapshot);
       const net = requireValue(result.netApyWad, "net");
-      expect(net).toBe(longhand(result, WAD / 2n, FORK_PROVEN_BORROW_BPS));
+      expect(net).toBe(netLonghand(result, graph, LOOP_SINKS));
 
-      // Strictly between the two endpoints — the whole point of the finding.
-      const full = longhand(result, WAD, FORK_PROVEN_BORROW_BPS);
-      const none = longhand(result, 0n, FORK_PROVEN_BORROW_BPS);
+      // Strictly between the two endpoints — the whole point of the finding. Both endpoints
+      // are THIS document's own `b_eff` and rates with only `q_s` swapped, so the comparison
+      // isolates the recycled fraction rather than comparing two different positions.
+      const e = exposuresOf(graph, LOOP_SINKS);
+      const rStake = requireValue(result.yieldSources[0]!.rate.wad, "r_stake");
+      const rSupply = requireValue(result.yieldSources[1]!.rate.wad, "r_supply");
+      const rDebt = requireValue(result.yieldSources[2]!.rate.wad, "r_debt");
+      const rColl = ((WAD + rStake) * (WAD + rSupply)) / WAD - WAD;
+      const atQ = (qS: bigint): bigint =>
+        (e.pS * rColl) / WAD + (((qS * e.bEff) / WAD) * rColl) / WAD - (e.bEff * rDebt) / WAD;
+      const full = atQ(WAD);
+      const none = atQ(0n);
       expect(net).toBeLessThan(full);
       expect(net).toBeGreaterThan(none);
       // …and the old boolean reading would have published the q=1 number for this document.
@@ -1494,24 +1651,24 @@ describe("the USDC carry (W09) — an uncorrelated leg through the same engine",
       );
     });
 
-    /** q walks with the allocation, and the two endpoints stay byte-identical to the pins. */
-    it("tracks the allocation across the range, with q=1 and q=0 byte-unchanged", () => {
+    /** q walks with the allocation, and both endpoints reproduce longhand. */
+    it("tracks the allocation across the range, with q=1 and q=0 reproduced", () => {
       for (const bps of [100, 2_500, 5_000, 7_500, 10_000]) {
-        const result = simulate(partiallyRecycled(bps), snapshot);
-        const qWad = (BigInt(bps) * WAD) / 10_000n;
+        const graph = partiallyRecycled(bps);
+        const result = simulate(graph, snapshot);
         expect(requireValue(result.netApyWad, `q=${bps}`), `q=${bps}`).toBe(
-          longhand(result, qWad, FORK_PROVEN_BORROW_BPS),
+          netLonghand(result, graph, LOOP_SINKS),
         );
       }
-      // q = 1 is the untouched flagship, byte-identical to its landed pin.
+      // q = 1 is the untouched flagship.
       const loop = simulate(flagshipGraph(), snapshot);
       expect(requireValue(loop.netApyWad, "loop")).toBe(
-        longhand(loop, WAD, FORK_PROVEN_BORROW_BPS),
+        netLonghand(loop, flagshipGraph(), LOOP_SINKS),
       );
-      // q = 0 is the carry, byte-identical to its landed pin.
+      // q = 0 is the carry.
       const carry = simulate(carryGraph(), snapshot);
       expect(requireValue(carry.netApyWad, "carry")).toBe(
-        longhand(carry, 0n, FORK_PROVEN_CARRY_BPS),
+        netLonghand(carry, carryGraph(), CARRY_SINKS),
       );
     });
 
@@ -1529,9 +1686,7 @@ describe("the USDC carry (W09) — an uncorrelated leg through the same engine",
         ],
       };
       const result = simulate(graph, snapshot);
-      expect(requireValue(result.netApyWad, "net")).toBe(
-        longhand(result, (6_000n * WAD) / 10_000n, FORK_PROVEN_BORROW_BPS),
-      );
+      expect(requireValue(result.netApyWad, "net")).toBe(netLonghand(result, graph, LOOP_SINKS));
     });
 
     /**
@@ -1554,13 +1709,15 @@ describe("the USDC carry (W09) — an uncorrelated leg through the same engine",
 
       // q_s = 0, q_k = 1: none supplied, all of it staked.
       const net = requireValue(result.netApyWad, "net");
-      expect(net).toBe(longhand(result, 0n, FORK_PROVEN_BORROW_BPS, WAD));
+      const staked: SinkBlocks = { equitySupplied: ["supply1"], borrowStaked: ["stake2"] };
+      expect(net).toBe(netLonghand(result, graph, staked));
 
-      // …and that is strictly better than treating the eETH as idle cash, by exactly b·r_stake.
-      const asCash = longhand(result, 0n, FORK_PROVEN_BORROW_BPS, 0n);
+      // …and that is strictly better than treating the eETH as idle cash, by exactly
+      // q_k·b_eff·r_stake — measured, so the claim is about the realized staked position.
+      const asCash = netLonghand(result, graph, CARRY_SINKS);
       const rStake = requireValue(result.yieldSources[0]!.rate.wad, "r_stake");
-      const b = (BigInt(FORK_PROVEN_BORROW_BPS) * WAD) / 10_000n;
-      expect(net - asCash).toBe((b * rStake) / WAD);
+      const e = exposuresOf(graph, staked);
+      expect(net - asCash).toBe((((e.qK * e.bEff) / WAD) * rStake) / WAD);
       // Worth more than a percentage point and a half of reported return.
       expect(net - asCash).toBeGreaterThan(WAD / 100n);
 
@@ -1596,18 +1753,26 @@ describe("the USDC carry (W09) — an uncorrelated leg through the same engine",
         ),
       };
       const result = simulate(graph, snapshot);
-      const pS = (4_000n * WAD) / 10_000n;
-      const pK = WAD - pS;
-      const bEff = (((BigInt(FORK_PROVEN_CARRY_BPS) * WAD) / 10_000n) * pS) / WAD;
-      // 24% of initial equity, exactly as the reviewer computed.
-      expect(bEff).toBe((2_400n * WAD) / 10_000n);
+      const throttled: SinkBlocks = { equitySupplied: ["supply1"], equityStaked: ["stake1"] };
+      const e = exposuresOf(graph, throttled);
+      // 40% supplied, 60% left in eETH, and a borrow worth 24% of initial equity — measured,
+      // so each is a shade under the round number the allocations asked for.
+      expect(e.pS).toBeLessThan((4_000n * WAD) / 10_000n);
+      expect(e.pS).toBeGreaterThan((3_999n * WAD) / 10_000n);
+      expect(e.bEff).toBeLessThan((2_400n * WAD) / 10_000n);
+      expect(e.bEff).toBeGreaterThan((2_399n * WAD) / 10_000n);
 
-      // q_s = 0 (terminal carry), p_s = 0.4, p_k = 0.6.
-      const expected = longhand(result, 0n, FORK_PROVEN_CARRY_BPS, 0n, pS, pK);
+      // q_s = 0 (terminal carry), p_s ≈ 0.4, p_k ≈ 0.6.
+      const expected = netLonghand(result, graph, throttled);
       expect(requireValue(result.netApyWad, "net")).toBe(expected);
 
       // The reading this replaces: full equity on r_coll, debt at the RAW 60%.
-      const rawAllocation = longhand(result, 0n, FORK_PROVEN_CARRY_BPS, 0n, WAD, 0n);
+      const rStake = requireValue(result.yieldSources[0]!.rate.wad, "r_stake");
+      const rSupply = requireValue(result.yieldSources[1]!.rate.wad, "r_supply");
+      const rDebt = requireValue(result.yieldSources[2]!.rate.wad, "r_debt");
+      const rColl = ((WAD + rStake) * (WAD + rSupply)) / WAD - WAD;
+      const b = (BigInt(FORK_PROVEN_CARRY_BPS) * WAD) / 10_000n;
+      const rawAllocation = rColl - (b * rDebt) / WAD;
       expect(requireValue(result.netApyWad, "net")).not.toBe(rawAllocation);
       expect(expected - rawAllocation).toBeGreaterThan(WAD / 100n);
 
@@ -1630,11 +1795,13 @@ describe("the USDC carry (W09) — an uncorrelated leg through the same engine",
         ),
       };
       const result = simulate(graph, snapshot);
-      const pS = (4_000n * WAD) / 10_000n;
-      const pK = WAD - pS;
       // q_s = 1: the loop still recycles all of what it borrows.
       expect(requireValue(result.netApyWad, "net")).toBe(
-        longhand(result, WAD, FORK_PROVEN_BORROW_BPS, 0n, pS, pK),
+        netLonghand(result, graph, {
+          equitySupplied: ["supply1"],
+          equityStaked: ["stake1"],
+          borrowSupplied: ["supply2"],
+        }),
       );
       expect(result.yieldSources[2]!.weightBps).toBe(-2_800);
     });
@@ -1704,5 +1871,270 @@ describe("the USDC carry (W09) — an uncorrelated leg through the same engine",
     // Two debt reserves, so the pair is not single — which is exactly why the ratio is null.
     expect(ledger.min!.collateralWei).toBeNull();
     expect(ledger.min!.debtWei).toBeNull();
+  });
+});
+
+// ————————————————————————— the divergent oracle (Codex W09 round-7) —————————————————————————
+
+/**
+ * THE SNAPSHOT WHERE THE ROUND-7 FINDING IS VISIBLE.
+ *
+ * `docs/protocol-matrix.md` §2.5 records Aave's weETH source as a CAPPED adapter — a market
+ * feed with a governance cap on the upside, "Capped weETH / eETH(ETH) / USD". It is free to
+ * diverge from `weETH.getRate × the ETH/USD feed`, and at the pinned block it already does, by
+ * 4.5e-13. That is dust; the finding is not about the dust. This fixture moves the feed 1%
+ * BELOW the rate-implied price — one number, mutated in the RAW reads before minting, so
+ * nothing forges an observation — and runs the same engine over a different chain.
+ *
+ * WHAT IT FALSIFIES. The composition used to take its magnitudes from the document's edge
+ * allocations: `p_s` was the product of the bps along the path (1.0 here) and the borrow's
+ * exposure was `b·p_s` (0.7). `buildPlan` never worked that way — it sizes debt from realized
+ * token amounts through conversion floors and each reserve's own oracle. On this snapshot the
+ * nominal reading publishes 2.5065% for the flagship loop while the realized flows value to
+ * 2.4651%: p_s is 0.99 and b_eff is 0.6930, and the 4.14-bp gap is a position the document
+ * does not hold. Every expectation below is longhand, and every nominal counterpart is written
+ * out too, so the comparison is a computation rather than a memory.
+ */
+function divergentSnapshot(): ChainSnapshot {
+  return fixtureSnapshot((raw) => {
+    const implied = (raw.WETH.priceBase * raw.etherfi.rateWindow!.rateNow) / WAD;
+    raw.weETH.priceBase = (implied * 99n) / 100n;
+  });
+}
+
+/**
+ * THE READING THIS REPLACES, written out: the value-after decomposition over ALLOCATION-NOMINAL
+ * fractions, `b_eff = b·p_s` and `p_s`/`q_*` read off the edge bps. This is the landed round-6
+ * code reproduced in the test, so each falsification below is a live comparison.
+ */
+function nominalReading(
+  r: ReturnType<typeof simulate>,
+  bBps: number,
+  qSuppliedWad: bigint,
+  qStakedWad = 0n,
+  pSuppliedWad = WAD,
+  pStakedWad = 0n,
+): bigint {
+  const rStake = requireValue(r.yieldSources[0]!.rate.wad, "r_stake");
+  const rSupply = requireValue(r.yieldSources[1]!.rate.wad, "r_supply");
+  const rDebt = requireValue(r.yieldSources[2]!.rate.wad, "r_debt");
+  const rColl = ((WAD + rStake) * (WAD + rSupply)) / WAD - WAD;
+  const bEff = (((BigInt(bBps) * WAD) / 10_000n) * pSuppliedWad) / WAD;
+  const supplied = (qSuppliedWad * bEff) / WAD;
+  const staked = (qStakedWad * bEff) / WAD;
+  const cash = bEff - supplied - staked;
+  return (
+    ((pSuppliedWad + supplied) * (WAD + rColl)) / WAD +
+    ((pStakedWad + staked) * (WAD + rStake)) / WAD +
+    (WAD - pSuppliedWad - pStakedWad + cash) -
+    (bEff * (WAD + rDebt)) / WAD -
+    WAD
+  );
+}
+
+describe("a capped weETH feed that diverges from the rate it wraps", () => {
+  const divergent = divergentSnapshot();
+
+  it("prices weETH one percent below weETH.getRate — the premise, read back", () => {
+    const implied =
+      (snapshot.reserves.WETH.priceBase.value * snapshot.etherfi.rateWindow!.rateNow.value) / WAD;
+    expect(divergent.reserves.weETH.priceBase.value).toBe((implied * 99n) / 100n);
+    // Only the weETH feed moved. Everything else is the pinned read set, untouched.
+    expect(divergent.reserves.WETH.priceBase.value).toBe(snapshot.reserves.WETH.priceBase.value);
+    expect(divergent.reserves.USDC.priceBase.value).toBe(snapshot.reserves.USDC.priceBase.value);
+    expect(divergent.etherfi.rateWindow!.rateNow.value).toBe(
+      snapshot.etherfi.rateWindow!.rateNow.value,
+    );
+  });
+
+  /** THE HEADLINE FALSIFICATION: 2.5065% asked for, 2.4651% held. */
+  it("values the recycled loop at what it holds, not at what its allocations asked for", () => {
+    const result = simulate(flagshipGraph(), divergent);
+    const net = requireValue(result.netApyWad, "net");
+    expect(net).toBe(netLonghand(result, flagshipGraph(), LOOP_SINKS, divergent));
+    expect(net).toBe(24_651_090_911_409_443n);
+    expect(formatWadAsPercent(net, 4)).toBe("2.4651%");
+
+    // The nominal reading, computed here rather than remembered.
+    const nominal = nominalReading(result, FORK_PROVEN_BORROW_BPS, WAD);
+    expect(nominal).toBe(25_065_398_203_438_143n);
+    expect(formatWadAsPercent(nominal, 4)).toBe("2.5065%");
+    // 4.14 basis points of run-rate on a position the document does not hold.
+    expect(nominal - net).toBe(414_307_292_028_700n);
+
+    // The two magnitudes the reviewer named, measured: p_s = 0.99 and b_eff = 0.6930.
+    const e = exposuresOf(flagshipGraph(), LOOP_SINKS, divergent);
+    expect(formatWadAsPercent(e.pS, 4)).toBe("99.0000%");
+    expect(formatWadAsPercent(e.bEff, 4)).toBe("69.3000%");
+    expect(e.bEff).toBe(692_999_999_997_920_854n);
+    /**
+     * `q_s` carries the divergence TOO, and that is the second half of the finding. Every wei
+     * of the borrowed WETH is restaked, wrapped and re-supplied — the allocation product says
+     * 100% and it is right about the tokens — but the weETH those tokens become is marked 1%
+     * below the WETH they came from, so the value that reaches collateral is 99% of the value
+     * borrowed. A fraction read off edge bps cannot see a conversion it does not price.
+     */
+    expect(formatWadAsPercent(e.qS, 4)).toBe("99.0000%");
+    expect(e.qS).toBeLessThan(WAD);
+
+    /**
+     * AND THE WEIGHTS STOP SUMMING TO 1e4, which is the honest reading rather than a broken
+     * invariant. 0.99 of the equity is marked as collateral, the borrow buys 0.6861 more of
+     * it, and the debt stands at 0.6930: the position's net exposure per unit of equity is
+     * 0.9831, because a hundredth of the equity is no longer marked anywhere. A sum pinned at
+     * 1e4 here would be the invariant lying about the position.
+     */
+    expect(result.yieldSources.map((s) => s.weightBps)).toEqual([16_760, 1, -6_930]);
+    expect(result.yieldSources.reduce((a, s) => a + s.weightBps, 0)).toBe(9_831);
+    expect(provenanceTrailText(result.netApyWad!).join("\n")).toContain(
+      "of the initial equity this document supplies 99.00% as collateral and leaves 0.00% staked",
+    );
+    expect(provenanceTrailText(result.netApyWad!).join("\n")).toContain(
+      "borrowed value — sized against the collateral that arrived — it supplies 99.00%",
+    );
+  });
+
+  /**
+   * The TERMINAL CARRY, where the divergence moves the debt exposure instead of the collateral
+   * one — and moves the published rate the OTHER way, because the debt leg is negative.
+   */
+  it("shrinks the carry's debt exposure with the collateral that sized it", () => {
+    const result = simulate(carryGraph(), divergent);
+    const net = requireValue(result.netApyWad, "net");
+    expect(net).toBe(netLonghand(result, carryGraph(), CARRY_SINKS, divergent));
+    expect(net).toBe(-300_419_480_186_034n);
+    expect(formatWadAsPercent(net, 4)).toBe("-0.0300%");
+
+    const nominal = nominalReading(result, FORK_PROVEN_CARRY_BPS, 0n);
+    expect(nominal).toBe(-303_454_020_750_412n);
+    expect(formatWadAsPercent(nominal, 4)).toBe("-0.0303%");
+    // The nominal reading charges MORE debt than the position carries, so it reads more
+    // negative. Same defect, opposite sign — which is why no rounding direction is "safe".
+    expect(nominal).toBeLessThan(net);
+
+    // b_eff = 0.6 × 0.99: the borrow sized against collateral the oracle marks 1% lower.
+    const e = exposuresOf(carryGraph(), CARRY_SINKS, divergent);
+    expect(formatWadAsPercent(e.bEff, 4)).toBe("59.4000%");
+    expect(result.yieldSources.map((s) => s.weightBps)).toEqual([9_899, 1, -5_940]);
+  });
+
+  /**
+   * A THROTTLED variant — the round-6 shape, where only 40% of the equity reaches a lend — on
+   * the divergent feed. Both `p_s` and `b_eff` carry the 1% together, and `p_k` does not.
+   */
+  it("carries the divergence through a throttled pre-lend path, on both fractions at once", () => {
+    const base = carryGraph();
+    const graph = {
+      blocks: base.blocks,
+      edges: base.edges.map((e) => (e.source === "stake1" ? { ...e, allocationBps: 4_000 } : e)),
+    };
+    const sinks: SinkBlocks = { equitySupplied: ["supply1"], equityStaked: ["stake1"] };
+    const result = simulate(graph, divergent);
+    const net = requireValue(result.netApyWad, "net");
+    expect(net).toBe(netLonghand(result, graph, sinks, divergent));
+    expect(net).toBe(14_048_821_848_989_497n);
+
+    const e = exposuresOf(graph, sinks, divergent);
+    // 40% of the equity reached a lend and is marked 1% below what it cost: 39.60%.
+    expect(formatWadAsPercent(e.pS, 4)).toBe("39.6000%");
+    // The eETH that stayed behind is NOT marked by the weETH feed, so it keeps its 60%.
+    expect(formatWadAsPercent(e.pK, 4)).toBe("60.0000%");
+    // …and the debt is 60% of the 39.6% that arrived.
+    expect(formatWadAsPercent(e.bEff, 4)).toBe("23.7600%");
+    expect(result.yieldSources[2]!.weightBps).toBe(-2_376);
+    expect(provenanceTrailText(result.netApyWad!).join("\n")).toContain(
+      "of the initial equity this document supplies 39.60% as collateral and leaves 60.00% staked",
+    );
+
+    const nominal = nominalReading(
+      result,
+      FORK_PROVEN_CARRY_BPS,
+      0n,
+      0n,
+      (4_000n * WAD) / 10_000n,
+      (6_000n * WAD) / 10_000n,
+    );
+    expect(nominal).toBe(14_047_608_379_960_238n);
+    expect(nominal).not.toBe(net);
+  });
+
+  /**
+   * TWO INITIAL LEND BRANCHES. The equity forks after the wrap and lands in two separate
+   * supplies; the borrow's collateral dependency hangs off one of them.
+   *
+   * The walk must SUM both branches into `p_s` — each valued at its own realized amount, each
+   * flooring separately — because `buildPlan` sizes the borrow against every supply that
+   * precedes it. Counting one branch would halve the collateral leg and misprice the debt that
+   * rests on both.
+   */
+  it("sums two initial lend branches into one supplied fraction", () => {
+    const graph: StrategyGraph = {
+      blocks: [
+        { id: "in", type: "input", params: { asset: "ETH", amount: "10" } },
+        { id: "stake1", type: "stake", params: { protocol: "etherfi" } },
+        { id: "wrap1", type: "wrap", params: { from: "eETH", to: "weETH" } },
+        { id: "supply1", type: "lend", params: { protocol: "aave-v3", asset: "weETH" } },
+        { id: "supplyB", type: "lend", params: { protocol: "aave-v3", asset: "weETH" } },
+        {
+          id: "borrow",
+          type: "borrow",
+          params: { protocol: "aave-v3", asset: "USDC", allocationBps: FORK_PROVEN_CARRY_BPS },
+        },
+      ],
+      edges: [
+        { id: "e0", source: "in", target: "stake1", allocationBps: 10_000 },
+        { id: "e1", source: "stake1", target: "wrap1", allocationBps: 10_000 },
+        { id: "e2", source: "wrap1", target: "supply1", allocationBps: 6_000 },
+        { id: "e3", source: "wrap1", target: "supplyB", allocationBps: 4_000 },
+        { id: "e4", source: "supply1", target: "borrow", allocationBps: 10_000 },
+      ],
+    };
+    const both: SinkBlocks = { equitySupplied: ["supply1", "supplyB"] };
+    const result = simulate(graph, divergent);
+    const net = requireValue(result.netApyWad, "net");
+    expect(net).toBe(netLonghand(result, graph, both, divergent));
+    expect(net).toBe(-300_419_480_186_034n);
+
+    // Both branches are in the supplied fraction: 99% of the equity, not 59.4% of it.
+    const e = exposuresOf(graph, both, divergent);
+    expect(formatWadAsPercent(e.pS, 4)).toBe("99.0000%");
+    const oneOnly = exposuresOf(graph, { equitySupplied: ["supply1"] }, divergent);
+    expect(formatWadAsPercent(oneOnly.pS, 4)).toBe("59.4000%");
+    expect(netLonghand(result, graph, { equitySupplied: ["supply1"] }, divergent)).not.toBe(net);
+    expect(provenanceTrailText(result.netApyWad!).join("\n")).toContain(
+      "of the initial equity this document supplies 99.00% as collateral",
+    );
+
+    const nominal = nominalReading(result, FORK_PROVEN_CARRY_BPS, 0n);
+    expect(nominal).toBe(-303_454_020_750_412n);
+    expect(nominal).toBeLessThan(net);
+  });
+
+  /**
+   * The BORROWED value's own sinks are fractions of the BORROW's base value, not of equity —
+   * so a terminal borrow restaked into eETH keeps `q_k = 1` while the equity's collateral is
+   * marked down. The 1% shows exactly where the weETH feed is consulted, and nowhere else.
+   */
+  it("keeps the borrowed side's fractions on the borrow's own base value", () => {
+    const base = flagshipGraph();
+    const kept = new Set(["in", "stake1", "wrap1", "supply1", "borrow", "unwrap", "stake2"]);
+    const graph = {
+      blocks: base.blocks.filter((b) => kept.has(b.id)),
+      edges: base.edges.filter((e) => kept.has(e.source) && kept.has(e.target)),
+    };
+    const sinks: SinkBlocks = { equitySupplied: ["supply1"], borrowStaked: ["stake2"] };
+    const result = simulate(graph, divergent);
+    const net = requireValue(result.netApyWad, "net");
+    expect(net).toBe(netLonghand(result, graph, sinks, divergent));
+    expect(net).toBe(24_814_556_467_085_624n);
+
+    const e = exposuresOf(graph, sinks, divergent);
+    expect(e.qK).toBe(WAD);
+    expect(formatWadAsPercent(e.pS, 4)).toBe("99.0000%");
+    expect(result.yieldSources.map((s) => s.weightBps)).toEqual([16_829, 1, -6_930]);
+
+    const nominal = nominalReading(result, FORK_PROVEN_BORROW_BPS, 0n, WAD);
+    expect(formatWadAsPercent(nominal, 4)).toBe("2.5065%");
+    expect(formatWadAsPercent(net, 4)).toBe("2.4815%");
   });
 });

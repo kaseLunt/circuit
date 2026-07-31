@@ -114,7 +114,13 @@ export function variableBorrowAprRay(strategy: RateStrategyBps, utilizationWad: 
   return wadToRay(aprWad);
 }
 
-/** Where value comes to rest, as fractions of the amount that entered. Cash is the residual. */
+/**
+ * Where value comes to rest, as fractions of the base value that entered. Cash is the residual.
+ *
+ * These are MEASURED (`risk.ts` divides realized base values by realized base values), so the
+ * two need not sum to 1: a supplied position marked below the equity that bought it leaves a
+ * remainder that is neither a sink nor cash. `netApyWad` never touches that remainder.
+ */
 export interface SinkFractions {
   readonly suppliedWad: bigint;
   readonly stakedWad: bigint;
@@ -122,20 +128,30 @@ export interface SinkFractions {
 
 /**
  * Net APY (WAD) of one iteration, normalized to initial equity (SPEC §5.2). All rates are WAD
- * APYs; `bWad` is the borrow allocation as a fraction of ARRIVED COLLATERAL value at open.
+ * APYs; every magnitude is a REALIZED exposure per unit of initial equity, measured by
+ * `risk.ts` off the plan's own amounts through the oracle (never off the edge allocations).
  *
  *   r_coll  = (1 + r_stake)(1 + r_supply) − 1       (compounds on supplied collateral)
- *   b_eff   = b · p_s                                (the borrow sizes against ARRIVED collateral)
- *   netAPY  = p_s(1 + r_coll) + p_k(1 + r_stake) + p_c
- *           + q_s·b_eff(1 + r_coll) + q_k·b_eff(1 + r_stake) + q_c·b_eff
- *           − b_eff(1 + r_debt) − 1
- *           = p_s·r_coll + p_k·r_stake + q_s·b_eff·r_coll + q_k·b_eff·r_stake − b_eff·r_debt
+ *   netAPY  = p_s·r_coll + p_k·r_stake
+ *           + q_s·b_eff·r_coll + q_k·b_eff·r_stake
+ *           − b_eff·r_debt
+ *
+ * RATES ON EXPOSURES — the form, and why it is not the value-after decomposition it replaces.
+ * The earlier form summed the value of the position AFTER one year and subtracted 1:
+ * `(p_s + q_s·b_eff)(1 + r_coll) + … + p_c − b_eff(1 + r_debt) − 1`. That is only equal to
+ * this one when the fractions sum to exactly 1. They do not: `p_*` and `q_*` are now measured
+ * from realized amounts through the Aave Oracle, and the sum falls short of 1 whenever the
+ * conversion floors bite or the capped weETH feed diverges from `weETH.getRate` (a live
+ * property — `docs/protocol-matrix.md` §2.5). The value-after form nets that instantaneous
+ * mark-to-market gap INTO the run-rate: a 1% divergence subtracts about a point of "yield"
+ * that no rate earned or paid. A mark is not a yield. Applying each rate to the exposure that
+ * actually earns it keeps the two facts separate, and only the run-rate is published here.
  *
  * THE BORROWED VALUE HAS THREE POSSIBLE FATES, and they earn three different rates. `q_s` is
  * the fraction re-SUPPLIED as Aave collateral (earning the full `r_coll`), `q_k` the fraction
  * left in a STAKED position — eETH or weETH, which accrue staking yield whether or not anyone
  * supplies them (earning `r_stake`), and `q_c` the residual genuinely held as CASH: the
- * borrowed token itself, or ETH after an unwrap (earning nothing). They sum to 1.
+ * borrowed token itself, or ETH after an unwrap (earning nothing).
  *
  * WHY THREE AND NOT TWO. A two-way split — "recycled or not" — prices a document ending
  * `borrow → unwrap → stake` as if the borrowed value were idle, when it is sitting in eETH
@@ -148,36 +164,34 @@ export interface SinkFractions {
  * prices off a leg that must already have resolved. A sink whose rate was NOT in that set would
  * have to refuse instead — which is what an unrecognized block kind does.
  *
- * The cash fraction is credited NO yield: the document does not deploy it, and this function
- * does not guess what a holder might do with it.
+ * The cash fractions are credited NO yield and appear in no term: the document does not deploy
+ * that value, and this function does not guess what a holder might do with it.
  *
- * `q_s = 1` and `q_c = 1` reduce term-for-term to the leveraged-loop and terminal-carry forms
- * that preceded this one, so both pinned numbers are byte-unchanged: `mulWad(WAD, b) = b`
- * exactly, `mulWad(0, ·) = 0`, and `mulWad(b, WAD + r) = b + mulWad(b, r)` exactly.
+ * `b_eff` is the borrow's realized base value per unit of equity — NOT `b` and not `b·p_s`.
+ * Those were allocation-nominal readings; the plan sizes debt from token amounts that pass
+ * through conversion floors and the borrowed reserve's own oracle, so the exposure the position
+ * actually carries is measured, not multiplied out.
  *
  * Incentives/points are excluded by construction (not a parameter).
  */
 export function netApyWad(
   equity: SinkFractions,
   borrowed: SinkFractions,
-  bWad: bigint,
+  bEffWad: bigint,
   rStakeApyWad: bigint,
   rSupplyApyWad: bigint,
   rDebtApyWad: bigint,
 ): bigint {
-  const one = WAD;
-  const rColl = mulWad(one + rStakeApyWad, one + rSupplyApyWad) - one;
-  // The borrow sizes against ARRIVED collateral, not against equity: `buildPlan` multiplies
-  // the allocation by the collateral that actually reached a lend.
-  const bEff = mulWad(bWad, equity.suppliedWad);
-  const supplied = mulWad(borrowed.suppliedWad, bEff);
-  const staked = mulWad(borrowed.stakedWad, bEff);
-  const cash = bEff - supplied - staked;
-  const collLeg = mulWad(equity.suppliedWad + supplied, one + rColl);
-  const stakeLeg = mulWad(equity.stakedWad + staked, one + rStakeApyWad);
-  const cashLeg = one - equity.suppliedWad - equity.stakedWad + cash;
-  const debtLeg = mulWad(bEff, one + rDebtApyWad);
-  return collLeg + stakeLeg + cashLeg - debtLeg - one;
+  const rColl = mulWad(WAD + rStakeApyWad, WAD + rSupplyApyWad) - WAD;
+  const suppliedFromBorrow = mulWad(borrowed.suppliedWad, bEffWad);
+  const stakedFromBorrow = mulWad(borrowed.stakedWad, bEffWad);
+  return (
+    mulWad(equity.suppliedWad, rColl) +
+    mulWad(equity.stakedWad, rStakeApyWad) +
+    mulWad(suppliedFromBorrow, rColl) +
+    mulWad(stakedFromBorrow, rStakeApyWad) -
+    mulWad(bEffWad, rDebtApyWad)
+  );
 }
 
 // Aave v3.7 accounting math, implemented byte-exactly from the deployed

@@ -59,6 +59,7 @@ import {
   effectiveLtvBps,
   inCollateralBitmap,
   RESERVE_KEYS,
+  type BlockFlow,
   type ChainSnapshot,
   type EModeCategorySnapshot,
   type PlanError,
@@ -69,7 +70,6 @@ import {
 import {
   derived,
   derivedOverWindow,
-  entered,
   type AnyProvenanced,
   type Observed,
   type ParamOrigins,
@@ -1089,19 +1089,29 @@ function stakingAprOf(snapshot: ChainSnapshot): ProvenancedRate | null {
 
 /** The three rate legs §5.2 composes, present only when ALL of them are. */
 interface CompositionLegs {
-  readonly bBps: number;
   /**
-   * WHERE the borrowed value comes to rest, as fractions in WAD — supplied as collateral and
-   * left in a staked position; cash is the residual. Read off the document's own edge
-   * allocations, never off which template it came from.
+   * WHERE the borrowed value comes to rest — as fractions of the borrow's OWN realized base
+   * value, so `q_s + q_k + q_c = 1` by construction. Cash is the residual and earns nothing.
    */
   readonly sinks: SinkFractions;
   /**
-   * Where the INITIAL EQUITY comes to rest, same three sinks. `suppliedWad` here is `p_s`,
-   * the fraction that actually reached a lend — and therefore the base the borrow allocation
-   * multiplies, since the borrow sizes against arrived collateral rather than against equity.
+   * Where the INITIAL EQUITY comes to rest, same three sinks, as fractions of the input's
+   * realized base value. These do NOT sum to 1: value lost to conversion floors, and any gap
+   * between the capped weETH feed and `weETH.getRate`, is a mark-to-market fact that belongs
+   * to no sink and is credited to no rate (`netApyWad`).
    */
   readonly equity: SinkFractions;
+  /**
+   * The borrow's realized base value per unit of initial equity.
+   *
+   * NOT `b`, and no longer `b·p_s`. `buildPlan` sizes the borrow from `collateralBase`, floors
+   * it to the borrowed reserve's own token granularity, and that token is valued by its own
+   * oracle — so at six decimals the round trip alone drops real value the allocation product
+   * never sees. The exposure the position carries is measured off the plan, not multiplied out.
+   */
+  readonly bEffWad: bigint;
+  /** Every provenanced base value the three readings above were measured from. */
+  readonly magnitudes: readonly AnyProvenanced[];
   readonly stake: ProvenancedRate;
   readonly supply: ProvenancedRate;
   readonly debt: ProvenancedRate;
@@ -1154,24 +1164,63 @@ function sinkKindOf(blockType: string | undefined): SinkKind | null {
   }
 }
 
+/** What rests in each sink, in oracle base currency, plus the valuations it was summed from. */
+interface SinkBases {
+  readonly suppliedBase: bigint;
+  readonly stakedBase: bigint;
+  /** Every valuation this walk consumed, so the composition can cite its magnitudes. */
+  readonly cited: readonly AnyProvenanced[];
+}
+
 /**
- * WHAT FRACTIONS of the borrowed value reach each sink — `q_s` and `q_k`, in WAD. The cash
- * residual is whatever is left, so it is never computed here and never guessed.
+ * ONE valuation definition for the whole composition: the market value of a HOLDING, which is
+ * `valueInBase`'s collateral side. No second conversion chain exists here — in particular
+ * nothing re-derives weETH through `weETH.getRate`, because the position is marked by the
+ * oracle the protocol itself marks it by.
  *
- * Not a boolean, and not a single fraction. Edge allocations are user-editable
+ * The debt side is deliberately not used. `GenericLogic` ceils debt so the HEALTH FACTOR is
+ * never optimistic — a safety convention about a gating number, not a claim about worth.
+ * Importing it here would buy no conservatism, because a larger `b_eff` RAISES net APY for a
+ * recycled loop and LOWERS it for a terminal carry, so there is no safe direction to round in;
+ * it would only inject a floor/ceil asymmetry that reports a document recycling all of its
+ * borrow as recycling 99.9999999999% of it. The ledger's debt valuation is untouched and still
+ * ceils, in its own home.
+ */
+function holdingValue(
+  amount: Provenanced<bigint>,
+  asset: Asset | null,
+  snapshot: ChainSnapshot,
+): Provenanced<bigint> | null {
+  if (asset === null) return null;
+  return baseValueProv(amount, asset, snapshot, "collateral");
+}
+
+/**
+ * WHAT VALUE actually reaches each sink — the composition's magnitudes, in oracle base
+ * currency, read off the plan's own realized amounts.
+ *
+ * Not a boolean, and not the edge allocations. Allocations are user-editable
  * (`setEdgeAllocationBps`, and any shared document can carry them) and `buildPlan` applies them
- * to the real amounts, so a document can route any fraction anywhere. Two earlier readings both
+ * to real amounts, so a document can route any fraction anywhere. Three earlier readings all
  * misprice real documents: "is a lend reachable" gives a 1%-recycled path the full leverage
- * term, and "recycled or not" reports `borrow → unwrap → stake` as idle cash when it is eETH
- * earning the staking rate.
+ * term; "recycled or not" reports `borrow → unwrap → stake` as idle cash when it is eETH
+ * earning the staking rate; and the ALLOCATION PRODUCT — the bps chain, which this replaces —
+ * prices the value that was ASKED FOR rather than the value that arrived.
  *
- * THE WALK IS THE PLAN'S OWN ROUTING RULE. `validateGraph` gives every non-input block exactly
- * one incoming edge, so each block downstream of the borrow has a UNIQUE path from it and the
- * fraction arriving is the product of the allocations along that path — precisely the
- * `floor(producerOutput × allocationBps / 1e4)` chain `plan.ts` walks. Value RESTS wherever it
- * is not routed onward: a block whose outgoing allocations sum to less than 100% retains the
- * remainder in its own output asset, which is why the retention is measured per block rather
- * than only at leaves.
+ * WHY NOMINAL FRACTIONS WERE WRONG (Codex W09 round-7). The product of edge allocations says
+ * 100% of the equity reached the lend and the borrow is `b` of it. The plan says otherwise:
+ * staking mints shares and wrapping converts them, both flooring; the supplied weETH is then
+ * valued by the CAPPED weETH feed, which is free to diverge from `weETH.getRate` (a live
+ * property, `docs/protocol-matrix.md` §2.5); and the borrowed token is floored to its own
+ * granularity — at USDC's six decimals that alone is worth ~1e-4 of the borrow. So the nominal
+ * reading publishes a run-rate for a position the document does not hold. The fix is to measure
+ * the exposures instead of computing them, through the SAME base valuation the ledger uses.
+ *
+ * THE WALK IS STILL THE PLAN'S OWN ROUTING RULE, and it is still what CLASSIFIES each resting
+ * place. `validateGraph` gives every non-input block exactly one incoming edge, so each block
+ * downstream has a UNIQUE path and `flowById` holds the amount that actually crossed it. Value
+ * RESTS wherever the plan did not route it onward: `outputWei − Σ(inputWei of its children)`,
+ * measured per block rather than only at leaves.
  *
  * ILL-DEFINED SHAPES REFUSE (null → the composition renders its unavailable state):
  *  - a block kind the enumeration above does not cover;
@@ -1179,9 +1228,16 @@ function sinkKindOf(blockType: string | undefined): SinkKind | null {
  *    an allocation walk can answer;
  *  - a block reachable twice, which the one-incoming-edge rule forbids and which would double
  *    count if it ever became reachable;
- *  - allocations out of one block exceeding 100%, or fractions escaping [0, 1].
+ *  - children consuming more than their producer emitted (negative retention) — the realized,
+ *    exact form of the over-allocation check the nominal walk had to approximate in bps;
+ *  - an amount with no oracle price, which is a missing read and never a zero.
  */
-function sinksFrom(graph: StrategyGraph, startBlockId: string): SinkFractions | null {
+function realizedSinksFrom(
+  graph: StrategyGraph,
+  flowById: ReadonlyMap<string, BlockFlow>,
+  startBlockId: string,
+  snapshot: ChainSnapshot,
+): SinkBases | null {
   const typeById = new Map(graph.blocks.map((b) => [b.id, b.type]));
   const outgoing = new Map<string, Edge[]>();
   for (const edge of graph.edges) {
@@ -1190,71 +1246,97 @@ function sinksFrom(graph: StrategyGraph, startBlockId: string): SinkFractions | 
     else existing.push(edge);
   }
   const seen = new Set<string>();
-  const frontier: Array<{ readonly id: string; readonly weight: bigint }> = [
-    { id: startBlockId, weight: WAD },
-  ];
-  let suppliedWad = 0n;
-  let stakedWad = 0n;
+  const frontier: string[] = [startBlockId];
+  const cited: AnyProvenanced[] = [];
+  let suppliedBase = 0n;
+  let stakedBase = 0n;
   while (frontier.length > 0) {
-    const { id, weight } = frontier.pop()!;
+    const id = frontier.pop()!;
     if (seen.has(id)) return null;
     seen.add(id);
     const kind = sinkKindOf(typeById.get(id));
     if (kind === null) return null;
+    const flow = flowById.get(id);
+    if (flow === undefined) return null;
     const edges = outgoing.get(id) ?? [];
     if (kind === "supplied") {
       // A lend has NO token output, so its only legal outgoing edge is a collateral
       // DEPENDENCY into a borrow — no value crosses it, and the walk stops here. An edge to
-      // anything else would be a token flow out of a lend, which does not exist.
+      // anything else would be a token flow out of a lend, which does not exist. What rests
+      // here is exactly what the supply consumed.
       if (edges.some((edge) => typeById.get(edge.target) !== "borrow")) return null;
-      suppliedWad += weight;
+      if (flow.inputWei === null) return null;
+      const value = holdingValue(flow.inputWei, flow.inputAsset, snapshot);
+      if (value === null) return null;
+      suppliedBase += value.value;
+      cited.push(value);
       continue;
     }
-    let routedWad = 0n;
+    if (flow.outputWei === null) return null;
+    const routed: Array<Provenanced<bigint>> = [];
     for (const edge of edges) {
       // Same rule from the other end: a borrow's input is a collateral dependency, not a
       // token flow (`plan.ts` gives every borrow `input: null`), so equity never crosses
       // into it. The borrowed value's own walk starts AT the borrow instead.
       if (typeById.get(edge.target) === "borrow") continue;
-      const share = (BigInt(edge.allocationBps) * WAD) / BigInt(FULL_ALLOCATION_BPS);
-      routedWad += share;
-      frontier.push({ id: edge.target, weight: mulWad(weight, share) });
+      const child = flowById.get(edge.target);
+      if (child === undefined || child.inputWei === null) return null;
+      routed.push(child.inputWei);
+      frontier.push(edge.target);
     }
-    if (routedWad > WAD) return null;
-    // Whatever this block does not route onward rests HERE, in this block's own output asset.
-    if (kind === "staked") stakedWad += weight - mulWad(weight, routedWad);
+    const retainedWei = routed.reduce((rest, r) => rest - r.value, flow.outputWei.value);
+    if (retainedWei < 0n) return null;
+    if (kind !== "staked" || retainedWei === 0n) continue;
+    const retained =
+      routed.length === 0
+        ? flow.outputWei
+        : derived(retainedWei, "outputWei − Σ(inputWei routed onward)", [flow.outputWei, ...routed]);
+    const value = holdingValue(retained, flow.outputAsset, snapshot);
+    if (value === null) return null;
+    stakedBase += value.value;
+    cited.push(value);
   }
-  if (suppliedWad < 0n || stakedWad < 0n || suppliedWad + stakedWad > WAD) return null;
-  return { suppliedWad, stakedWad };
+  return { suppliedBase, stakedBase, cited };
 }
 
 function compositionLegsOf(
   graph: StrategyGraph,
   plan: PlanSuccess,
+  snapshot: ChainSnapshot,
   rates: Readonly<Record<ReserveKey, ReserveRates>>,
   stakingApy: ProvenancedRate | null,
 ): CompositionLegs | null {
   if (stakingApy === null) return null;
   const borrowBlocks = graph.blocks.filter((b) => b.type === "borrow");
   if (borrowBlocks.length !== 1) return null;
-  const bBps = borrowBlocks[0]!.params["allocationBps"];
-  if (typeof bBps !== "number") return null;
+  const inputBlock = graph.blocks.find((b) => b.type === "input");
+  if (inputBlock === undefined) return null;
+
+  const flowById = new Map(plan.flows.map((f) => [f.blockId, f] as const));
+  const inputFlow = flowById.get(inputBlock.id);
+  const borrowFlow = flowById.get(borrowBlocks[0]!.id);
+  if (inputFlow?.outputWei == null || borrowFlow?.outputWei == null) return null;
+  const equityBase = holdingValue(inputFlow.outputWei, inputFlow.outputAsset, snapshot);
+  const borrowBase = holdingValue(borrowFlow.outputWei, borrowFlow.outputAsset, snapshot);
+  // Both are DIVISORS: `p_*` and `b_eff` are per unit of equity, `q_*` per unit of borrow. A
+  // zero on either leaves the fractions undefined, so the composition refuses rather than
+  // dividing — the same posture as the no-collateral refusal below.
+  if (equityBase === null || equityBase.value <= 0n) return null;
+  if (borrowBase === null || borrowBase.value <= 0n) return null;
+
   /**
    * BOTH SIDES, one walk. The initial equity splits into the same three sinks the borrowed
    * value does — the block vocabulary is the same, so the classification is — and the borrow
    * is sized against the collateral that ACTUALLY ARRIVED at a lend, which is `buildPlan`'s
-   * own rule (`collateralBase` sums the supplies preceding the borrow). Reading the raw
-   * allocation as a fraction of equity prices debt the document never takes on.
+   * own rule (`collateralBase` sums the supplies preceding the borrow).
    */
-  const inputBlock = graph.blocks.find((b) => b.type === "input");
-  if (inputBlock === undefined) return null;
-  const equity = sinksFrom(graph, inputBlock.id);
-  if (equity === null) return null;
+  const equityBases = realizedSinksFrom(graph, flowById, inputBlock.id, snapshot);
+  if (equityBases === null) return null;
   // Nothing reached a lend, so there is no collateral to size a borrow against and no
   // composition to publish. Refused rather than divided into.
-  if (equity.suppliedWad === 0n) return null;
-  const sinks = sinksFrom(graph, borrowBlocks[0]!.id);
-  if (sinks === null) return null;
+  if (equityBases.suppliedBase === 0n) return null;
+  const borrowedBases = realizedSinksFrom(graph, flowById, borrowBlocks[0]!.id, snapshot);
+  if (borrowedBases === null) return null;
 
   const collateralReserves = new Set(
     plan.flows.filter((f) => f.type === "lend").map((f) => f.reserve!),
@@ -1267,7 +1349,21 @@ function compositionLegsOf(
   const supply = rates[[...collateralReserves][0]!].supplyApy;
   const debt = rates[[...debtReserves][0]!].borrowApy;
   if (supply === null || debt === null) return null;
-  return { bBps, equity, sinks, stake: stakingApy, supply, debt };
+  return {
+    equity: {
+      suppliedWad: (equityBases.suppliedBase * WAD) / equityBase.value,
+      stakedWad: (equityBases.stakedBase * WAD) / equityBase.value,
+    },
+    sinks: {
+      suppliedWad: (borrowedBases.suppliedBase * WAD) / borrowBase.value,
+      stakedWad: (borrowedBases.stakedBase * WAD) / borrowBase.value,
+    },
+    bEffWad: (borrowBase.value * WAD) / equityBase.value,
+    magnitudes: [equityBase, borrowBase, ...equityBases.cited, ...borrowedBases.cited],
+    stake: stakingApy,
+    supply,
+    debt,
+  };
 }
 
 /**
@@ -1303,20 +1399,23 @@ function grossApyOf(legs: CompositionLegs): Provenanced<bigint> {
  * nothing, and says so (SPEC §5 — the assumption that reaches the screen is named). A refusal
  * would be the wrong answer here: every rate resolved, and "this document's run-rate is
  * unavailable" would be false about a document whose rate is perfectly well defined as written.
+ *
+ * The percentages in that note are the MEASURED fractions, so the sentence and the arithmetic
+ * cannot drift apart: if the oracle marks the supplied collateral below the equity that bought
+ * it, the note says so at two decimals and the number carries the same fact at full precision.
  */
 function netApyOf(legs: CompositionLegs, gross: Provenanced<bigint>): Provenanced<bigint> {
-  const bWad = (BigInt(legs.bBps) * WAD) / BigInt(FULL_ALLOCATION_BPS);
   return derivedOverWindow(
     netApyWad(
       legs.equity,
       legs.sinks,
-      bWad,
+      legs.bEffWad,
       legs.stake.wad.value,
       legs.supply.wad.value,
       legs.debt.wad.value,
     ),
-    "p_s·r_coll + p_k·r_stake + q_s·b_eff·r_coll + q_k·b_eff·r_stake − b_eff·r_debt, b_eff = b·p_s",
-    [entered(legs.bBps), gross, legs.debt.wad],
+    "p_s·r_coll + p_k·r_stake + q_s·b_eff·r_coll + q_k·b_eff·r_stake − b_eff·r_debt, with p_* = sinkBase/equityBase, q_* = sinkBase/borrowBase and b_eff = borrowBase/equityBase — every base value the plan's own realized amount through the oracle",
+    [gross, legs.debt.wad, ...legs.magnitudes],
     WINDOW_REASON,
     "§5.2, current-rate run-rate over one iteration; incentives and points excluded by " +
       `construction; of the initial equity this document supplies ${formatWadAsPercent(legs.equity.suppliedWad)} ` +
@@ -1328,8 +1427,24 @@ function netApyOf(legs: CompositionLegs, gross: Provenanced<bigint>): Provenance
 }
 
 /**
+ * A WAD fraction as basis points, rounded to NEAREST.
+ *
+ * The weights are a DISPLAY granularity — the shares §2.8 renders beside each leg — and the
+ * fractions feeding them are now realized measurements rather than the round allocations they
+ * used to be. Truncating would render a 69.99999999990% exposure as 6999 bps: not a more
+ * honest 70% but a less honest one, and it would break the loop's own sum invariant by a
+ * basis point for no reason a reader could name. Rounding to the nearest basis point is what
+ * "to the nearest basis point" means. The published net APY does NOT pass through here — it
+ * keeps full WAD precision, where the same dust is worth ~1e-13 and is simply carried.
+ */
+function bpsOfWad(wad: bigint): number {
+  if (wad < 0n) throw new RangeError("an exposure fraction is non-negative by construction");
+  return Number((wad * BigInt(FULL_ALLOCATION_BPS) + WAD / 2n) / WAD);
+}
+
+/**
  * The §5.2 exposure weights, in the integer bps the contract fixes: the collateral legs share
- * `(1 + b)` and the debt leg carries `−b`, so the three sum to FULL_ALLOCATION_BPS.
+ * `p_s + q_s·b_eff` and the debt leg carries `−b_eff`, all three MEASURED.
  *
  * The collateral share splits in proportion to each leg's rate, with the remainder landing on
  * the supply leg so the sum is exact rather than approximately right.
@@ -1340,31 +1455,27 @@ function netApyOf(legs: CompositionLegs, gross: Provenanced<bigint>): Provenance
  * inventing a preference. The invariant holds in both branches.
  */
 function yieldWeights(
-  bBps: number,
   rStake: bigint,
   rSupply: bigint,
   equity: SinkFractions,
   sinks: SinkFractions,
+  bEffWad: bigint,
 ): { readonly stake: number; readonly supply: number; readonly borrow: number } {
-  // EXPOSURE per unit of initial equity, which is what a weight means here. The borrow is
-  // `b_eff = b · p_s` because it sizes against ARRIVED collateral, and each leg carries the
-  // value that actually earns it: the supply leg only what reached a lend, the stake leg
-  // everything staked whether supplied or not.
+  // EXPOSURE per unit of initial equity, which is what a weight means here. `b_eff` is the
+  // borrow's MEASURED base value per unit of equity, and each leg carries the value that
+  // actually earns it: the supply leg only what reached a lend, the stake leg everything
+  // staked whether supplied or not.
   //
   // The three weights sum to FULL_ALLOCATION_BPS only for the fully-recycled, fully-supplied
-  // loop. A terminal borrow sums to `1e4 − b`, a partially-routed document lands between, and
-  // equity that never reached a lend lowers all three together. That spread is the honest one:
-  // a carry is not a 1× position in a single asset, and a half-supplied document is not a
+  // loop. A terminal borrow sums to `1e4 − b_eff`, a partially-routed document lands between,
+  // and equity that never reached a lend lowers all three together. That spread is the honest
+  // one: a carry is not a 1× position in a single asset, and a half-supplied document is not a
   // whole one.
-  const bEffBps = Number((BigInt(bBps) * equity.suppliedWad) / WAD);
-  const collateralBps =
-    Number((BigInt(FULL_ALLOCATION_BPS) * equity.suppliedWad) / WAD) +
-    Number((BigInt(bEffBps) * sinks.suppliedWad) / WAD);
+  const bEffBps = bpsOfWad(bEffWad);
+  const collateralBps = bpsOfWad(equity.suppliedWad) + bpsOfWad(mulWad(bEffWad, sinks.suppliedWad));
   // Value left STAKED earns the staking leg and nothing else, so it lands on that leg alone
   // rather than joining the rate-proportional split of the supplied collateral.
-  const stakedOnlyBps =
-    Number((BigInt(FULL_ALLOCATION_BPS) * equity.stakedWad) / WAD) +
-    Number((BigInt(bEffBps) * sinks.stakedWad) / WAD);
+  const stakedOnlyBps = bpsOfWad(equity.stakedWad) + bpsOfWad(mulWad(bEffWad, sinks.stakedWad));
   const totalCollateralRate = rStake + rSupply;
   const stake =
     totalCollateralRate > 0n && rStake >= 0n && rSupply >= 0n
@@ -1376,11 +1487,11 @@ function yieldWeights(
 /** Canonical order: the collateral legs in the order they compound, then the debt leg. */
 function yieldSourcesOf(legs: CompositionLegs): readonly YieldSource[] {
   const weights = yieldWeights(
-    legs.bBps,
     legs.stake.wad.value,
     legs.supply.wad.value,
     legs.equity,
     legs.sinks,
+    legs.bEffWad,
   );
   return [
     { protocol: "etherfi", type: "stake", rate: legs.stake, weightBps: weights.stake },
@@ -1457,7 +1568,7 @@ export function simulate(
   // §5.2, complete or nothing: the three legs are resolved together, and if any one of them
   // is missing the gross APY, the net APY and the whole breakdown are unavailable together.
   const stakingApy = stakingAprOf(snapshot);
-  const legs = compositionLegsOf(graph, plan, rates, stakingApy);
+  const legs = compositionLegsOf(graph, plan, snapshot, rates, stakingApy);
   const grossApyWad = legs === null ? null : grossApyOf(legs);
   const netApyWad = legs === null || grossApyWad === null ? null : netApyOf(legs, grossApyWad);
   const yieldSources = legs === null ? [] : yieldSourcesOf(legs);
