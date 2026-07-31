@@ -63,8 +63,10 @@ import type { SandboxChain } from "../../src/server/sandbox/execute-step";
 import {
   captureSessionSnapshot,
   spawnSessionFork,
+  rpcCall,
   type ForkSessionConfig,
 } from "../../src/server/sandbox/fork-session";
+import { SANDBOX_RPC_REQUEST_TIMEOUT_MS, withDeadline } from "../../src/server/sandbox/deadlines";
 import { createSandboxCaller, type SandboxContext } from "../../src/server/trpc/sandbox-router";
 import { SESSION_UPSTREAM_URL } from "./anvil";
 import { assertSharedUpstreamPristine, hexWord, record } from "./harness";
@@ -96,18 +98,13 @@ const FLAGSHIP_STEP_COUNT = 13;
 
 const LP_ABI = parseAbi(["function getTotalPooledEther() view returns (uint256)"]);
 
-let rpcId = 0;
+/**
+ * Every probe this suite makes is BOUNDED, by the one helper that threads `deadlines.ts` onto
+ * the socket. A second copy is how the bound goes missing (the round-4 and round-5 lesson: the
+ * duplicate IS the bug), so this file owns no fetch of its own.
+ */
 async function rpcAt<T>(url: string, method: string, params: readonly unknown[] = []): Promise<T> {
-  const res = await fetch(url, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ jsonrpc: "2.0", id: (rpcId += 1), method, params }),
-  });
-  const body = (await res.json()) as { result?: T; error?: { message?: string } };
-  if (body.error !== undefined) {
-    throw new Error(`${method} failed: ${body.error.message ?? "rpc error"}`);
-  }
-  return body.result as T;
+  return rpcCall<T>(url, method, params, SANDBOX_RPC_REQUEST_TIMEOUT_MS);
 }
 
 const blockNumberAt = async (url: string): Promise<bigint> =>
@@ -198,18 +195,26 @@ async function replayRevertAt(url: string, txHash: Hex, minedBlock: bigint): Pro
   };
   const value = tx["value"] as string | undefined;
   if (value !== undefined && BigInt(value) > 0n) payload["value"] = value;
-  // Raw fetch: the error body IS the datum here, so `rpcAt`'s throw-on-error is wrong.
-  const res = await fetch(url, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({
-      jsonrpc: "2.0",
-      id: (rpcId += 1),
-      method: "eth_call",
-      params: [payload, `0x${(minedBlock - 1n).toString(16)}`],
-    }),
-  });
-  const body = (await res.json()) as { error?: { message?: string; data?: unknown } };
+  // The error body IS the datum here, so `rpcAt`'s throw-on-error is wrong — but needing a
+  // different result shape is not a licence to be unbounded, so it runs under the same policy.
+  const body = await withDeadline(
+    `eth_call revert replay against ${url}`,
+    SANDBOX_RPC_REQUEST_TIMEOUT_MS,
+    async (signal) => {
+      const res = await fetch(url, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          jsonrpc: "2.0",
+          id: 1,
+          method: "eth_call",
+          params: [payload, `0x${(minedBlock - 1n).toString(16)}`],
+        }),
+        signal,
+      });
+      return (await res.json()) as { error?: { message?: string; data?: unknown } };
+    },
+  );
   if (body.error === undefined) {
     throw new Error(`revert replay: ${txHash} succeeded at its parent block — no revert bytes`);
   }

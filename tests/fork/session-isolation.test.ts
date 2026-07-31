@@ -46,8 +46,10 @@ import {
   ForkIdentityMismatchError,
   captureSessionSnapshot,
   spawnSessionFork,
+  rpcCall,
   type ForkSessionConfig,
 } from "../../src/server/sandbox/fork-session";
+import { SANDBOX_RPC_REQUEST_TIMEOUT_MS } from "../../src/server/sandbox/deadlines";
 import { createSandboxCaller, type SandboxContext } from "../../src/server/trpc/sandbox-router";
 import { SESSION_UPSTREAM_URL } from "./anvil";
 import { assertSharedUpstreamPristine, record } from "./harness";
@@ -72,18 +74,13 @@ const config: ForkSessionConfig = {
   forkRetryBackoffMs: "2000",
 };
 
-let sessionRpcId = 0;
+/**
+ * Every probe this suite makes is BOUNDED, by the one helper that threads `deadlines.ts` onto
+ * the socket. A second copy is how the bound goes missing (the round-4 and round-5 lesson: the
+ * duplicate IS the bug), so this file owns no fetch of its own.
+ */
 async function rpcAt<T>(url: string, method: string, params: readonly unknown[] = []): Promise<T> {
-  const res = await fetch(url, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ jsonrpc: "2.0", id: (sessionRpcId += 1), method, params }),
-  });
-  const body = (await res.json()) as { result?: T; error?: { message?: string } };
-  if (body.error !== undefined) {
-    throw new Error(`${method} failed: ${body.error.message ?? "rpc error"}`);
-  }
-  return body.result as T;
+  return rpcCall<T>(url, method, params, SANDBOX_RPC_REQUEST_TIMEOUT_MS);
 }
 
 const blockNumberAt = async (url: string): Promise<bigint> =>

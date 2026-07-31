@@ -18,16 +18,19 @@ import type { AddressInfo } from "node:net";
 import { afterEach, describe, expect, it } from "vitest";
 import { DeadlineExceededError } from "./deadlines";
 import { rpcCall } from "./fork-session";
+import { assertSharedUpstreamPristine } from "../../../tests/fork/harness";
 
 /** Generous enough that a slow machine cannot trip it, small enough to keep the suite quick. */
 const WINDOW_MS = 300;
 
 let server: Server | null = null;
+let aborted = false;
 const sockets = new Set<{ destroy: () => void }>();
 
 afterEach(async () => {
   for (const socket of sockets) socket.destroy();
   sockets.clear();
+  aborted = false;
   const running = server;
   server = null;
   if (running !== null) await new Promise<void>((resolve) => running.close(() => resolve()));
@@ -35,8 +38,12 @@ afterEach(async () => {
 
 /** A server that accepts the request and never responds. */
 async function hungServer(): Promise<string> {
-  const created = createServer(() => {
-    // Deliberately no response: the request is read and then abandoned.
+  const created = createServer((req) => {
+    // Deliberately no response: the request is read and then abandoned. The close listener is
+    // what proves the caller tore the socket down at its deadline.
+    req.on("close", () => {
+      aborted = true;
+    });
   });
   created.on("connection", (socket) => sockets.add(socket));
   server = created;
@@ -107,6 +114,27 @@ describe("rpcCall — every fork RPC is bounded", () => {
     // One turn of the loop for the abort to reach the listener.
     await new Promise((resolve) => setTimeout(resolve, 100));
     expect(closed, "the aborted request never reached the server as closed").toBe(true);
+  });
+
+  /**
+   * …and the SUITE-SIDE wrapper inherits the bound (Codex W09 round-5 finding 2).
+   *
+   * `assertSharedUpstreamPristine` runs in before/after hooks against the one anvil whose
+   * documented failure mode is accepting connections and going silent — the worst possible
+   * place for an unbounded read, because a stalled hook holds the run open with no test to
+   * blame. It used to carry its own raw `fetch`; it now routes through `rpcCall`, and this
+   * drives the real exported wrapper at a stalled URL rather than re-testing the helper.
+   */
+  it("bounds the shared-upstream pristine probe, hooks and all", async () => {
+    const url = await hungServer();
+    const started = performance.now();
+    await expect(assertSharedUpstreamPristine("in a stalled hook", url, WINDOW_MS)).rejects.toThrow(
+      /is not answering within its bound/,
+    );
+    expect(performance.now() - started).toBeLessThan(WINDOW_MS * 10);
+    // One turn of the loop for the abort to reach the listener: the socket is released too.
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    expect(aborted, "the pristine probe's stalled request was never torn down").toBe(true);
   });
 
   it("still returns a normal result when the upstream answers", async () => {

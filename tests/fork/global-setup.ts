@@ -170,17 +170,9 @@ async function startSharedSessionUpstream(
   };
 }
 
-async function rpc(method: string, params: readonly unknown[] = []): Promise<unknown> {
-  const res = await fetch(ANVIL_URL, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ jsonrpc: "2.0", id: 1, method, params }),
-  });
-  const body = (await res.json()) as { result?: unknown; error?: { message?: string } };
-  if (body.error !== undefined) {
-    throw new Error(`${method}: ${body.error.message ?? "rpc error"}`);
-  }
-  return body.result;
+/** The primary anvil's probe — the same bounded helper, no second fetch anywhere. */
+async function rpc<T>(method: string, params: readonly unknown[] = []): Promise<T> {
+  return rpcCall<T>(ANVIL_URL, method, params, SANDBOX_RPC_REQUEST_TIMEOUT_MS);
 }
 
 const RESET_ATTEMPTS = 5;
@@ -215,10 +207,10 @@ export default async function globalSetup(): Promise<() => Promise<void>> {
     // free-tier endpoint answers with a rate-limit error. A reset is idempotent, so a
     // second attempt is the same request rather than a different one.
     await resetWithRetry();
-    const pinned = (await rpc("eth_getBlockByNumber", [
+    const pinned = await rpc<{ hash?: string } | null>("eth_getBlockByNumber", [
       `0x${PINNED_BLOCK.toString(16)}`,
       false,
-    ])) as { hash?: string } | null;
+    ]);
     if (pinned === null || pinned.hash !== readsMeta.pinned_block.hash) {
       throw new Error(
         `external anvil fork identity mismatch at ${PINNED_BLOCK}: ${pinned?.hash ?? "null"}`,
@@ -314,7 +306,7 @@ export default async function globalSetup(): Promise<() => Promise<void>> {
       throw new Error(`anvil readiness timeout after ${READY_TIMEOUT_MS}ms: ${stderrTail}`);
     }
     try {
-      await rpc("eth_blockNumber");
+      await rpc<string>("eth_blockNumber");
       ready = true;
     } catch {
       await new Promise((r) => setTimeout(r, 500));
@@ -323,10 +315,10 @@ export default async function globalSetup(): Promise<() => Promise<void>> {
 
   // Fork identity: the pinned block must carry the recorded hash, or every
   // downstream assertion would be measured against the wrong history.
-  const pinned = (await rpc("eth_getBlockByNumber", [
+  const pinned = await rpc<{ hash?: string } | null>("eth_getBlockByNumber", [
     `0x${PINNED_BLOCK.toString(16)}`,
     false,
-  ])) as { hash?: string } | null;
+  ]);
   const expectedHash = readsMeta.pinned_block.hash;
   if (pinned === null || pinned.hash !== expectedHash) {
     child.kill();

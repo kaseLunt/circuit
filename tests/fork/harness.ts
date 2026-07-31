@@ -4,6 +4,8 @@
  */
 import type { Address, Hex } from "viem";
 import { PINNED_BLOCK } from "../helpers/protocol-reads";
+import { SANDBOX_RPC_REQUEST_TIMEOUT_MS, withDeadline } from "../../src/server/sandbox/deadlines";
+import { rpcCall } from "../../src/server/sandbox/fork-session";
 import { ANVIL_URL, SESSION_UPSTREAM_URL } from "./anvil";
 
 export interface RawLog {
@@ -30,19 +32,13 @@ export class TxRevertedError extends Error {
   }
 }
 
-let rpcId = 0;
-
+/**
+ * Every fork RPC in this suite is BOUNDED, and it is bounded by the one helper that already
+ * threads `deadlines.ts` onto the socket. A second copy is how the bound goes missing — the
+ * duplicate IS the bug — so this suite owns no fetch of its own.
+ */
 export async function rpc<T>(method: string, params: readonly unknown[] = []): Promise<T> {
-  const res = await fetch(ANVIL_URL, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ jsonrpc: "2.0", id: (rpcId += 1), method, params }),
-  });
-  const body = (await res.json()) as { result?: T; error?: { message?: string } };
-  if (body.error !== undefined) {
-    throw new Error(`${method} failed: ${body.error.message ?? "rpc error"}`);
-  }
-  return body.result as T;
+  return rpcCall<T>(ANVIL_URL, method, params, SANDBOX_RPC_REQUEST_TIMEOUT_MS);
 }
 
 /**
@@ -109,32 +105,26 @@ export function record(line: string): void {
  * Not a mining check on the suite's own session forks: those are children, they mine freely,
  * and that is what they are for. This is about the thing they all fork FROM.
  */
-export async function assertSharedUpstreamPristine(when: string): Promise<void> {
+export async function assertSharedUpstreamPristine(
+  when: string,
+  url: string = SESSION_UPSTREAM_URL,
+  timeoutMs: number = SANDBOX_RPC_REQUEST_TIMEOUT_MS,
+): Promise<void> {
   let head: bigint;
   try {
-    head = BigInt(
-      await (async () => {
-        const res = await fetch(SESSION_UPSTREAM_URL, {
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "eth_blockNumber", params: [] }),
-        });
-        const body = (await res.json()) as { result?: string };
-        if (typeof body.result !== "string") throw new Error("no block number in the response");
-        return body.result;
-      })(),
-    );
+    head = BigInt(await rpcCall<string>(url, "eth_blockNumber", [], timeoutMs));
   } catch (error) {
     throw new Error(
-      `the shared pristine session upstream at ${SESSION_UPSTREAM_URL} is not answering ` +
+      `the shared pristine session upstream at ${url} is not answering within its bound ` +
         `(${when}). tests/fork/global-setup.ts boots it once per vitest invocation — including ` +
         "single-file runs — so this usually means FORK_RPC_URL was unset or its boot failed. " +
-        `Cause: ${String(error)}`,
+        "The probe is bounded on purpose: this upstream's documented failure mode is accepting " +
+        `connections and going silent, which an unbounded read would wait on forever. Cause: ${String(error)}`,
     );
   }
   if (head !== PINNED_BLOCK) {
     throw new Error(
-      `the shared pristine session upstream at ${SESSION_UPSTREAM_URL} has head ${head}, not ` +
+      `the shared pristine session upstream at ${url} has head ${head}, not ` +
         `the pin ${PINNED_BLOCK} (${when}) — something mined on it. A moved head re-arms the ` +
         "anvil historical-state wedge, which presents as silent unresponsiveness rather than " +
         "as an error; see tests/fork/anvil.ts.",
@@ -208,17 +198,28 @@ export async function replayRevert(txHash: Hex): Promise<string | null> {
   };
   const value = tx["value"] as string | undefined;
   if (value !== undefined && BigInt(value) > 0n) payload["value"] = value;
-  const res = await fetch(ANVIL_URL, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({
-      jsonrpc: "2.0",
-      id: (rpcId += 1),
-      method: "eth_call",
-      params: [payload, hexQuantity(parent)],
-    }),
-  });
-  const body = (await res.json()) as { error?: { message?: string; data?: unknown } };
+  // The ONE call that cannot go through `rpcCall`: it wants the ERROR body (the revert
+  // payload), which a result-returning helper throws away. It is still bounded by the same
+  // policy — the signal on the socket and the parse inside the deadline — because "needs a
+  // different result shape" is not a licence to be unbounded.
+  const body = await withDeadline(
+    `eth_call revert replay against ${ANVIL_URL}`,
+    SANDBOX_RPC_REQUEST_TIMEOUT_MS,
+    async (signal) => {
+      const res = await fetch(ANVIL_URL, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          jsonrpc: "2.0",
+          id: 1,
+          method: "eth_call",
+          params: [payload, hexQuantity(parent)],
+        }),
+        signal,
+      });
+      return (await res.json()) as { error?: { message?: string; data?: unknown } };
+    },
+  );
   if (body.error === undefined) return null;
   const d = body.error.data;
   if (typeof d === "string") return d;
