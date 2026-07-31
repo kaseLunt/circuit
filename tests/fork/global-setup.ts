@@ -112,33 +112,56 @@ async function startSharedSessionUpstream(
     }
   });
 
-  await pollUntilReady({
-    what: `shared session upstream readiness at ${SESSION_UPSTREAM_URL}`,
-    budgetMs: READY_TIMEOUT_MS,
-    intervalMs: UPSTREAM_READY_PROBE_INTERVAL_MS,
-    requestTimeoutMs: SANDBOX_RPC_REQUEST_TIMEOUT_MS,
-    probe: () => rpcAtUrl<string>(SESSION_UPSTREAM_URL, "eth_blockNumber"),
-    fatal: () => failure,
-    onTimeout: () =>
-      new Error(
-        `the shared session upstream was not ready after ${READY_TIMEOUT_MS}ms: ${stderrTail}`,
-      ),
-  });
-
-  await assertPristine(SESSION_UPSTREAM_URL, "at boot");
-  const pinned = await rpcAtUrl<{ hash?: string } | null>(
-    SESSION_UPSTREAM_URL,
-    "eth_getBlockByNumber",
-    [`0x${PINNED_BLOCK.toString(16)}`, false],
-  );
-  if (pinned === null || pinned.hash !== readsMeta.pinned_block.hash) {
+  /**
+   * OWNERSHIP STARTS AT THE SPAWN, not at the successful return.
+   *
+   * Every check below can throw with the anvil ALIVE — a readiness timeout, a boot-pristine
+   * violation, an identity mismatch, a 429 that kills the child mid-probe. vitest does not call
+   * the teardown of a `globalSetup` that threw, and there is no handle to call it with anyway,
+   * so anything left running here survives the run and holds :9639 against the NEXT one — which
+   * then finds a stale anvil answering its readiness probe while its own spawn fails silently.
+   * That is a contaminated run reported as a mysterious failure, which is precisely the class of
+   * defect this consolidation exists to remove. So the whole initialization is bracketed and the
+   * process is collected on every path out that is not success.
+   */
+  const retire = async (): Promise<void> => {
     tearingDown = true;
-    await tracker.destroy(10_000);
-    throw new Error(
-      `shared session upstream identity mismatch at ${PINNED_BLOCK}: ` +
-        `${pinned?.hash ?? "null"} != ${readsMeta.pinned_block.hash}`,
+    await tracker.destroy(10_000).catch(() => undefined);
+    logStream.end();
+  };
+
+  let initialized = false;
+  try {
+    await pollUntilReady({
+      what: `shared session upstream readiness at ${SESSION_UPSTREAM_URL}`,
+      budgetMs: READY_TIMEOUT_MS,
+      intervalMs: UPSTREAM_READY_PROBE_INTERVAL_MS,
+      requestTimeoutMs: SANDBOX_RPC_REQUEST_TIMEOUT_MS,
+      probe: () => rpcAtUrl<string>(SESSION_UPSTREAM_URL, "eth_blockNumber"),
+      fatal: () => failure,
+      onTimeout: () =>
+        new Error(
+          `the shared session upstream was not ready after ${READY_TIMEOUT_MS}ms: ${stderrTail}`,
+        ),
+    });
+
+    await assertPristine(SESSION_UPSTREAM_URL, "at boot");
+    const pinned = await rpcAtUrl<{ hash?: string } | null>(
+      SESSION_UPSTREAM_URL,
+      "eth_getBlockByNumber",
+      [`0x${PINNED_BLOCK.toString(16)}`, false],
     );
+    if (pinned === null || pinned.hash !== readsMeta.pinned_block.hash) {
+      throw new Error(
+        `shared session upstream identity mismatch at ${PINNED_BLOCK}: ` +
+          `${pinned?.hash ?? "null"} != ${readsMeta.pinned_block.hash}`,
+      );
+    }
+    initialized = true;
+  } finally {
+    if (!initialized) await retire();
   }
+
   process.stdout.write(
     `shared pristine session upstream ready at ${SESSION_UPSTREAM_URL}, pinned to ${PINNED_BLOCK}\n`,
   );
@@ -150,8 +173,7 @@ async function startSharedSessionUpstream(
       try {
         await assertPristine(SESSION_UPSTREAM_URL, "at teardown");
       } finally {
-        tearingDown = true;
-        await tracker.destroy(10_000);
+        await retire();
       }
     },
   };
@@ -335,12 +357,26 @@ export default async function globalSetup(): Promise<() => Promise<void>> {
   }
 
   return async () => {
-    // Forensics escape hatch: ANVIL_KEEP=1 leaves the fork running after a
-    // failed run so the reverted tx can be traced with `cast run`.
+    /**
+     * Forensics escape hatch: ANVIL_KEEP=1 leaves the FLAGSHIP fork running after a failed run
+     * so the reverted tx can be traced with `cast run`.
+     *
+     * The shared session upstream is retired anyway, and the asymmetry is the point. What
+     * ANVIL_KEEP preserves is MINED state — the flagship's fork carries the transactions the
+     * run executed, and that history is the artifact; it cannot be reconstructed by re-forking.
+     * The shared upstream is pristine by design: it holds nothing any run put there, so there
+     * is nothing to inspect, and re-forking the pin reproduces it byte for byte at any time.
+     * Keeping it would trade zero forensic value for a stale process holding :9639 against the
+     * next run — the exact contamination the ownership bracket above exists to prevent.
+     */
     if (process.env.ANVIL_KEEP === "1") {
-      child.stdout?.destroy();
-      child.stderr?.destroy();
-      child.unref();
+      try {
+        await shared.teardown();
+      } finally {
+        child.stdout?.destroy();
+        child.stderr?.destroy();
+        child.unref();
+      }
       return;
     }
     // The pristine claim first: it is a statement about what the RUN did, and it has to be

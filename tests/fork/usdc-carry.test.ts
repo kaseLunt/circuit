@@ -50,6 +50,8 @@ import { PINNED_BLOCK, readsMeta } from "../helpers/protocol-reads";
 import { FORK_PROVEN_CARRY_BPS, carryGraph, flagshipGraph } from "../helpers/graphs";
 import { encodeShareGraph } from "../../src/lib/share/encode";
 import { borrowLimitVerdict } from "../../src/core/borrow-limit";
+import type { StrategyGraph } from "../../src/core/graph";
+import type { ChainSnapshot } from "../../src/core/plan";
 import { decodeRevert } from "../../src/core/errors";
 import { riskLedger } from "../../src/core/risk";
 import { hfWadValue } from "../../src/core/health-factor";
@@ -129,6 +131,46 @@ const OVER_CEILING_BPS = 7750;
 const CEILING_HEADROOM_BASE = 192_386_647n;
 const OVER_CEILING_EXCESS_BASE = 97n;
 
+/**
+ * The deliberate supply→borrow gap the pacing drill forces open.
+ *
+ * The reviewer measured that ~6 seconds is already enough to cross the ceil step CI hit. Ten
+ * minutes is chosen instead so the divergence is structural rather than marginal: the drill
+ * asserts the advance MOVED the prediction, and a value that only sometimes moves it would
+ * make that assertion the flaky one.
+ */
+const PACING_ADVANCE_SECONDS = 600;
+/** How far past the snapshot the client-side search for a ceil-step flip looks. */
+const PACING_SEARCH_SECONDS = 600;
+
+/** The at-ceiling debt the client predicts if the borrow mines `offset` seconds past the pin. */
+function debtAtOffset(graph: StrategyGraph, snapshot: ChainSnapshot, offset: number): bigint | null {
+  const verdict = borrowLimitVerdict(graph, {
+    ...snapshot,
+    blockTimestamp: snapshot.blockTimestamp + BigInt(offset),
+  });
+  return verdict.status === "within" ? verdict.ceiling.debtBase : null;
+}
+
+/**
+ * The first second past the pin at which the predicted debt LEAVES its snapshot-time value.
+ *
+ * Pure and chain-free: it re-asks `borrow-limit.ts` the same question at shifted clocks. Its
+ * existence is the proof that comparing a chain reading against a snapshot-time prediction was
+ * unsound — the very defect CI surfaced as `expected 1490804431502n to be 1490804431402n`.
+ */
+function firstOffsetMovingPredictedDebt(
+  graph: StrategyGraph,
+  snapshot: ChainSnapshot,
+  baseline: bigint,
+): number | null {
+  for (let offset = 1; offset <= PACING_SEARCH_SECONDS; offset += 1) {
+    const debt = debtAtOffset(graph, snapshot, offset);
+    if (debt !== null && debt !== baseline) return offset;
+  }
+  return null;
+}
+
 /** Balance-mapping scan bound, the `findAllowanceSlotAt` discipline. */
 const BALANCE_SCAN_SLOTS = 32n;
 /** Pre-existing USDC seeded on the actor, in the reserve's own six-decimal units. */
@@ -193,6 +235,21 @@ async function allowanceAt(
       encodeFunctionData({ abi: ABI.erc20, functionName: "allowance", args: [owner, spender] }),
     ),
   );
+}
+
+/**
+ * The timestamp a block was mined at — the instant the pool's index accrual stopped at for
+ * every figure `getUserAccountData` reports in that block.
+ */
+async function blockTimestampAt(url: string, block: bigint): Promise<bigint> {
+  const header = await rpcAt<{ timestamp?: string } | null>(url, "eth_getBlockByNumber", [
+    hexQuantity(block),
+    false,
+  ]);
+  if (header === null || header.timestamp === undefined) {
+    throw new Error(`block ${block} has no header on this fork`);
+  }
+  return BigInt(header.timestamp);
 }
 
 async function userAccountDataAt(
@@ -677,8 +734,14 @@ describe("W09 fork gate — the USDC carry on the real session composition", () 
    *
    * A FRESH SESSION, for the reason every drill here takes one: an earlier drill's collateral
    * or debt would move the very ceiling this one is testing.
+   *
+   * RUN TWICE, at two pacings. `advanceBeforeBorrowSeconds` puts a deliberate gap between the
+   * supply and the borrow, which is the freedom CI exposed: the chain accrues its indexes to
+   * the block the borrow actually MINED in, and that timestamp is a property of the runner's
+   * speed, not of the pinned block. A drill that only ever ran at laptop pacing proved the
+   * gate for laptop pacing.
    */
-  it("executes and settles the carry at exactly the ceiling — the last allocation the chain admits", async () => {
+  async function ceilingDrill(advanceBeforeBorrowSeconds: number): Promise<void> {
     const { key, session } = await createSession();
     const url = session.fork.rpcUrl;
     const snapshot = await captureSessionSnapshot(session.fork, session.actor);
@@ -739,6 +802,9 @@ describe("W09 fork gate — the USDC carry on the real session composition", () 
     let borrowedWei = 0n;
     let borrowBlock = 0n;
     for (let index = 0; index < CARRY_STEP_COUNT; index += 1) {
+      if (index === CARRY_STEP_COUNT - 1 && advanceBeforeBorrowSeconds > 0) {
+        await rpcAt(url, "evm_increaseTime", [advanceBeforeBorrowSeconds]);
+      }
       const outcome = await caller.executeStep({ sessionKey: key, planHash, stepIndex: index });
       if (!outcome.ok) throw new Error(`executeStep refused: ${JSON.stringify(outcome.refusal)}`);
       // SETTLED, not merely sent: the ceiling's borrow mines and attributes, or this drill
@@ -773,22 +839,109 @@ describe("W09 fork gate — the USDC carry on the real session composition", () 
     expect(borrowBlock).toBeGreaterThan(0n);
 
     /**
-     * THE LOAD-BEARING COMPARISON, at the borrow's OWN block.
+     * THE LOAD-BEARING COMPARISON, at the borrow's OWN block AND its own timestamp.
      *
-     * Read at `latest` this would be exact only by luck: `getUserAccountData` values debt
-     * through `getNormalizedDebt()`, which accrues with block timestamp, so one more mined
-     * block moves the figure and an equality would have to be softened into a tolerance. Pinned
-     * to the height the borrow settled at, the protocol's mint → read-back → base-conversion
-     * chain and `borrow-limit.ts`'s reproduction of it are evaluated over the same index, and
-     * EXACT equality is an honest claim rather than a lucky one.
+     * TWO FAMILIES OF CLAIM LIVE IN THIS DRILL, and they are exact about different things.
+     *
+     *  1. SNAPSHOT-TIME, above: `CEILING_HEADROOM_BASE` and `OVER_CEILING_EXCESS_BASE` are
+     *     pure functions of the fixed base block. They are pinned as literals because
+     *     `borrowLimitVerdict` over the pinned snapshot is deterministic — same block, same
+     *     reads, same integer arithmetic, byte-stable on every machine forever.
+     *  2. MINE-TIME, here: the CHAIN's figures are not functions of the base block. The pool
+     *     accrues `variableBorrowIndex` to the timestamp of the block the borrow actually
+     *     mined in, and that timestamp is a property of anvil's pacing — it differs between a
+     *     laptop and a CI runner. Comparing a chain reading against a snapshot-time prediction
+     *     is therefore comparing two different instants, and the drill did exactly that until
+     *     CI caught it (run 30599730169: expected 1490804431502 to be 1490804431402).
+     *
+     * WHY THE DELTA IS 100 AND NOT SOMETHING CONTINUOUS. The debt round trip is
+     * `rayMulCeil(rayDivCeil(borrowWei, i), i)` — it returns `borrowWei` when `borrowWei·RAY`
+     * divides evenly by the index and `borrowWei + 1` wei otherwise, and which of the two
+     * happens flips with `i`. One USDC wei is `mulDivCeil(1, priceBase, 1e6)` ≈ 100 base units,
+     * so the whole disagreement is ONE rounding step of the ceil chain, quantised at 100. That
+     * is a real property of the protocol's arithmetic, not noise — which is why the answer is
+     * to evaluate the prediction at the right instant rather than to widen the bound.
+     *
+     * THE FIX REUSES ONE DEFINITION. Re-running `borrowLimitVerdict` over a snapshot whose
+     * `blockTimestamp` IS the receipt block's timestamp makes `reserveValuationOf` accrue both
+     * indexes through `accruedVariableBorrowIndexRay`/`accruedLiquidityIndexRay` — the same
+     * accrual the production ceiling already performs. The drill re-derives no math of its own;
+     * it moves the clock and asks the same function again.
      */
+    const minedAt = await blockTimestampAt(url, borrowBlock);
+    expect(minedAt).toBeGreaterThanOrEqual(snapshot.blockTimestamp);
+    const atMine = borrowLimitVerdict(atCeiling, { ...snapshot, blockTimestamp: minedAt });
+    if (atMine.status !== "within") {
+      throw new Error(`the at-ceiling carry is not within at the mine timestamp: ${atMine.status}`);
+    }
+    const settled = atMine.ceiling;
+
     const account = await userAccountDataAt(url, snapshot.pool, session.actor, borrowBlock);
-    // EXACT, to the base unit, on both sides of the ledger the ceiling is computed from.
-    expect(account.debtBase).toBe(predicted.debtBase);
-    expect(account.collateralBase).toBe(predicted.collateralBase);
-    // …and the chain's OWN headroom figure is the pinned margin — `percentMul(collateral,
-    // ltv) - debt` computed by GenericLogic, not by us, landing on the same 192,386,647.
-    expect(account.availableBorrowsBase).toBe(CEILING_HEADROOM_BASE);
+
+    /**
+     * THE DEBT IS THE EXACT CLAIM, and it is the one that decides the boundary.
+     *
+     * It is also the only side fully modelled: the borrow MINTS its scaled debt and
+     * `getUserAccountData` READS it back inside one block, so `protocolDebtBaseOf`'s
+     * single-index round trip is precisely what the chain did. Evaluated at the mine
+     * timestamp, the two are the same computation over the same index.
+     */
+    expect(account.debtBase).toBe(settled.debtBase);
+
+    /**
+     * THE COLLATERAL IS DIRECTIONAL, and that is a modelling fact rather than a softened gate.
+     *
+     * A SECOND freedom lives here, distinct from the one CI caught, and a deliberate one-hour
+     * pacing injection surfaced it: the chain mints the aToken at the SUPPLY block's index and
+     * reads it back at the BORROW block's index, while `protocolCollateralBaseOf` mints and
+     * reads at ONE index — so its round trip cancels and its collateral is index-independent by
+     * construction. The gap is the interest earned across the plan's own execution window
+     * (measured: +58 base units per hour here, ~1 unit per minute of window). That is not a
+     * defect in the ceiling: it is computed BEFORE any step runs, when the steps are
+     * contemporaneous by definition. Closing it in this drill would mean writing a two-index
+     * aToken model in a test — re-deriving the protocol math the module under test exists to own.
+     *
+     * So the claim is the one that carries the safety argument: interest is monotone, and the
+     * client must never predict MORE collateral than the chain holds, because that is the
+     * direction in which "within" would stop implying "accepted". The chain having more is the
+     * borrower's own accrued interest and is always safe.
+     *
+     * Left as an equality this would have been the same class of latent CI failure the debt side
+     * just was — ~1 unit per minute of supply→borrow window, and CI's pacing is exactly what is
+     * slow. Both figures are recorded, so a run where the window grows says so in its receipt.
+     */
+    expect(account.collateralBase).toBeGreaterThanOrEqual(settled.collateralBase);
+    expect(account.availableBorrowsBase).toBeGreaterThanOrEqual(
+      settled.ceilingBase - settled.debtBase,
+    );
+    /**
+     * THE FREEDOM IS REAL, proven deterministically rather than hoped for from the chain.
+     *
+     * The obvious assertion — "a big advance moves the predicted debt" — is itself flaky, and
+     * finding that out is half the lesson. `rayMulCeil(rayDivCeil(x, i), i)` returns `x` when
+     * `x·RAY` divides evenly by the index and `x + 1` otherwise, so the step is SPORADIC in
+     * `i`: most offsets leave the integer alone (a 600s advance here does), and only some flip
+     * it. That is precisely why the old snapshot-time comparison passed on a laptop for weeks
+     * and then failed on a CI runner — nobody had rolled the right dice yet.
+     *
+     * So the drill searches the offsets CLIENT-SIDE, over the same pinned snapshot, with no
+     * chain calls: if an instant exists within a few minutes at which the prediction moves,
+     * the old gate was unsound and the new one is load-bearing. Deterministic, and it names
+     * the offset in the receipt.
+     */
+    if (advanceBeforeBorrowSeconds > 0) {
+      const flip = firstOffsetMovingPredictedDebt(atCeiling, snapshot, predicted.debtBase);
+      expect(
+        flip,
+        `no offset within ${PACING_SEARCH_SECONDS}s moves the predicted debt — the ceil step ` +
+          "this drill exists to model would be unreachable",
+      ).not.toBeNull();
+      record(
+        `pacing: the predicted debt first moves at +${flip}s ` +
+          `(${predicted.debtBase} → ${debtAtOffset(atCeiling, snapshot, flip!)}), and the gate ` +
+          `held at the realized +${minedAt - snapshot.blockTimestamp}s`,
+      );
+    }
     // The debt is REAL and the position is not liquidatable: the LTV line the borrow just
     // cleared sits below the LT line, so the ceiling is a borrowing limit and not a
     // liquidation. The two windows stay distinct here as well as in the refusal below.
@@ -853,16 +1006,46 @@ describe("W09 fork gate — the USDC carry on the real session composition", () 
     expect(after.debtBase).toBeLessThan(account.debtBase + account.availableBorrowsBase);
 
     record(
-      `ceiling receipt: allocation ${CEILING_BPS} SETTLED at block ${borrowBlock} — borrowed ` +
-        `${borrowedWei} USDC; chain debtBase ${account.debtBase} == predicted ` +
-        `${predicted.debtBase} (delta ${account.debtBase - predicted.debtBase}), collateral ` +
-        `${account.collateralBase}, ceiling ${predicted.ceilingBase}, chain headroom ` +
-        `${account.availableBorrowsBase}, HF ${account.healthFactor}; one bp more predicts ` +
+      `ceiling receipt [advance ${advanceBeforeBorrowSeconds}s]: allocation ${CEILING_BPS} ` +
+        `SETTLED at block ${borrowBlock} ` +
+        `(ts ${minedAt}, +${minedAt - snapshot.blockTimestamp}s past the snapshot) — borrowed ` +
+        `${borrowedWei} USDC; chain debtBase ${account.debtBase} == predicted@mine ` +
+        `${settled.debtBase} (delta ${account.debtBase - settled.debtBase}); ` +
+        `predicted@snapshot ${predicted.debtBase}, so the accrual step is ` +
+        `${settled.debtBase - predicted.debtBase} base units; collateral ` +
+        `${account.collateralBase} (snapshot-time ${predicted.collateralBase}, mine-time ` +
+        `${settled.collateralBase}), mine-time ceiling ${settled.ceilingBase}, chain headroom ` +
+        `${account.availableBorrowsBase}, HF ${account.healthFactor}; snapshot-time headroom ` +
+        `${predicted.ceilingBase - predicted.debtBase} and one bp more predicts ` +
         `${overVerdict.ceiling.debtBase} = ceiling + ` +
         `${overVerdict.ceiling.debtBase - overVerdict.ceiling.ceilingBase}; +${overshootWei} ` +
         `USDC on the settled position reverts ${refused.raw}`,
     );
     await closeSession(key);
+  }
+
+  it("executes and settles the carry at exactly the ceiling — the last allocation the chain admits", async () => {
+    await ceilingDrill(0);
+  });
+
+  /**
+   * THE PACING FALSIFICATION, made permanent (Codex W09 round-3 finding 1).
+   *
+   * CI failed this gate where a laptop passed it: the runner's slower step pacing pushed the
+   * borrow's mine timestamp far enough past the snapshot that the debt round trip crossed one
+   * ceil step — `expected 1490804431502n to be 1490804431402n`, exactly 100 base units, which
+   * is one USDC wei valued at the oracle price. The gate was comparing a chain reading against
+   * a prediction evaluated at a DIFFERENT instant, and only pacing luck had hidden it.
+   *
+   * So the drill now runs a second time with the freedom forced open: a deliberate advance
+   * before the borrow, large enough that the divergence is guaranteed rather than hoped for.
+   * The run asserts the advance MOVED the prediction (or the drill would prove nothing) and
+   * that the timestamp-adjusted prediction still matches the chain to the base unit. A
+   * regression that reverted to snapshot-time comparison fails here on every machine, instead
+   * of only on the slow ones.
+   */
+  it("holds the same exact gate when the borrow mines long after the snapshot (CI pacing)", async () => {
+    await ceilingDrill(PACING_ADVANCE_SECONDS);
   });
 
   /**
