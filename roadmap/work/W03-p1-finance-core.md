@@ -40,7 +40,7 @@ deliverables:
   - package.json
   - .github/workflows/ci.yml
 evidence_receipts:
-  - roadmap/evidence/E-W03-p1-finance-core-r5.md
+  - roadmap/evidence/E-W03-p1-finance-core-r6.md
 invalidated_by:
   - SPEC.md
   - TRANSPLANT.md
@@ -57,7 +57,7 @@ invalidated_by:
   - package.json
 review_when: event:invalidated-by-change
 updated: 2026-07-25
-evidence_fingerprint: sha256:6de2031ddb13b6209639d9dc1f6bb9133524bb2cb0209ba68ba28ab732fa4899
+evidence_fingerprint: sha256:4b410d2a11d813aca849c4a36bc8afd9badbd60862b5232be5575bcb2d6f14b6
 ---
 
 # W03 — P1 finance core on a fork, headless

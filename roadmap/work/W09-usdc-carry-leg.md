@@ -3,7 +3,7 @@ id: W09
 type: work
 title: USDC carry leg — uncorrelated borrow, eMode constraint, second template
 phase: P3
-status: active
+status: achieved
 evidence_target: usdc-carry-template-fork-proven-with-emode-constraint
 priority: 2
 depends_on: [W08]
@@ -29,12 +29,14 @@ deliverables:
   - src/core/plan.ts
   - src/core/borrow-limit.ts
   - docs/protocol-matrix.md
-evidence_receipts: []
+evidence_receipts:
+  - roadmap/evidence/E-W09-usdc-carry-leg.md
 invalidated_by:
   - SPEC.md
   - src/core/**
 review_when: event:invalidated-by-change
-updated: 2026-07-30
+updated: 2026-07-31
+evidence_fingerprint: sha256:5c9e63060295d85bfd214aa93e1b6e5e7a3c689e6cd9265c30f2ce4ebace0c8f
 ---
 
 # W09 — USDC carry leg

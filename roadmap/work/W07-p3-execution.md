@@ -55,7 +55,7 @@ deliverables:
   - SPEC.md
   - .github/workflows/ci.yml
 evidence_receipts:
-  - roadmap/evidence/E-W07-p3-execution-r2.md
+  - roadmap/evidence/E-W07-p3-execution-r3.md
 invalidated_by:
   - SPEC.md
   - src/core/**
@@ -70,7 +70,7 @@ invalidated_by:
   - package.json
 review_when: phase:P3:exit
 updated: 2026-07-26
-evidence_fingerprint: sha256:a3e0aae3f10f3d96fd68236e50089efbdfa1704b2cc7adc0bd6d9b77f7dcc4ed
+evidence_fingerprint: sha256:6bf9dea2ebbdacf5773710cab6694ceb53fb94cd55fa1558918f457640146a77
 ---
 
 # W07 — P3a execution

@@ -1,12 +1,12 @@
 ---
 active_phase: P3
-active_task: W09
+active_task: none
 project_state: active
 writer_mode: serial
 parallel_readers: allowed
 enforcement: bootstrap
 enforcement_evidence: []
-updated: 2026-07-30
+updated: 2026-07-31
 ---
 
 # STATUS — integration pointer
