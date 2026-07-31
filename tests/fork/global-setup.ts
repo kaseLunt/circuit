@@ -20,24 +20,12 @@ import { PINNED_BLOCK, readsMeta } from "../helpers/protocol-reads";
 import { sessionAnvilArgs } from "../../src/server/sandbox/anvil-args";
 import { trackProcessExit, type ProcessExitTracker } from "../../src/server/sandbox/process-exit";
 import { SANDBOX_RPC_REQUEST_TIMEOUT_MS, pollUntilReady } from "../../src/server/sandbox/deadlines";
+import { rpcCall } from "../../src/server/sandbox/fork-session";
 import { ANVIL_URL, SESSION_UPSTREAM_URL } from "./anvil";
 
 const READY_TIMEOUT_MS = 120_000;
 const UPSTREAM_READY_PROBE_INTERVAL_MS = 500;
 
-let upstreamRpcId = 0;
-async function rpcAtUrl<T>(url: string, method: string, params: readonly unknown[] = []): Promise<T> {
-  const res = await fetch(url, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ jsonrpc: "2.0", id: (upstreamRpcId += 1), method, params }),
-  });
-  const body = (await res.json()) as { result?: T; error?: { message?: string } };
-  if (body.error !== undefined) {
-    throw new Error(`${method} failed: ${body.error.message ?? "rpc error"}`);
-  }
-  return body.result as T;
-}
 
 /**
  * THE PRISTINE INVARIANT, stated in one place so both ends of the run say the same sentence.
@@ -49,7 +37,9 @@ async function rpcAtUrl<T>(url: string, method: string, params: readonly unknown
  * convention into a checked claim.
  */
 async function assertPristine(url: string, when: string): Promise<void> {
-  const head = BigInt(await rpcAtUrl<string>(url, "eth_blockNumber"));
+  const head = BigInt(
+    await rpcCall<string>(url, "eth_blockNumber", [], SANDBOX_RPC_REQUEST_TIMEOUT_MS),
+  );
   if (head !== PINNED_BLOCK) {
     throw new Error(
       `the shared pristine session upstream at ${url} has head ${head}, not the pin ` +
@@ -137,7 +127,7 @@ async function startSharedSessionUpstream(
       budgetMs: READY_TIMEOUT_MS,
       intervalMs: UPSTREAM_READY_PROBE_INTERVAL_MS,
       requestTimeoutMs: SANDBOX_RPC_REQUEST_TIMEOUT_MS,
-      probe: () => rpcAtUrl<string>(SESSION_UPSTREAM_URL, "eth_blockNumber"),
+      probe: (windowMs) => rpcCall<string>(SESSION_UPSTREAM_URL, "eth_blockNumber", [], windowMs),
       fatal: () => failure,
       onTimeout: () =>
         new Error(
@@ -146,10 +136,11 @@ async function startSharedSessionUpstream(
     });
 
     await assertPristine(SESSION_UPSTREAM_URL, "at boot");
-    const pinned = await rpcAtUrl<{ hash?: string } | null>(
+    const pinned = await rpcCall<{ hash?: string } | null>(
       SESSION_UPSTREAM_URL,
       "eth_getBlockByNumber",
       [`0x${PINNED_BLOCK.toString(16)}`, false],
+      SANDBOX_RPC_REQUEST_TIMEOUT_MS,
     );
     if (pinned === null || pinned.hash !== readsMeta.pinned_block.hash) {
       throw new Error(
