@@ -85,6 +85,7 @@ import {
   rayAprToApyWad,
   rayDivCeil,
   rayDivFloor,
+  terminalBorrowNetApyWad,
   trailingAprWad,
   vTokenBalance,
 } from "./rates";
@@ -1089,6 +1090,12 @@ function stakingAprOf(snapshot: ChainSnapshot): ProvenancedRate | null {
 /** The three rate legs §5.2 composes, present only when ALL of them are. */
 interface CompositionLegs {
   readonly bBps: number;
+  /**
+   * Whether the borrowed value returns as collateral — the loop's shape, and the only shape
+   * the `(1 + b)` leverage term describes. Read off the document's own flow graph, never off
+   * which template it came from.
+   */
+  readonly recycled: boolean;
   readonly stake: ProvenancedRate;
   readonly supply: ProvenancedRate;
   readonly debt: ProvenancedRate;
@@ -1101,6 +1108,38 @@ interface CompositionLegs {
  * second borrow, a rate that did not resolve — returns null and takes the whole family with
  * it, rather than publishing a partial composition that reads as a complete one.
  */
+/**
+ * Does the borrowed value come BACK as collateral?
+ *
+ * This is the question that decides which net-APY formula the document is entitled to, and the
+ * document itself answers it: walk forward from the borrow along the graph's edges and see
+ * whether any `lend` is reachable. The loop's borrow feeds unwrap → stake → wrap → supply, so
+ * it does; the carry's borrow is terminal, so it does not.
+ *
+ * Reachability rather than "is there a lend anywhere": a document could supply collateral, then
+ * borrow, and stop — the lend that PRECEDES the borrow is the collateral being borrowed
+ * against, not the borrowed value coming back. Only what the borrow flows INTO can recycle it.
+ */
+function borrowIsRecycled(graph: StrategyGraph, borrowBlockId: string): boolean {
+  const typeById = new Map(graph.blocks.map((b) => [b.id, b.type]));
+  const outgoing = new Map<string, string[]>();
+  for (const edge of graph.edges) {
+    const existing = outgoing.get(edge.source);
+    if (existing === undefined) outgoing.set(edge.source, [edge.target]);
+    else existing.push(edge.target);
+  }
+  const seen = new Set<string>([borrowBlockId]);
+  const frontier = [...(outgoing.get(borrowBlockId) ?? [])];
+  while (frontier.length > 0) {
+    const id = frontier.pop()!;
+    if (seen.has(id)) continue;
+    seen.add(id);
+    if (typeById.get(id) === "lend") return true;
+    frontier.push(...(outgoing.get(id) ?? []));
+  }
+  return false;
+}
+
 function compositionLegsOf(
   graph: StrategyGraph,
   plan: PlanSuccess,
@@ -1112,6 +1151,7 @@ function compositionLegsOf(
   if (borrowBlocks.length !== 1) return null;
   const bBps = borrowBlocks[0]!.params["allocationBps"];
   if (typeof bBps !== "number") return null;
+  const recycled = borrowIsRecycled(graph, borrowBlocks[0]!.id);
 
   const collateralReserves = new Set(
     plan.flows.filter((f) => f.type === "lend").map((f) => f.reserve!),
@@ -1124,7 +1164,7 @@ function compositionLegsOf(
   const supply = rates[[...collateralReserves][0]!].supplyApy;
   const debt = rates[[...debtReserves][0]!].borrowApy;
   if (supply === null || debt === null) return null;
-  return { bBps, stake: stakingApy, supply, debt };
+  return { bBps, recycled, stake: stakingApy, supply, debt };
 }
 
 /**
@@ -1145,14 +1185,42 @@ function grossApyOf(legs: CompositionLegs): Provenanced<bigint> {
   );
 }
 
+/**
+ * The net run-rate, in the form the DOCUMENT earns rather than the form the flagship earns.
+ *
+ * §5.2's `(1 + b)` collateral term encodes one closed loop iteration: the borrowed asset is
+ * unwrapped, restaked and re-supplied, so `(1 + b)·E` really does earn the collateral rate.
+ * A terminal borrow never redeploys anything — only `E` is supplied — and charging the
+ * leveraged form there credits yield to capital that was never put to work. The gap is exactly
+ * `b·r_coll`; at the carry's ratified 6000 bps default against this pin's collateral rate that
+ * is over a percentage point of invented return, on the panel AND on the execution receipt.
+ *
+ * The retained-cash reading is STATED in the note rather than left for the reader to infer: the
+ * document says nothing about what happens to the borrowed USDC, so the figure credits it
+ * nothing, and says so (SPEC §5 — the assumption that reaches the screen is named). A refusal
+ * would be the wrong answer here: every rate resolved, and "this document's run-rate is
+ * unavailable" would be false about a document whose rate is perfectly well defined as written.
+ */
 function netApyOf(legs: CompositionLegs, gross: Provenanced<bigint>): Provenanced<bigint> {
   const bWad = (BigInt(legs.bBps) * WAD) / BigInt(FULL_ALLOCATION_BPS);
+  const rates = [legs.stake.wad.value, legs.supply.wad.value, legs.debt.wad.value] as const;
+  if (legs.recycled) {
+    return derivedOverWindow(
+      netApyWad(bWad, ...rates),
+      "(1 + b)(1 + r_coll) − b(1 + r_debt) − 1",
+      [entered(legs.bBps), gross, legs.debt.wad],
+      WINDOW_REASON,
+      "§5.2, current-rate run-rate over one iteration; incentives and points excluded by construction",
+    );
+  }
   return derivedOverWindow(
-    netApyWad(bWad, legs.stake.wad.value, legs.supply.wad.value, legs.debt.wad.value),
-    "(1 + b)(1 + r_coll) − b(1 + r_debt) − 1",
+    terminalBorrowNetApyWad(bWad, ...rates),
+    "r_coll − b·r_debt",
     [entered(legs.bBps), gross, legs.debt.wad],
     WINDOW_REASON,
-    "§5.2, current-rate run-rate over one iteration; incentives and points excluded by construction",
+    "current-rate run-rate for a terminal borrow: the borrowed asset is not redeployed by this " +
+      "document, so it is credited no yield and only the supplied collateral earns; incentives " +
+      "and points excluded by construction",
   );
 }
 
@@ -1172,8 +1240,14 @@ function yieldWeights(
   bBps: number,
   rStake: bigint,
   rSupply: bigint,
+  recycled: boolean,
 ): { readonly stake: number; readonly supply: number; readonly borrow: number } {
-  const collateralBps = FULL_ALLOCATION_BPS + bBps;
+  // The collateral EXPOSURE, which is what a weight means here: `(1 + b)·E` when the borrow is
+  // recycled into collateral, and plain `E` when it is not. The three weights sum to
+  // FULL_ALLOCATION_BPS for the loop and to `1e4 − b` for a terminal borrow, and that
+  // difference is the honest one — a carry is not a 1× position in a single asset, it is 1×
+  // collateral against a short of `b` in another reserve.
+  const collateralBps = recycled ? FULL_ALLOCATION_BPS + bBps : FULL_ALLOCATION_BPS;
   const totalCollateralRate = rStake + rSupply;
   const stake =
     totalCollateralRate > 0n && rStake >= 0n && rSupply >= 0n
@@ -1184,7 +1258,12 @@ function yieldWeights(
 
 /** Canonical order: the collateral legs in the order they compound, then the debt leg. */
 function yieldSourcesOf(legs: CompositionLegs): readonly YieldSource[] {
-  const weights = yieldWeights(legs.bBps, legs.stake.wad.value, legs.supply.wad.value);
+  const weights = yieldWeights(
+    legs.bBps,
+    legs.stake.wad.value,
+    legs.supply.wad.value,
+    legs.recycled,
+  );
   return [
     { protocol: "etherfi", type: "stake", rate: legs.stake, weightBps: weights.stake },
     { protocol: "aave-v3", type: "supply", rate: legs.supply, weightBps: weights.supply },

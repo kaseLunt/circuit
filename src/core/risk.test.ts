@@ -33,6 +33,8 @@ import {
 import { PINNED_BLOCK, WINDOW_BLOCK } from "../../tests/helpers/protocol-reads";
 import {
   EXPECTED_BORROW_WEI,
+  FORK_PROVEN_BORROW_BPS,
+  FORK_PROVEN_CARRY_BPS,
   carryGraph,
   chainOf,
   flagshipGraph,
@@ -1320,6 +1322,81 @@ describe("the USDC carry (W09) — an uncorrelated leg through the same engine",
     expect(borrowRate.kind).toBe("apy");
     const rateTrail = provenanceTrailText(borrowRate.wad).join("\n");
     expect(rateTrail).toContain("USDC.strategy.getInterestRateDataBps");
+  });
+
+  /**
+   * Codex W09 round-3 finding 2 — THE CARRY IS NOT A LEVERAGED POSITION, and the composition
+   * used to price it as one.
+   *
+   * §5.2's `(1 + b)(1 + r_coll) − b(1 + r_debt) − 1` encodes a closed LOOP: the borrowed asset
+   * is unwrapped, restaked and re-supplied, so `(1 + b)·E` genuinely earns the collateral rate.
+   * The carry borrows USDC and the document ENDS — only `E` is ever supplied — so the leveraged
+   * form credited yield to capital that was never deployed. The error is exactly `b·r_coll`,
+   * and at the ratified 6000 bps default it does not merely inflate the figure: it FLIPS ITS
+   * SIGN, printing +1.39% for a position whose honest run-rate is negative.
+   *
+   * Both numbers are derived LONGHAND here from the three leg rates, so the test computes the
+   * arithmetic independently rather than re-running the function under test.
+   */
+  it("prices the terminal carry as cash-aware, not leveraged — the sign is the finding", () => {
+    const result = simulate(carryGraph(), snapshot);
+    const [stake, supply, borrow] = result.yieldSources;
+    const rStake = requireValue(stake!.rate.wad, "r_stake");
+    const rSupply = requireValue(supply!.rate.wad, "r_supply");
+    const rDebt = requireValue(borrow!.rate.wad, "r_debt");
+    const b = (BigInt(FORK_PROVEN_CARRY_BPS) * WAD) / 10_000n;
+
+    //   r_coll  = (1 + r_stake)(1 + r_supply) − 1
+    //   net     = r_coll − b·r_debt          ← the borrowed USDC is not redeployed
+    const rColl = ((WAD + rStake) * (WAD + rSupply)) / WAD - WAD;
+    const expected = rColl - (b * rDebt) / WAD;
+    expect(requireValue(result.netApyWad, "net")).toBe(expected);
+    expect(requireValue(result.grossApyWad, "gross")).toBe(rColl);
+
+    // NEGATIVE at this pin: 2.3615% of collateral yield against 60% of a 3.9864% borrow.
+    expect(expected).toBeLessThan(0n);
+
+    // The leveraged form, computed longhand, is what the code used to publish — and the gap
+    // between them is exactly b·r_coll, the yield on capital the carry never supplied.
+    const leveraged = ((WAD + b) * (WAD + rColl)) / WAD - (b * (WAD + rDebt)) / WAD - WAD;
+    expect(leveraged).toBeGreaterThan(0n);
+    expect(leveraged - expected).toBe((b * rColl) / WAD);
+
+    // Exposure weights follow the same fact: collateral is 1×E, not (1 + b)×E.
+    expect(result.yieldSources.map((s) => s.weightBps)).toEqual([9_999, 1, -FORK_PROVEN_CARRY_BPS]);
+
+    // The retained-cash reading is STATED, not silent (SPEC §5).
+    const netTrail = provenanceTrailText(result.netApyWad!).join("\n");
+    expect(netTrail).toContain("r_coll − b·r_debt");
+    expect(netTrail).toContain("not redeployed by this document");
+  });
+
+  /**
+   * …and the LOOP is untouched by that correction. Its borrow flows into a lend, so it keeps
+   * the leveraged form, its pinned weights, and its number — proven by the same longhand.
+   */
+  it("leaves the recycled loop on the leveraged form, weights and number unchanged", () => {
+    const result = simulate(flagshipGraph(), snapshot);
+    const [stake, supply, borrow] = result.yieldSources;
+    const rStake = requireValue(stake!.rate.wad, "r_stake");
+    const rSupply = requireValue(supply!.rate.wad, "r_supply");
+    const rDebt = requireValue(borrow!.rate.wad, "r_debt");
+    const b = (BigInt(FORK_PROVEN_BORROW_BPS) * WAD) / 10_000n;
+
+    const rColl = ((WAD + rStake) * (WAD + rSupply)) / WAD - WAD;
+    const leveraged = ((WAD + b) * (WAD + rColl)) / WAD - (b * (WAD + rDebt)) / WAD - WAD;
+    expect(requireValue(result.netApyWad, "net")).toBe(leveraged);
+    expect(result.yieldSources.map((s) => s.weightBps)).toEqual([
+      16_999,
+      1,
+      -FORK_PROVEN_BORROW_BPS,
+    ]);
+    // The §2.8 sum invariant is the LOOP's, and it still holds: a recycled borrow is a 1×
+    // position in one asset. The carry's weights sum to 1e4 − b instead, which is the honest
+    // shape of 1× collateral against a short in another reserve.
+    expect(result.yieldSources.reduce((a, s) => a + s.weightBps, 0)).toBe(10_000);
+    const netTrail = provenanceTrailText(result.netApyWad!).join("\n");
+    expect(netTrail).toContain("(1 + b)(1 + r_coll) − b(1 + r_debt) − 1");
   });
 
   /**

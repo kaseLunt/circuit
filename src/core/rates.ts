@@ -137,6 +137,36 @@ export function netApyWad(
   return collLeg - debtLeg - one;
 }
 
+/**
+ * Net APY (WAD) of a TERMINAL borrow — a document that borrows and then stops.
+ *
+ *   netAPY = r_coll − b·r_debt
+ *
+ * WHY THIS IS A DIFFERENT FORMULA AND NOT A TUNING OF THE ONE ABOVE. `netApyWad`'s `(1 + b)`
+ * collateral term is the statement that the borrowed value came BACK as collateral — the loop
+ * borrows WETH, unwraps, restakes and re-supplies, so the position really does earn the
+ * collateral rate on `(1 + b)·E`. The carry does not: it borrows USDC and the document ends,
+ * so only `E` is ever supplied and only `E` earns. Applying the leveraged form there credits
+ * yield to capital that was never deployed — the difference is exactly `b·r_coll`, which at the
+ * carry's default is worth more than a percentage point of overstated return.
+ *
+ * WHAT IT ASSUMES ABOUT THE BORROWED ASSET: nothing, and that is the point. The document does
+ * not deploy the USDC, so this credits it no yield. That is a reading of the document rather
+ * than a guess about the holder — and because a reader could still mistake it for a claim, the
+ * caller states the retained-cash reading in the figure's own provenance note (SPEC §5: an
+ * assumption that reaches the screen is named, never silent).
+ */
+export function terminalBorrowNetApyWad(
+  bWad: bigint,
+  rStakeApyWad: bigint,
+  rSupplyApyWad: bigint,
+  rDebtApyWad: bigint,
+): bigint {
+  const one = WAD;
+  const rColl = mulWad(one + rStakeApyWad, one + rSupplyApyWad) - one;
+  return rColl - mulWad(bWad, rDebtApyWad);
+}
+
 // Aave v3.7 accounting math, implemented byte-exactly from the deployed
 // revision's sources (aave-dao/aave-v3-origin; revision evidence in
 // docs/protocol-matrix.md §2):
