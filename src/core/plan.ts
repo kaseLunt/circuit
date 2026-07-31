@@ -871,7 +871,10 @@ export function buildPlan(
           const r = snapshot.reserves[s.reserve];
           const unit = 10n ** BigInt(r.decimals.value);
           collateralBase += (s.amountWei * r.priceBase.value) / unit;
-          collateralInputs.push(s.prov, r.priceBase);
+          // `decimals` is a genuine INPUT the moment the divisor is derived from it, so the
+          // trail names it rather than hiding a 10^n that used to be a literal. Without it a
+          // six-decimal leg could move this figure by 1e12 while its citation looked complete.
+          collateralInputs.push(s.prov, r.priceBase, r.decimals);
         }
         const collateralProv = derived(
           collateralBase,
@@ -886,9 +889,14 @@ export function buildPlan(
         ]);
         const unit = 10n ** BigInt(borrowReserve.decimals.value);
         const borrowWei = (borrowBase * unit) / borrowReserve.priceBase.value;
+        // Same rule on the way back OUT of base currency: this multiplies by the BORROW
+        // reserve's unit, and `borrowProv` is what the canvas renders as the block's output
+        // amount and what execution predicts against — so the 1e6 that makes a USDC figure a
+        // USDC figure is cited, not assumed.
         const borrowProv = derived(borrowWei, "floor(borrowBase × 10^decimals / priceBase)", [
           borrowBaseProv,
           borrowReserve.priceBase,
+          borrowReserve.decimals,
         ]);
         borrowDerivations.set(id, borrowProv);
         predictedOut.set(id, borrowWei);

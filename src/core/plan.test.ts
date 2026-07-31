@@ -118,6 +118,9 @@ describe("buildPlan — flagship 13-step canonical fixture (SPEC §2)", () => {
     expect(trail).toContain("Oracle.getAssetPrice(weETH)");
     expect(trail).toContain("Oracle.getAssetPrice(WETH)");
     expect(trail).toContain("entered by user");
+    // The same two divisor citations the carry demands — uniform, not six-decimal-special.
+    expect(trail).toContain("weETH.getReserveConfigurationData.decimals");
+    expect(trail).toContain("WETH.getReserveConfigurationData.decimals");
   });
 
   it("orders every approval after its producer and binds it to the attributed output", () => {
@@ -892,6 +895,11 @@ describe("buildPlan — the W09 carry (supply weETH, borrow USDC)", () => {
     const trail = provenanceTrailText(borrow.amount.amount).join("\n");
     expect(trail).toContain("Oracle.getAssetPrice(USDC)");
     expect(trail).toContain("Oracle.getAssetPrice(weETH)");
+    // Codex W09 round-3 finding 4: BOTH divisors are cited. This figure divides the collateral
+    // by weETH's 1e18 and multiplies back by USDC's 1e6 — a trail naming neither would leave a
+    // quantity that can move by twelve orders of magnitude looking fully sourced.
+    expect(trail).toContain("USDC.getReserveConfigurationData.decimals");
+    expect(trail).toContain("weETH.getReserveConfigurationData.decimals");
     expect([...observedBlocks(borrow.amount.amount)]).toEqual([PINNED_BLOCK]);
     // Six decimals, so the amount is ~1e10 rather than ~1e22: a wei-scaled USDC figure would
     // be twelve orders too large and would blow through the borrow cap rather than execute.
