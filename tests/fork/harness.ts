@@ -3,7 +3,8 @@
  * via eth_sendTransaction — no private keys anywhere in the repo.
  */
 import type { Address, Hex } from "viem";
-import { ANVIL_URL } from "./anvil";
+import { PINNED_BLOCK } from "../helpers/protocol-reads";
+import { ANVIL_URL, SESSION_UPSTREAM_URL } from "./anvil";
 
 export interface RawLog {
   readonly address: Hex;
@@ -93,6 +94,52 @@ export async function rpcWithRetry<T>(
  */
 export function record(line: string): void {
   process.stdout.write(`${line}\n`);
+}
+
+/**
+ * The shared pristine upstream's invariant, checked from a SUITE.
+ *
+ * `tests/fork/global-setup.ts` boots that upstream and makes the same check at boot and at
+ * teardown; this is the per-suite bracket around it, and it earns its place twice over. It
+ * LOCALISES a violation — global teardown can only say "someone mined", while a suite's own
+ * before/after pair names which one — and it turns the upstream's absence into a sentence
+ * instead of a connection-refused stack, which is the failure a `--config` invocation that
+ * forgot the rig would otherwise get.
+ *
+ * Not a mining check on the suite's own session forks: those are children, they mine freely,
+ * and that is what they are for. This is about the thing they all fork FROM.
+ */
+export async function assertSharedUpstreamPristine(when: string): Promise<void> {
+  let head: bigint;
+  try {
+    head = BigInt(
+      await (async () => {
+        const res = await fetch(SESSION_UPSTREAM_URL, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "eth_blockNumber", params: [] }),
+        });
+        const body = (await res.json()) as { result?: string };
+        if (typeof body.result !== "string") throw new Error("no block number in the response");
+        return body.result;
+      })(),
+    );
+  } catch (error) {
+    throw new Error(
+      `the shared pristine session upstream at ${SESSION_UPSTREAM_URL} is not answering ` +
+        `(${when}). tests/fork/global-setup.ts boots it once per vitest invocation — including ` +
+        "single-file runs — so this usually means FORK_RPC_URL was unset or its boot failed. " +
+        `Cause: ${String(error)}`,
+    );
+  }
+  if (head !== PINNED_BLOCK) {
+    throw new Error(
+      `the shared pristine session upstream at ${SESSION_UPSTREAM_URL} has head ${head}, not ` +
+        `the pin ${PINNED_BLOCK} (${when}) — something mined on it. A moved head re-arms the ` +
+        "anvil historical-state wedge, which presents as silent unresponsiveness rather than " +
+        "as an error; see tests/fork/anvil.ts.",
+    );
+  }
 }
 
 export const hexQuantity = (v: bigint): Hex => `0x${v.toString(16)}` as Hex;
