@@ -514,7 +514,7 @@ const MINT_QUALIFICATIONS = {
   // The recycled fraction rides the note, so the qualification names the shape the document
   // actually has (the flagship recycles all of its borrow — 100.00%).
   netComposition:
-    "§5.2, current-rate run-rate over one iteration; incentives and points excluded by construction; 100.00% of the borrowed value is routed back into collateral by this document, and the retained remainder is credited no yield because the document does not deploy it",
+    "§5.2, current-rate run-rate over one iteration; incentives and points excluded by construction; of the borrowed value this document supplies 100.00% as collateral and leaves 0.00% staked, and the cash residual is credited no yield because the document does not deploy it",
   windowLicence:
     "cross-block window: an instantaneous exchange rate is not an APR (SPEC §5.1); the window's endpoints are two reads at two blocks",
 } as const;
@@ -669,7 +669,7 @@ describe("the §5.2 yield composition (design §2.7, §2.8)", () => {
     expect(requireValue(result.grossApyWad, "gross")).toBe(gross);
     expect(requireValue(result.netApyWad, "net")).toBe(
       // q = WAD: the flagship recycles its whole borrow into collateral.
-      netApyWad(WAD, (7_000n * WAD) / 10_000n, stake, supply, debt),
+      netApyWad(WAD, 0n, (7_000n * WAD) / 10_000n, stake, supply, debt),
     );
   });
 
@@ -1370,8 +1370,8 @@ describe("the USDC carry (W09) — an uncorrelated leg through the same engine",
 
     // The retained-cash reading is STATED, not silent (SPEC §5).
     const netTrail = provenanceTrailText(result.netApyWad!).join("\n");
-    expect(netTrail).toContain("(1 + q·b)(1 + r_coll) + (1 − q)·b − b(1 + r_debt) − 1");
-    expect(netTrail).toContain("0.00% of the borrowed value is routed back into collateral");
+    expect(netTrail).toContain("(1 + q_s·b)(1 + r_coll) + q_k·b(1 + r_stake) + q_c·b − b(1 + r_debt) − 1");
+    expect(netTrail).toContain("supplies 0.00% as collateral and leaves 0.00% staked");
     expect(netTrail).toContain("credited no yield");
   });
 
@@ -1400,8 +1400,8 @@ describe("the USDC carry (W09) — an uncorrelated leg through the same engine",
     // shape of 1× collateral against a short in another reserve.
     expect(result.yieldSources.reduce((a, s) => a + s.weightBps, 0)).toBe(10_000);
     const netTrail = provenanceTrailText(result.netApyWad!).join("\n");
-    expect(netTrail).toContain("(1 + q·b)(1 + r_coll) + (1 − q)·b − b(1 + r_debt) − 1");
-    expect(netTrail).toContain("100.00% of the borrowed value is routed back into collateral");
+    expect(netTrail).toContain("(1 + q_s·b)(1 + r_coll) + q_k·b(1 + r_stake) + q_c·b − b(1 + r_debt) − 1");
+    expect(netTrail).toContain("supplies 100.00% as collateral and leaves 0.00% staked");
   });
 
   /**
@@ -1430,16 +1430,31 @@ describe("the USDC carry (W09) — an uncorrelated leg through the same engine",
       };
     }
 
-    const longhand = (r: ReturnType<typeof simulate>, qWad: bigint, bBps: number): bigint => {
+    /**
+     * The general closed form, written out independently of the function under test:
+     *
+     *   (1 + q_s·b)(1 + r_coll) + q_k·b(1 + r_stake) + q_c·b − b(1 + r_debt) − 1
+     */
+    const longhand = (
+      r: ReturnType<typeof simulate>,
+      qSuppliedWad: bigint,
+      bBps: number,
+      qStakedWad = 0n,
+    ): bigint => {
       const rStake = requireValue(r.yieldSources[0]!.rate.wad, "r_stake");
       const rSupply = requireValue(r.yieldSources[1]!.rate.wad, "r_supply");
       const rDebt = requireValue(r.yieldSources[2]!.rate.wad, "r_debt");
       const rColl = ((WAD + rStake) * (WAD + rSupply)) / WAD - WAD;
       const b = (BigInt(bBps) * WAD) / 10_000n;
-      const qb = (qWad * b) / WAD;
-      // (1 + q·b)(1 + r_coll) + (1 − q)·b − b(1 + r_debt) − 1
+      const supplied = (qSuppliedWad * b) / WAD;
+      const staked = (qStakedWad * b) / WAD;
+      const cash = b - supplied - staked;
       return (
-        ((WAD + qb) * (WAD + rColl)) / WAD + (b - qb) - (b * (WAD + rDebt)) / WAD - WAD
+        ((WAD + supplied) * (WAD + rColl)) / WAD +
+        (staked * (WAD + rStake)) / WAD +
+        cash -
+        (b * (WAD + rDebt)) / WAD -
+        WAD
       );
     };
 
@@ -1462,7 +1477,7 @@ describe("the USDC carry (W09) — an uncorrelated leg through the same engine",
       expect(weights[0]! + weights[1]!).toBe(10_000 + FORK_PROVEN_BORROW_BPS / 2);
       expect(weights[2]).toBe(-FORK_PROVEN_BORROW_BPS);
       expect(provenanceTrailText(result.netApyWad!).join("\n")).toContain(
-        "50.00% of the borrowed value is routed back into collateral",
+        "supplies 50.00% as collateral and leaves 0.00% staked",
       );
     });
 
@@ -1503,6 +1518,46 @@ describe("the USDC carry (W09) — an uncorrelated leg through the same engine",
       const result = simulate(graph, snapshot);
       expect(requireValue(result.netApyWad, "net")).toBe(
         longhand(result, (6_000n * WAD) / 10_000n, FORK_PROVEN_BORROW_BPS),
+      );
+    });
+
+    /**
+     * Codex W09 round-5 finding 1 — A STAKED SINK IS NOT CASH.
+     *
+     * `borrow → unwrap → stake` is plan-valid and editor-constructible: drop the flagship's
+     * trailing wrap and supply and the borrowed WETH becomes eETH, which accrues staking yield
+     * whether or not anyone hands it to Aave. Classifying that as "not recycled" published a
+     * run-rate missing `b·r_stake` — about 1.65 percentage points at this fixture — while the
+     * note claimed the value was undeployed. The sink table prices it at `r_stake`.
+     */
+    it("prices a borrow that ends in a staked position at the staking rate, not at zero", () => {
+      const base = flagshipGraph();
+      const kept = new Set(["in", "stake1", "wrap1", "supply1", "borrow", "unwrap", "stake2"]);
+      const graph = {
+        blocks: base.blocks.filter((b) => kept.has(b.id)),
+        edges: base.edges.filter((e) => kept.has(e.source) && kept.has(e.target)),
+      };
+      const result = simulate(graph, snapshot);
+
+      // q_s = 0, q_k = 1: none supplied, all of it staked.
+      const net = requireValue(result.netApyWad, "net");
+      expect(net).toBe(longhand(result, 0n, FORK_PROVEN_BORROW_BPS, WAD));
+
+      // …and that is strictly better than treating the eETH as idle cash, by exactly b·r_stake.
+      const asCash = longhand(result, 0n, FORK_PROVEN_BORROW_BPS, 0n);
+      const rStake = requireValue(result.yieldSources[0]!.rate.wad, "r_stake");
+      const b = (BigInt(FORK_PROVEN_BORROW_BPS) * WAD) / 10_000n;
+      expect(net - asCash).toBe((b * rStake) / WAD);
+      // Worth more than a percentage point and a half of reported return.
+      expect(net - asCash).toBeGreaterThan(WAD / 100n);
+
+      // The staked borrow rides the STAKE leg alone — it earns no supply rate, because nothing
+      // was supplied.
+      const weights = result.yieldSources.map((s) => s.weightBps);
+      expect(weights[2]).toBe(-FORK_PROVEN_BORROW_BPS);
+      expect(weights[0]! + weights[1]!).toBe(10_000 + FORK_PROVEN_BORROW_BPS);
+      expect(provenanceTrailText(result.netApyWad!).join("\n")).toContain(
+        "supplies 0.00% as collateral and leaves 100.00% staked",
       );
     });
 

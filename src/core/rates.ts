@@ -116,30 +116,41 @@ export function variableBorrowAprRay(strategy: RateStrategyBps, utilizationWad: 
 
 /**
  * Net APY (WAD) of one iteration, normalized to initial equity (SPEC §5.2). All rates are WAD
- * APYs; `bWad` is the borrow allocation as a fraction of collateral value at open, and
- * `recycledWad` is the fraction `q` of the BORROWED value that comes back as collateral.
+ * APYs; `bWad` is the borrow allocation as a fraction of collateral value at open.
  *
  *   r_coll = (1 + r_stake)(1 + r_supply) − 1        (compounds on collateral)
- *   netAPY = (1 + q·b)(1 + r_coll) + (1 − q)·b − b(1 + r_debt) − 1
- *          = (1 + q·b)·r_coll − b·r_debt
+ *   netAPY = (1 + q_s·b)(1 + r_coll) + q_k·b(1 + r_stake) + q_c·b − b(1 + r_debt) − 1
+ *          = r_coll + q_s·b·r_coll + q_k·b·r_stake − b·r_debt
  *
- * WHY `q` IS A PARAMETER AND NOT AN ASSUMPTION. The collateral term is a statement about how
- * much capital is actually SUPPLIED. The flagship loop unwraps its borrowed WETH, restakes and
- * re-supplies all of it, so `(1 + b)·E` genuinely earns — that is `q = 1`. The carry borrows
- * USDC and the document ends, so only `E` earns — `q = 0`. Edge allocations are user-editable,
- * so a document can route ANY fraction back: at `q = 0.5` only half the borrowed value is
- * supplied, and crediting the collateral rate on all of it invents yield on capital that was
- * never deployed. Both older forms are exact special cases of this one — the second and third
- * terms cancel at `q = 1` (nothing retained) and at `q = 0` (`b` retained, `b` charged), so the
- * pinned loop and carry numbers are byte-unchanged.
+ * THE BORROWED VALUE HAS THREE POSSIBLE FATES, and they earn three different rates. `q_s` is
+ * the fraction re-SUPPLIED as Aave collateral (earning the full `r_coll`), `q_k` the fraction
+ * left in a STAKED position — eETH or weETH, which accrue staking yield whether or not anyone
+ * supplies them (earning `r_stake`), and `q_c` the residual genuinely held as CASH: the
+ * borrowed token itself, or ETH after an unwrap (earning nothing). They sum to 1.
  *
- * The retained fraction `(1 − q)·b` is credited NO yield: the document does not deploy it, and
- * this function does not guess what a holder might do with it.
+ * WHY THREE AND NOT TWO. A two-way split — "recycled or not" — prices a document ending
+ * `borrow → unwrap → stake` as if the borrowed value were idle, when it is sitting in eETH
+ * earning the staking rate. That omits `b·r_stake`, which at the flagship's own fixture is
+ * about 1.65 percentage points of real return reported as zero. The fix is not a tolerance:
+ * it is naming the third fate.
+ *
+ * WHY THESE RATES NEED NO NEW READS. `r_stake`, `r_supply` and `r_debt` are already the three
+ * legs `compositionLegsOf` requires before any composition is published, so every sink below
+ * prices off a leg that must already have resolved. A sink whose rate was NOT in that set would
+ * have to refuse instead — which is what an unrecognized block kind does.
+ *
+ * The cash fraction is credited NO yield: the document does not deploy it, and this function
+ * does not guess what a holder might do with it.
+ *
+ * `q_s = 1` and `q_c = 1` reduce term-for-term to the leveraged-loop and terminal-carry forms
+ * that preceded this one, so both pinned numbers are byte-unchanged: `mulWad(WAD, b) = b`
+ * exactly, `mulWad(0, ·) = 0`, and `mulWad(b, WAD + r) = b + mulWad(b, r)` exactly.
  *
  * Incentives/points are excluded by construction (not a parameter).
  */
 export function netApyWad(
-  recycledWad: bigint,
+  suppliedWad: bigint,
+  stakedWad: bigint,
   bWad: bigint,
   rStakeApyWad: bigint,
   rSupplyApyWad: bigint,
@@ -147,11 +158,13 @@ export function netApyWad(
 ): bigint {
   const one = WAD;
   const rColl = mulWad(one + rStakeApyWad, one + rSupplyApyWad) - one;
-  const recycled = mulWad(recycledWad, bWad);
-  const collLeg = mulWad(one + recycled, one + rColl);
-  const retained = bWad - recycled;
+  const supplied = mulWad(suppliedWad, bWad);
+  const staked = mulWad(stakedWad, bWad);
+  const cash = bWad - supplied - staked;
+  const collLeg = mulWad(one + supplied, one + rColl);
+  const stakeLeg = mulWad(staked, one + rStakeApyWad);
   const debtLeg = mulWad(bWad, one + rDebtApyWad);
-  return collLeg + retained - debtLeg - one;
+  return collLeg + stakeLeg + cash - debtLeg - one;
 }
 
 // Aave v3.7 accounting math, implemented byte-exactly from the deployed

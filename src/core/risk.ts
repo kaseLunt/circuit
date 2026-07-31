@@ -1090,11 +1090,11 @@ function stakingAprOf(snapshot: ChainSnapshot): ProvenancedRate | null {
 interface CompositionLegs {
   readonly bBps: number;
   /**
-   * The FRACTION of the borrowed value that returns as collateral, in WAD — `q`. Read off the
-   * document's own edge allocations, never off which template it came from. 1 for the recycled
-   * loop, 0 for a terminal carry, and anything between for a partially routed document.
+   * WHERE the borrowed value comes to rest, as fractions in WAD — supplied as collateral and
+   * left in a staked position; cash is the residual. Read off the document's own edge
+   * allocations, never off which template it came from.
    */
-  readonly recycledWad: bigint;
+  readonly sinks: { readonly suppliedWad: bigint; readonly stakedWad: bigint };
   readonly stake: ProvenancedRate;
   readonly supply: ProvenancedRate;
   readonly debt: ProvenancedRate;
@@ -1107,33 +1107,76 @@ interface CompositionLegs {
  * second borrow, a rate that did not resolve — returns null and takes the whole family with
  * it, rather than publishing a partial composition that reads as a complete one.
  */
+/** Where borrowed value can come to rest, and what each resting place earns. */
+type SinkKind = "cash" | "staked" | "supplied";
+
 /**
- * WHAT FRACTION of the borrowed value comes back as collateral — `q`, in WAD.
+ * THE SINK ENUMERATION — every terminal state a borrow's value can reach in v1, classified.
  *
- * Not a boolean. Edge allocations are user-editable (`setEdgeAllocationBps`, and any shared
- * document can carry them), and `buildPlan` applies them to the real amounts: an edge at
- * 5000 bps routes half its producer's output onward. A yes/no reading of "is a lend reachable"
- * therefore credited a 1%-recycled path the full leverage term — yield on capital that was
- * never supplied, and at the wrong `b` enough to flip the sign of the published number.
+ * `plan.ts` compiles exactly six block kinds, so the reachable set from a borrow is closed and
+ * small. Each row is a place value can SIT, and the rate it earns while sitting there:
+ *
+ *   borrow  → the borrowed token itself (WETH, USDC)  → CASH,     earns nothing
+ *   unwrap  → ETH                                      → CASH,     earns nothing
+ *   stake   → eETH (rebasing)                          → STAKED,   earns r_stake
+ *   wrap    → weETH (value-accruing wrapper over eETH) → STAKED,   earns r_stake
+ *   lend    → aToken collateral                        → SUPPLIED, earns r_coll
+ *   input   → unreachable downstream of a borrow (inputs have no incoming edge)
+ *
+ * `wrap` sits with `stake` deliberately: wrapping eETH into weETH changes the token, not the
+ * position — the wrapper's exchange rate accrues the same staking yield. Only handing it to
+ * Aave adds the supply leg on top.
+ *
+ * Anything NOT in this table returns null and refuses the whole composition. `swap` and
+ * `auto-wrap` exist in the block-type union but have no `plan.ts` arm in v1, and a sink whose
+ * rate is not already one of the three required legs must not be priced by guessing.
+ */
+function sinkKindOf(blockType: string | undefined): SinkKind | null {
+  switch (blockType) {
+    case "borrow":
+    case "unwrap":
+      return "cash";
+    case "stake":
+    case "wrap":
+      return "staked";
+    case "lend":
+      return "supplied";
+    default:
+      return null;
+  }
+}
+
+/**
+ * WHAT FRACTIONS of the borrowed value reach each sink — `q_s` and `q_k`, in WAD. The cash
+ * residual is whatever is left, so it is never computed here and never guessed.
+ *
+ * Not a boolean, and not a single fraction. Edge allocations are user-editable
+ * (`setEdgeAllocationBps`, and any shared document can carry them) and `buildPlan` applies them
+ * to the real amounts, so a document can route any fraction anywhere. Two earlier readings both
+ * misprice real documents: "is a lend reachable" gives a 1%-recycled path the full leverage
+ * term, and "recycled or not" reports `borrow → unwrap → stake` as idle cash when it is eETH
+ * earning the staking rate.
  *
  * THE WALK IS THE PLAN'S OWN ROUTING RULE. `validateGraph` gives every non-input block exactly
- * one incoming edge, so each block downstream of the borrow has a UNIQUE path from it, and the
+ * one incoming edge, so each block downstream of the borrow has a UNIQUE path from it and the
  * fraction arriving is the product of the allocations along that path — precisely the
- * `floor(producerOutput × allocationBps / 1e4)` chain `plan.ts` walks. `q` is the sum over the
- * lends the borrow feeds.
+ * `floor(producerOutput × allocationBps / 1e4)` chain `plan.ts` walks. Value RESTS wherever it
+ * is not routed onward: a block whose outgoing allocations sum to less than 100% retains the
+ * remainder in its own output asset, which is why the retention is measured per block rather
+ * than only at leaves.
  *
- * Reachability, not "is there a lend anywhere": the lend that PRECEDES the borrow is the
- * collateral being borrowed against, not the borrowed value coming back.
- *
- * ILL-DEFINED SHAPES REFUSE rather than guess (returns null, which takes the whole composition
- * into its unavailable state):
- *  - a reachable lend that itself has outgoing edges — the supplied value flows on, and whether
- *    it is still collateral is not something this walk can answer;
+ * ILL-DEFINED SHAPES REFUSE (null → the composition renders its unavailable state):
+ *  - a block kind the enumeration above does not cover;
+ *  - a supplied position that flows onward, where "is this still collateral" is not something
+ *    an allocation walk can answer;
  *  - a block reachable twice, which the one-incoming-edge rule forbids and which would double
  *    count if it ever became reachable;
- *  - a fraction outside [0, 1].
+ *  - allocations out of one block exceeding 100%, or fractions escaping [0, 1].
  */
-function recycledFractionOf(graph: StrategyGraph, borrowBlockId: string): bigint | null {
+function borrowSinksOf(
+  graph: StrategyGraph,
+  borrowBlockId: string,
+): { readonly suppliedWad: bigint; readonly stakedWad: bigint } | null {
   const typeById = new Map(graph.blocks.map((b) => [b.id, b.type]));
   const outgoing = new Map<string, Edge[]>();
   for (const edge of graph.edges) {
@@ -1145,23 +1188,32 @@ function recycledFractionOf(graph: StrategyGraph, borrowBlockId: string): bigint
   const frontier: Array<{ readonly id: string; readonly weight: bigint }> = [
     { id: borrowBlockId, weight: WAD },
   ];
-  let recycled = 0n;
+  let suppliedWad = 0n;
+  let stakedWad = 0n;
   while (frontier.length > 0) {
     const { id, weight } = frontier.pop()!;
     if (seen.has(id)) return null;
     seen.add(id);
+    const kind = sinkKindOf(typeById.get(id));
+    if (kind === null) return null;
     const edges = outgoing.get(id) ?? [];
-    if (id !== borrowBlockId && typeById.get(id) === "lend") {
+    if (kind === "supplied") {
       if (edges.length > 0) return null;
-      recycled += weight;
+      suppliedWad += weight;
       continue;
     }
+    let routedWad = 0n;
     for (const edge of edges) {
       const share = (BigInt(edge.allocationBps) * WAD) / BigInt(FULL_ALLOCATION_BPS);
+      routedWad += share;
       frontier.push({ id: edge.target, weight: mulWad(weight, share) });
     }
+    if (routedWad > WAD) return null;
+    // Whatever this block does not route onward rests HERE, in this block's own output asset.
+    if (kind === "staked") stakedWad += weight - mulWad(weight, routedWad);
   }
-  return recycled < 0n || recycled > WAD ? null : recycled;
+  if (suppliedWad < 0n || stakedWad < 0n || suppliedWad + stakedWad > WAD) return null;
+  return { suppliedWad, stakedWad };
 }
 
 function compositionLegsOf(
@@ -1175,8 +1227,8 @@ function compositionLegsOf(
   if (borrowBlocks.length !== 1) return null;
   const bBps = borrowBlocks[0]!.params["allocationBps"];
   if (typeof bBps !== "number") return null;
-  const recycledWad = recycledFractionOf(graph, borrowBlocks[0]!.id);
-  if (recycledWad === null) return null;
+  const sinks = borrowSinksOf(graph, borrowBlocks[0]!.id);
+  if (sinks === null) return null;
 
   const collateralReserves = new Set(
     plan.flows.filter((f) => f.type === "lend").map((f) => f.reserve!),
@@ -1189,7 +1241,7 @@ function compositionLegsOf(
   const supply = rates[[...collateralReserves][0]!].supplyApy;
   const debt = rates[[...debtReserves][0]!].borrowApy;
   if (supply === null || debt === null) return null;
-  return { bBps, recycledWad, stake: stakingApy, supply, debt };
+  return { bBps, sinks, stake: stakingApy, supply, debt };
 }
 
 /**
@@ -1230,19 +1282,20 @@ function netApyOf(legs: CompositionLegs, gross: Provenanced<bigint>): Provenance
   const bWad = (BigInt(legs.bBps) * WAD) / BigInt(FULL_ALLOCATION_BPS);
   return derivedOverWindow(
     netApyWad(
-      legs.recycledWad,
+      legs.sinks.suppliedWad,
+      legs.sinks.stakedWad,
       bWad,
       legs.stake.wad.value,
       legs.supply.wad.value,
       legs.debt.wad.value,
     ),
-    "(1 + q·b)(1 + r_coll) + (1 − q)·b − b(1 + r_debt) − 1",
+    "(1 + q_s·b)(1 + r_coll) + q_k·b(1 + r_stake) + q_c·b − b(1 + r_debt) − 1",
     [entered(legs.bBps), gross, legs.debt.wad],
     WINDOW_REASON,
     "§5.2, current-rate run-rate over one iteration; incentives and points excluded by " +
-      `construction; ${formatWadAsPercent(legs.recycledWad)} of the borrowed value is routed ` +
-      "back into collateral by this document, and the retained remainder is credited no yield " +
-      "because the document does not deploy it",
+      `construction; of the borrowed value this document supplies ${formatWadAsPercent(legs.sinks.suppliedWad)} ` +
+      `as collateral and leaves ${formatWadAsPercent(legs.sinks.stakedWad)} staked, and the cash ` +
+      "residual is credited no yield because the document does not deploy it",
   );
 }
 
@@ -1262,20 +1315,24 @@ function yieldWeights(
   bBps: number,
   rStake: bigint,
   rSupply: bigint,
-  recycledWad: bigint,
+  sinks: { readonly suppliedWad: bigint; readonly stakedWad: bigint },
 ): { readonly stake: number; readonly supply: number; readonly borrow: number } {
   // The collateral EXPOSURE, which is what a weight means here: `(1 + q·b)·E`, where `q` is the
   // fraction of the borrow the document actually routes back into collateral. The three weights
   // sum to FULL_ALLOCATION_BPS only when `q = 1`; a terminal borrow sums to `1e4 − b`, and a
   // partial one lands between. That spread is the honest one — a carry is not a 1× position in
   // a single asset, it is 1× collateral against a short of `b` in another reserve.
-  const collateralBps = FULL_ALLOCATION_BPS + Number((BigInt(bBps) * recycledWad) / WAD);
+  const collateralBps =
+    FULL_ALLOCATION_BPS + Number((BigInt(bBps) * sinks.suppliedWad) / WAD);
+  // Borrowed value left STAKED earns the staking leg and nothing else, so it lands on that
+  // leg alone rather than joining the rate-proportional split of the supplied collateral.
+  const stakedOnlyBps = Number((BigInt(bBps) * sinks.stakedWad) / WAD);
   const totalCollateralRate = rStake + rSupply;
   const stake =
     totalCollateralRate > 0n && rStake >= 0n && rSupply >= 0n
       ? Number((BigInt(collateralBps) * rStake) / totalCollateralRate)
       : Math.ceil(collateralBps / 2);
-  return { stake, supply: collateralBps - stake, borrow: -bBps };
+  return { stake: stake + stakedOnlyBps, supply: collateralBps - stake, borrow: -bBps };
 }
 
 /** Canonical order: the collateral legs in the order they compound, then the debt leg. */
@@ -1284,7 +1341,7 @@ function yieldSourcesOf(legs: CompositionLegs): readonly YieldSource[] {
     legs.bBps,
     legs.stake.wad.value,
     legs.supply.wad.value,
-    legs.recycledWad,
+    legs.sinks,
   );
   return [
     { protocol: "etherfi", type: "stake", rate: legs.stake, weightBps: weights.stake },
